@@ -3,7 +3,7 @@ tag: stepbystep_random50
 seed: 0
 
 device : "cuda"
-bf16: True
+bf16: False
 epochs: 1
 
 data:

@@ -1,0 +1,27 @@
+[project]
+name = "compositional-capabilities"
+version = "0.1.0"
+requires-python = "==3.10.*"
+dependencies = [
+    "torch==2.0.0",
+    "torchvision==0.15.1",
+    "torchaudio==2.0.1",
+    "numba==0.57.0",
+    "omegaconf==2.3.0",
+    "numpy==1.24.4",
+    "tqdm==4.67.3",
+    "matplotlib==3.10.8",
+    "ipykernel==7.2.0",
+    "ipython==8.14.0",
+    "jupyter==1.0.0",
+]
+
+[tool.uv]
+index = [
+    { name = "pytorch-cu118", url = "https://download.pytorch.org/whl/cu118", explicit = true },
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
+torchaudio = { index = "pytorch-cu118" }
