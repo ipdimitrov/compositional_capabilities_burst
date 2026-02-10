@@ -6,9 +6,34 @@ Code for our ICML 24 paper:  [Compositional Capabilities of Autoregressive Trans
 
 ## Setup
 
-We use [micromamba](https://mamba.readthedocs.io/en/latest/installation.html) as the package manager. To install the packages run:
+### Option A: uv (recommended)
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) then run:
+
+```bash
+uv sync
 ```
+
+This creates a `.venv` with all pinned dependencies (including CUDA 11.8 PyTorch). Run scripts with:
+
+```bash
+uv run python 01_generate_data.py
+```
+
+Or activate the venv directly:
+
+```bash
+source .venv/bin/activate
+python 01_generate_data.py
+```
+
+For notebooks in VS Code / Cursor, select the interpreter at `.venv/bin/python` or the **Python (composition-uv)** kernel.
+
+### Option B: micromamba
+
+Install [micromamba](https://mamba.readthedocs.io/en/latest/installation.html) then run:
+
+```bash
 micromamba create -y -f env.yml
 micromamba activate composition
 ```
