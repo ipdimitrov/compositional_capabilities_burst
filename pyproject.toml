@@ -25,3 +25,8 @@ index = [
 torch = { index = "pytorch-cu118" }
 torchvision = { index = "pytorch-cu118" }
 torchaudio = { index = "pytorch-cu118" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
