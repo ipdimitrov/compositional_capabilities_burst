@@ -55,7 +55,7 @@ BASE_CFG = {
 
     "batch_size": 512,
     "total_steps": 3_000,
-    "p_target": 0.05,
+    "p_target": 0.10,
     "undo_steps": 5_000,
     "eval_every": 200,
     "unlearn_threshold": 0.25,
