@@ -42,13 +42,21 @@ def build_function_pool(cfg: BurstExperimentConfig):
     return syn, composed_functions, info
 
 
-def tag_tasks(info, composed_functions, n_target: int = 1):
+def tag_tasks(info, composed_functions, n_target: int = 10, exclusive_fn_idx: int = None):
     train_ids = [tuple(t) for t in info["train_id"]]
-    target_ids = train_ids[:n_target]
-    background_ids = train_ids[n_target:]
     fn_lookup = {}
     for fn_tuple in composed_functions["train"]:
         fn_lookup[tuple(fn_tuple[0])] = fn_tuple
+
+    if exclusive_fn_idx is not None:
+        target_ids = [tid for tid in train_ids if exclusive_fn_idx in tid]
+        background_ids = [tid for tid in train_ids if exclusive_fn_idx not in tid]
+        if n_target and len(target_ids) > n_target:
+            target_ids = target_ids[:n_target]
+    else:
+        target_ids = train_ids[:n_target]
+        background_ids = train_ids[n_target:]
+
     return target_ids, background_ids, fn_lookup
 
 

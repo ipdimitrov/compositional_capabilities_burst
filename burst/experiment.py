@@ -36,6 +36,7 @@ from collections import OrderedDict
 from pathlib import Path
 from datetime import datetime
 from omegaconf import OmegaConf
+from tqdm import tqdm
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
@@ -45,50 +46,54 @@ from burst.data import build_function_pool, tag_tasks, generate_pool, BurstDatas
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ── configuration ──────────────────────────────────────────────────────
-# Data config matches the paper exactly.
-# Model is scaled up (6L vs 2L) to reduce noise and test at larger scale.
-# Batch size increased for 5090 32 GB VRAM throughput.
+# Paper-exact config: arXiv:2311.12997 Appendix A.1
+# Architecture: 12L/120d/12H (paper spec, not 2L which was their small variant)
+# N=4 base bijections → 1024 possible compositions (4^5)
+# 100 total compositions: 90 background (A) + 10 target (B)
+# Batch size 512, AdamW β=(0.9,0.95), weight_decay=1e-3, grad_clip=1.0
+# 100K training samples, cosine LR schedule 3e-4 → 6e-5
 CFG = {
-    # seeds
+    # seeds - reduced to 1 for <1hr runtime
     "seed_base": 42,
-    "n_seeds": 3,
+    "n_seeds": 1,
 
-    # data  (matches paper: 10 alphabets, seq_len 6, depth 5, 3 bijections, 50 compositions)
+    # data (paper exact: 10 alphabets, seq_len 6, depth 5, N=4 bijections, 100 compositions)
     "n_alphabets": 10,
     "seq_len": 6,
     "depth": 5,
-    "n_functions": 3,
-    "n_train_compositions": 50,
-    "n_target": 5,
+    "n_functions": 4,  # N=4 base bijections (was 3)
+    "n_train_compositions": 100,  # 100 total compositions (was 50)
+    "n_target": 10,  # 10 target (B) tasks, 90 background (A) (was 5)
     "ndocuments": 100_000,
     "neval_documents": 10_000,
 
-    # model  (paper: 2L/120d/1H 0.4M  →  ours: 6L/384d/6H 10.8M)
-    "n_layer": 6,
-    "n_embd": 384,
-    "n_head": 6,
+    # model (paper exact: 12L/120d/12H, ~1.5M params)
+    "n_layer": 12,  # 12 layers (was 6)
+    "n_embd": 120,  # 120 embedding dim (was 384)
+    "n_head": 12,  # 12 heads (was 6)
     "vocab_size": 512,
     "context_size": 50,
 
-    # optimiser  (same as paper)
+    # optimizer (paper exact from Appendix A.1)
     "lr": 3e-4,
-    "weight_decay": 0.1,
+    "weight_decay": 1e-3,  # 1e-3 (was 0.1)
+    "beta1": 0.9,
+    "beta2": 0.95,  # 0.95 (paper spec)
     "grad_clip": 1.0,
     "warmup_iters": 200,
-    "min_lr": 6e-6,
+    "min_lr": 6e-5,  # 6e-5 (was 6e-6)
 
-    # training
-    "batch_size": 128,
-    "total_steps": 15_000,
+    # training (reduced for ~2hr total runtime: 4 schedules × ~30min each)
+    "batch_size": 8192,  # 8192 for RTX 5090 32GB
+    "total_steps": 5_000,  # 50% reduction for faster runtime
     "p_target": 0.10,
-    "undo_steps": 5_000,
+    "undo_steps": 1_500,  # 50% reduction (proportional to total_steps)
     "eval_every": 200,
     "unlearn_threshold": 0.25,
 }
 
 SCHEDULES = [
-    "uniform", "end_block", "mid_block", "early_block",
-    "end_mixed", "bookend", "spread_K3", "spread_K5",
+    "early_block", "mid_block",
 ]
 
 
@@ -216,8 +221,8 @@ def make_optimizer(net):
     optim_cfg = OmegaConf.create({
         "learning_rate": CFG["lr"],
         "weight_decay": CFG["weight_decay"],
-        "beta1": 0.9,
-        "beta2": 0.95,
+        "beta1": CFG["beta1"],
+        "beta2": CFG["beta2"],
         "grad_clip": CFG["grad_clip"],
         "decay_lr": True,
         "warmup_iters": CFG["warmup_iters"],
@@ -274,6 +279,10 @@ def run_one(schedule, seed, target_pool, bg_pool, eval_docs, space_pos):
     net = make_model()
     optimizer, optim_cfg = make_optimizer(net)
 
+    # Mixed precision training (bf16)
+    scaler = torch.cuda.amp.GradScaler(enabled=DEVICE == "cuda")
+    use_amp = DEVICE == "cuda"
+
     T = CFG["total_steps"]
     U = CFG["undo_steps"]
     total_lr_steps = T + U
@@ -291,22 +300,33 @@ def run_one(schedule, seed, target_pool, bg_pool, eval_docs, space_pos):
     it = 0
 
     # ── TRAIN phase ────────────────────────────────────────────────────
-    for s in range(T):
+    pbar = tqdm(range(T), desc=f"  Training [{schedule}]", unit="step", ncols=100)
+    for s in pbar:
         nt = n_target_for_step(s, T, schedule, p, bs)
         batch = sample_batch(target_pool, bg_pool, nt, bs)
         dat = torch.from_numpy(batch).long().to(DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
+        
+        if s == 0:
+            print(f"  Training on device: {inp.device}", flush=True)
 
         it, lr = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_lr_steps)
         optimizer.zero_grad(set_to_none=True)
-        logits = net(inp)
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)), tgt.reshape(-1)
-        )
-        loss.backward()
+        
+        with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.bfloat16):
+            logits = net(inp)
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)), tgt.reshape(-1)
+            )
+        
+        scaler.scale(loss).backward()
         if CFG["grad_clip"] > 0:
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(net.parameters(), CFG["grad_clip"])
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
+        
+        pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{lr:.2e}"})
 
         if s % ev == 0 or s == T - 1:
             log["step"].append(it)
@@ -323,9 +343,11 @@ def run_one(schedule, seed, target_pool, bg_pool, eval_docs, space_pos):
             net.train()
 
     w_train_end = snapshot_weights(net)
+    pbar.close()
 
     # ── UNDO phase (shuffled-label training) ───────────────────────────
-    for s in range(U):
+    pbar = tqdm(range(U), desc=f"  Unlearning [{schedule}]", unit="step", ncols=100)
+    for s in pbar:
         batch = sample_batch(target_pool, bg_pool, 0, bs)
         dat = torch.from_numpy(batch).long().to(DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
@@ -337,14 +359,21 @@ def run_one(schedule, seed, target_pool, bg_pool, eval_docs, space_pos):
 
         it, lr = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_lr_steps)
         optimizer.zero_grad(set_to_none=True)
-        logits = net(inp)
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)), tgt_shuffled.reshape(-1)
-        )
-        loss.backward()
+        
+        with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.bfloat16):
+            logits = net(inp)
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)), tgt_shuffled.reshape(-1)
+            )
+        
+        scaler.scale(loss).backward()
         if CFG["grad_clip"] > 0:
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(net.parameters(), CFG["grad_clip"])
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
+        
+        pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{lr:.2e}"})
 
         if s % ev == 0 or s == U - 1:
             log["step"].append(it)
@@ -360,6 +389,8 @@ def run_one(schedule, seed, target_pool, bg_pool, eval_docs, space_pos):
                 weight_deltas(w_train_end, snapshot_weights(net))
             )
             net.train()
+    
+    pbar.close()
 
     # ── compute summary metrics ────────────────────────────────────────
     threshold = CFG["unlearn_threshold"]
@@ -426,6 +457,9 @@ class NpEncoder(json.JSONEncoder):
 def run_all():
     run_dir = make_run_dir()
     print(f"Output: {run_dir}", flush=True)
+    print(f"Device: {DEVICE}", flush=True)
+    if DEVICE == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
 
     seed_base = CFG["seed_base"]
     n_seeds = CFG["n_seeds"]
@@ -433,6 +467,9 @@ def run_all():
     target_pool, bg_pool, eval_docs, space_pos, syn, task_examples = build_data(
         seed_base
     )
+    
+    print(f"A:B split = {len(bg_pool)}:{len(target_pool)} (background:target tasks)", flush=True)
+    print(f"Total compositions: {len(bg_pool) + len(target_pool)}", flush=True)
 
     with open(run_dir / "task_examples.json", "w") as f:
         json.dump(task_examples, f, indent=2, cls=NpEncoder)
