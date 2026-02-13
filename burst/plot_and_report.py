@@ -504,10 +504,22 @@ def make_report(run_dir, results, cfg, task_examples, per_run_fnames, groups):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python burst/plot_and_report.py <run_dir>")
-        sys.exit(1)
-
-    run_dir = Path(sys.argv[1])
+        data_dir = Path("data")
+        if not data_dir.exists():
+            print("Error: data/ directory not found")
+            sys.exit(1)
+        
+        burst_dirs = sorted([d for d in data_dir.glob("burst_*") if d.is_dir()])
+        if not burst_dirs:
+            print("Error: No burst_* directories found in data/")
+            print("Usage: python burst/plot_and_report.py <run_dir>")
+            sys.exit(1)
+        
+        run_dir = burst_dirs[-1]
+        print(f"Auto-detected most recent run: {run_dir}")
+    else:
+        run_dir = Path(sys.argv[1])
+    
     results, cfg, task_examples = load_results(run_dir)
     groups = group_by_schedule(results)
 
