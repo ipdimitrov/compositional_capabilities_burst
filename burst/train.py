@@ -28,7 +28,7 @@ def make_model(cfg: BurstExperimentConfig, device: str):
         "n_embd": cfg.net.n_embd,
         "dropout": cfg.net.dropout,
         "bias": cfg.net.bias,
-        "mlp": cfg.net.mlp,
+        "mlp":  cfg.net.mlp,
     })
     net = nanoGPT(net_cfg)
     net.to(device)
@@ -333,4 +333,3 @@ def run_idea3(cfg, seed: int = 0) -> dict:
         "train": train_log,
         "undo": undo_log,
     }
-
