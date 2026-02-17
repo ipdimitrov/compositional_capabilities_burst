@@ -5,59 +5,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from synthetic.functions import CreateFunctions
-from synthetic.generator import SyntheticData
 from omegaconf import OmegaConf
 from synthetic.init import set_seed
-
 from burst.config import BurstExperimentConfig
-
-
-def build_function_pool(cfg: BurstExperimentConfig):
-    gen_cfg = OmegaConf.create({
-        "n_alphabets": cfg.n_alphabets,
-        "seq_len": cfg.seq_len,
-        "function": {
-            "depth": cfg.depth,
-            "n_functions": cfg.n_functions,
-            "repeat": False,
-            "permute": False,
-            "split": {
-                "strategy": "random",
-                "n_compositions": cfg.n_train_compositions,
-            },
-        },
-        "ndocuments": cfg.ndocuments,
-        "neval_documents": cfg.neval_documents,
-        "with_replacement": True,
-        "direct": False,
-        "seed": cfg.seed,
-        "tag": "burst_tmp",
-    })
-    set_seed(cfg.seed)
-    generator = CreateFunctions(gen_cfg)
-    composed_functions, info = generator.compose()
-    syn = SyntheticData(gen_cfg, composed_functions, info)
-    syn.init_tokens()
-    return syn, composed_functions, info
-
-
-def tag_tasks(info, composed_functions, n_target: int = 10, exclusive_fn_idx: int = None):
-    train_ids = [tuple(t) for t in info["train_id"]]
-    fn_lookup = {}
-    for fn_tuple in composed_functions["train"]:
-        fn_lookup[tuple(fn_tuple[0])] = fn_tuple
-
-    if exclusive_fn_idx is not None:
-        target_ids = [tid for tid in train_ids if exclusive_fn_idx in tid]
-        background_ids = [tid for tid in train_ids if exclusive_fn_idx not in tid]
-        if n_target and len(target_ids) > n_target:
-            target_ids = target_ids[:n_target]
-    else:
-        target_ids = train_ids[:n_target]
-        background_ids = train_ids[n_target:]
-
-    return target_ids, background_ids, fn_lookup
+import functools
+from synthetic.functions import BaseFunction
 
 
 class BurstDataset(Dataset):
@@ -72,34 +24,196 @@ class BurstDataset(Dataset):
         return elem[:-1], elem[1:]
 
 
-def generate_documents_for_task(syn: SyntheticData, task_id: tuple,
-                                fn_lookup: dict, n: int) -> np.ndarray:
-    fn_tuple = fn_lookup[task_id]
-    docs = []
-    for _ in range(n):
-        token_idx = syn.sample_token()
-        space_idx = np.array([syn.token_idx[" "]])
-        start_idx = np.array([syn.token_idx["S"]])
-        task_idx = []
-        for idx_d, ts in enumerate(fn_tuple[0]):
-            task_str = "T" + str(idx_d) + "_" + str(ts)
-            task_idx.append(syn.token_idx[task_str])
-        task_idx = np.array(task_idx)
-        outputs = syn.stepbystep_outputs(token_idx, fn_tuple[2])
-        document = [start_idx, task_idx, space_idx, token_idx]
+def _make_bijections(n_alphabets: int, n_functions: int, rng: np.random.RandomState):
+    bijs = [np.arange(n_alphabets)]
+    for _ in range(n_functions):
+        bijs.append(rng.permutation(n_alphabets))
+    return bijs
+
+
+def _make_permutations(seq_len: int, n_functions: int, rng: np.random.RandomState):
+    perms = [np.arange(seq_len)]
+    for _ in range(n_functions):
+        perms.append(rng.permutation(seq_len))
+    return perms
+
+
+class CrossFamilyData:
+    """Generates data for the bijection+permutation cross-family experiment.
+
+    Dimension key:
+        B: batch_size
+        L: sequence length (document length)
+        S: seq_len (number of input tokens)
+        A: n_alphabets
+
+    A tasks: atomic bijections (depth-1), always present
+    B tasks: bijection ∘ permutation compositions (depth-2), target for burstiness
+    Held-out: bijection ∘ permutation ∘ bijection (depth-3), never trained
+    """
+
+    def __init__(self, n_alphabets: int, seq_len: int,
+                 n_bij_functions: int, n_perm_functions: int,
+                 n_target: int, seed: int):
+        self.n_alphabets = n_alphabets
+        self.seq_len = seq_len
+        self.n_bij = n_bij_functions
+        self.n_perm = n_perm_functions
+        self.seed = seed
+
+        rng = np.random.RandomState(seed)
+        self.bijections = _make_bijections(n_alphabets, n_bij_functions, rng)
+        self.permutations = _make_permutations(seq_len, n_perm_functions, rng)
+
+        self.special_tokens = [' ', '<PAD>', 'S']
+        self._build_vocab()
+        self._build_tasks(n_target, rng)
+
+    def _build_vocab(self):
+        self.token = {}
+        self.token_idx = {}
+        idx = 0
+
+        for i in range(self.n_alphabets):
+            name = f"X{i}"
+            self.token[idx] = name
+            self.token_idx[name] = idx
+            idx += 1
+
+        self.bij_task_tokens = {}
+        for i in range(len(self.bijections)):
+            name = f"BIJ_{i}"
+            self.token[idx] = name
+            self.token_idx[name] = idx
+            self.bij_task_tokens[i] = idx
+            idx += 1
+
+        self.perm_task_tokens = {}
+        for i in range(len(self.permutations)):
+            name = f"PERM_{i}"
+            self.token[idx] = name
+            self.token_idx[name] = idx
+            self.perm_task_tokens[i] = idx
+            idx += 1
+
+        for sp in self.special_tokens:
+            self.token[idx] = sp
+            self.token_idx[sp] = idx
+            idx += 1
+
+        self.vocab_size = idx
+
+    def _build_tasks(self, n_target: int, rng: np.random.RandomState):
+        self.a_tasks = []
+        for bi in range(1, len(self.bijections)):
+            self.a_tasks.append(("bij", bi))
+
+        self.b_tasks = []
+        all_b_candidates = []
+        for bi in range(1, len(self.bijections)):
+            for pi in range(1, len(self.permutations)):
+                all_b_candidates.append(("bij_perm", bi, pi))
+        rng.shuffle(all_b_candidates)
+        self.b_tasks = all_b_candidates[:n_target]
+        self._remaining_b = all_b_candidates[n_target:]
+
+        self.heldout_tasks = []
+        all_ho_candidates = []
+        for bi1 in range(1, len(self.bijections)):
+            for pi in range(1, len(self.permutations)):
+                for bi2 in range(1, len(self.bijections)):
+                    all_ho_candidates.append(("bij_perm_bij", bi1, pi, bi2))
+        rng.shuffle(all_ho_candidates)
+        self.heldout_tasks = all_ho_candidates[:min(20, len(all_ho_candidates))]
+
+    def _apply_task(self, inp_S: np.ndarray, task: tuple) -> list[np.ndarray]:
+        outputs = []
+        cur = inp_S.copy()
+        if task[0] == "bij":
+            cur = self.bijections[task[1]][cur]
+            outputs.append(cur.copy())
+        elif task[0] == "bij_perm":
+            cur = cur[self.permutations[task[2]]]
+            outputs.append(cur.copy())
+            cur = self.bijections[task[1]][cur]
+            outputs.append(cur.copy())
+        elif task[0] == "bij_perm_bij":
+            cur = self.bijections[task[3]][cur]
+            outputs.append(cur.copy())
+            cur = cur[self.permutations[task[2]]]
+            outputs.append(cur.copy())
+            cur = self.bijections[task[1]][cur]
+            outputs.append(cur.copy())
+        return outputs
+
+    def _task_token_ids(self, task: tuple) -> np.ndarray:
+        if task[0] == "bij":
+            return np.array([self.bij_task_tokens[task[1]]])
+        elif task[0] == "bij_perm":
+            return np.array([self.bij_task_tokens[task[1]],
+                             self.perm_task_tokens[task[2]]])
+        elif task[0] == "bij_perm_bij":
+            return np.array([self.bij_task_tokens[task[1]],
+                             self.perm_task_tokens[task[2]],
+                             self.bij_task_tokens[task[3]]])
+
+    def _make_document(self, task: tuple) -> np.ndarray:
+        inp_S = np.random.choice(self.n_alphabets, size=self.seq_len, replace=True)
+        space = np.array([self.token_idx[' ']])
+        start = np.array([self.token_idx['S']])
+        task_toks = self._task_token_ids(task)
+        outputs = self._apply_task(inp_S, task)
+
+        doc = [start, task_toks, space, inp_S]
         for out in outputs:
-            document.append(space_idx)
-            document.append(out)
-        docs.append(np.concatenate(document))
-    return np.array(docs)
+            doc.append(space)
+            doc.append(out)
+        return np.concatenate(doc)
+
+    def generate_pool(self, tasks: list[tuple], n_per_task: int) -> dict:
+        pool = {}
+        for task in tasks:
+            docs = []
+            for _ in range(n_per_task):
+                docs.append(self._make_document(task))
+            pool[task] = np.array(docs)
+        return pool
+
+    def max_doc_len(self) -> int:
+        lens = []
+        for t in self.a_tasks[:1] + self.b_tasks[:1] + self.heldout_tasks[:1]:
+            lens.append(len(self._make_document(t)))
+        if not lens:
+            return 50
+        return max(lens)
+
+    def get_space_pos(self, docs_BL: np.ndarray) -> int:
+        sp_idx = self.token_idx[' ']
+        return int(np.where(docs_BL[0] == sp_idx)[0][-1])
+
+    def get_prompt_len(self, docs_BL: np.ndarray) -> int:
+        sp_idx = self.token_idx[' ']
+        sp_positions = np.where(docs_BL[0] == sp_idx)[0]
+        return int(sp_positions[0]) + 1 + self.seq_len + 1
 
 
-def generate_pool(syn: SyntheticData, task_ids: list[tuple],
-                  fn_lookup: dict, n_per_task: int) -> dict[tuple, np.ndarray]:
-    pool = {}
-    for tid in task_ids:
-        pool[tid] = generate_documents_for_task(syn, tid, fn_lookup, n_per_task)
-    return pool
+def pad_pools_to_same_length(*pools):
+    max_len = 0
+    for pool in pools:
+        for docs in pool.values():
+            max_len = max(max_len, docs.shape[1])
+
+    padded_pools = []
+    for pool in pools:
+        new_pool = {}
+        for key, docs in pool.items():
+            if docs.shape[1] < max_len:
+                pad_width = max_len - docs.shape[1]
+                padding = np.full((docs.shape[0], pad_width), 0, dtype=docs.dtype)
+                docs = np.concatenate([docs, padding], axis=1)
+            new_pool[key] = docs
+        padded_pools.append(new_pool)
+    return padded_pools
 
 
 class ScheduleSampler:
@@ -143,135 +257,30 @@ class ScheduleSampler:
                            schedule: str, p: float, K: int) -> int:
         if schedule == "mixed":
             return int(np.random.binomial(self.batch_size, p))
-
         elif schedule == "end_burst":
             burst_len = int(p * total_steps)
             burst_start = total_steps - burst_len
-            if step >= burst_start:
-                return self.batch_size
-            return 0
-
+            return self.batch_size if step >= burst_start else 0
         elif schedule == "mid_burst":
             burst_len = int(p * total_steps)
             mid = total_steps // 2
             burst_start = mid - burst_len // 2
             burst_end = burst_start + burst_len
-            if burst_start <= step < burst_end:
-                return self.batch_size
-            return 0
-
+            return self.batch_size if burst_start <= step < burst_end else 0
         elif schedule == "early_burst":
             burst_len = int(p * total_steps)
-            if step < burst_len:
-                return self.batch_size
-            return 0
-
+            return self.batch_size if step < burst_len else 0
         elif schedule == "single_burst":
             burst_start = int((1 - p) * total_steps)
-            if step >= burst_start:
-                return self.batch_size
-            return 0
-
+            return self.batch_size if step >= burst_start else 0
         elif schedule == "multi_burst":
             burst_len = int(p * total_steps / K)
             cycle_len = total_steps // K
             pos_in_cycle = step % cycle_len
             non_burst_len = cycle_len - burst_len
-            if pos_in_cycle >= non_burst_len:
-                return self.batch_size
-            return 0
-
+            return self.batch_size if pos_in_cycle >= non_burst_len else 0
         elif schedule == "undo":
             return 0
-
         elif schedule == "relearn":
             return int(np.random.binomial(self.batch_size, p))
-
         raise ValueError(f"Unknown schedule: {schedule}")
-
-
-class StaggeredSampler:
-    def __init__(self, task_pools: dict[str, dict[tuple, np.ndarray]],
-                 background_pool: dict[tuple, np.ndarray],
-                 batch_size: int, total_steps: int, p_per_task: float):
-        self.task_pools = task_pools
-        self.background_pool = background_pool
-        self.batch_size = batch_size
-        self.total_steps = total_steps
-        self.p = p_per_task
-        self._bg_ids = list(background_pool.keys())
-        self._task_names = list(task_pools.keys())
-
-        T = total_steps
-        pT = int(p_per_task * T)
-        self.windows = {
-            "F1_early": (0, pT),
-            "F2_mid": (T // 2 - pT // 2, T // 2 + pT // 2),
-            "F3_late": (T - pT, T),
-            "F4_mixed": (0, T),
-        }
-
-    def _sample_from_pool(self, pool: dict, task_ids: list, n: int) -> np.ndarray:
-        docs = []
-        for _ in range(n):
-            tid = task_ids[np.random.randint(len(task_ids))]
-            idx = np.random.randint(len(pool[tid]))
-            docs.append(pool[tid][idx])
-        return np.array(docs)
-
-    def sample_batch(self, step: int, phase: str = "train") -> np.ndarray:
-        if phase == "undo":
-            bg = self._sample_from_pool(
-                self.background_pool, self._bg_ids, self.batch_size)
-            return bg
-
-        active_tasks = []
-        for name in self._task_names:
-            w_start, w_end = self.windows[name]
-            if name == "F4_mixed":
-                active_tasks.append(name)
-            elif w_start <= step < w_end:
-                active_tasks.append(name)
-
-        n_per_active = 0
-        if active_tasks:
-            total_target = 0
-            for name in active_tasks:
-                if name == "F4_mixed":
-                    total_target += int(np.random.binomial(
-                        self.batch_size, self.p))
-                else:
-                    w_start, w_end = self.windows[name]
-                    window_len = w_end - w_start
-                    if window_len > 0:
-                        total_target += max(1, self.batch_size // len(active_tasks))
-
-            total_target = min(total_target, self.batch_size)
-            n_per_active = total_target // max(len(active_tasks), 1)
-
-        parts = []
-        total_sampled = 0
-        for name in active_tasks:
-            pool = self.task_pools[name]
-            tids = list(pool.keys())
-            n = n_per_active if name != "F4_mixed" else int(
-                np.random.binomial(self.batch_size // len(self._task_names), self.p))
-            n = max(n, 0)
-            if n > 0 and tids:
-                parts.append(self._sample_from_pool(pool, tids, n))
-                total_sampled += n
-
-        n_bg = self.batch_size - total_sampled
-        if n_bg > 0:
-            parts.append(self._sample_from_pool(
-                self.background_pool, self._bg_ids, n_bg))
-
-        if not parts:
-            return self._sample_from_pool(
-                self.background_pool, self._bg_ids, self.batch_size)
-
-        batch = np.concatenate(parts, axis=0)
-        if len(batch) > self.batch_size:
-            batch = batch[:self.batch_size]
-        perm = np.random.permutation(len(batch))
-        return batch[perm]

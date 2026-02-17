@@ -1,10 +1,12 @@
 """
-Parallel Burst Schedule Experiment (subprocess-based)
-=====================================================
-Runs many experiment configs in parallel using subprocess workers.
-Each worker loads shared data from disk, trains its own model on GPU.
+Parallel Burst Schedule Experiment — Cross-Family (bijection + permutation)
+===========================================================================
+A tasks: atomic bijections (depth-1), always present
+B tasks: bijection ∘ permutation (depth-2), target for burstiness
+Held-out: bijection ∘ permutation ∘ bijection (depth-3), never trained
 
-Undo = passive forgetting (A-only, correct labels). No shuffled labels.
+Eval: free generation (autoregressive), no teacher forcing.
+Undo: passive forgetting (A-only, correct labels).
 """
 import sys, os, time, pickle, json, math, signal, subprocess, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -16,8 +18,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 from synthetic.init import set_seed
-from burst.data import build_function_pool, tag_tasks, generate_pool
-from burst.config import BurstExperimentConfig
+from burst.data import CrossFamilyData, pad_pools_to_same_length
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -31,60 +32,33 @@ BASE_CFG = {
     "seed_base": 42,
     "n_alphabets": 10,
     "seq_len": 6,
-    "depth": 5,
-    "n_functions": 5,
-    "n_train_compositions": 150,
-    "n_target": 10,
-    "exclusive_fn_idx": 5,
-    "ndocuments": 100_000,
-    "neval_documents": 10_000,
+    "n_bij_functions": 4,
+    "n_perm_functions": 5,
+    "n_target": 15,
+    "n_docs_per_task": 2000,
+    "n_eval_per_task": 400,
 
-    "n_layer": 12,
-    "n_embd": 120,
-    "n_head": 12,
-    "vocab_size": 512,
-    "context_size": 50,
+    "n_layer": 4,
+    "n_embd": 96,
+    "n_head": 4,
+    "vocab_size": 128,
+    "context_size": 64,
 
     "lr": 3e-4,
     "weight_decay": 1e-3,
     "beta1": 0.9,
     "beta2": 0.95,
     "grad_clip": 1.0,
-    "warmup_iters": 200,
+    "warmup_iters": 50,
     "min_lr": 6e-5,
 
-    "batch_size": 512,
-    "total_steps": 3_000,
+    "batch_size": 256,
+    "total_steps": 600,
     "p_target": 0.10,
-    "undo_steps": 5_000,
-    "eval_every": 200,
+    "undo_steps": 400,
+    "eval_every": 50,
     "unlearn_threshold": 0.25,
 }
-
-
-def build_data(seed, cfg):
-    bcfg = BurstExperimentConfig(
-        seed=seed, n_alphabets=cfg["n_alphabets"], seq_len=cfg["seq_len"],
-        depth=cfg["depth"], n_functions=cfg["n_functions"],
-        n_train_compositions=cfg["n_train_compositions"],
-        ndocuments=cfg["ndocuments"], neval_documents=cfg["neval_documents"],
-    )
-    set_seed(seed)
-    syn, composed_functions, info = build_function_pool(bcfg)
-    target_ids, bg_ids, fn_lookup = tag_tasks(
-        info, composed_functions, n_target=cfg["n_target"],
-        exclusive_fn_idx=cfg.get("exclusive_fn_idx"),
-    )
-    n_docs = max(cfg["ndocuments"] // max(len(bg_ids), 1), 500)
-    target_pool = generate_pool(syn, target_ids, fn_lookup, n_docs)
-    bg_pool = generate_pool(syn, bg_ids, fn_lookup, n_docs)
-    eval_target = generate_pool(syn, target_ids, fn_lookup, cfg["neval_documents"])
-    eval_bg = generate_pool(syn, bg_ids[:5], fn_lookup, cfg["neval_documents"] // 5)
-    eval_docs = {"target": np.concatenate(list(eval_target.values())),
-                 "background": np.concatenate(list(eval_bg.values()))}
-    sp_idx = syn.token_idx[" "]
-    space_pos = int(np.where(eval_docs["target"][0] == sp_idx)[0][-1])
-    return target_pool, bg_pool, eval_docs, space_pos
 
 
 class NpEncoder(json.JSONEncoder):
@@ -95,6 +69,56 @@ class NpEncoder(json.JSONEncoder):
         if isinstance(obj, np.bool_): return bool(obj)
         if isinstance(obj, tuple): return list(obj)
         return super().default(obj)
+
+
+def build_data(cfg):
+    set_seed(cfg["seed_base"])
+    data = CrossFamilyData(
+        n_alphabets=cfg["n_alphabets"],
+        seq_len=cfg["seq_len"],
+        n_bij_functions=cfg["n_bij_functions"],
+        n_perm_functions=cfg["n_perm_functions"],
+        n_target=cfg["n_target"],
+        seed=cfg["seed_base"],
+    )
+
+    n_docs = cfg["n_docs_per_task"]
+    n_eval = cfg["n_eval_per_task"]
+
+    target_pool = data.generate_pool(data.b_tasks, n_docs)
+    bg_pool = data.generate_pool(data.a_tasks, n_docs)
+    eval_target = data.generate_pool(data.b_tasks, n_eval)
+    eval_bg = data.generate_pool(data.a_tasks[:5], n_eval)
+    eval_heldout = data.generate_pool(data.heldout_tasks[:10], n_eval)
+
+    target_pool, bg_pool, eval_target, eval_bg, eval_heldout = pad_pools_to_same_length(
+        target_pool, bg_pool, eval_target, eval_bg, eval_heldout
+    )
+
+    eval_docs = {
+        "target": np.concatenate(list(eval_target.values())),
+        "background": np.concatenate(list(eval_bg.values())),
+        "heldout": np.concatenate(list(eval_heldout.values())),
+    }
+
+    prompt_len = data.get_prompt_len(eval_docs["target"])
+    space_pos = data.get_space_pos(eval_docs["target"])
+
+    cfg["vocab_size"] = max(cfg["vocab_size"], data.vocab_size + 10)
+    cfg["context_size"] = max(cfg["context_size"], eval_docs["target"].shape[1] + 5)
+
+    task_info = {
+        "a_tasks": [str(t) for t in data.a_tasks],
+        "b_tasks": [str(t) for t in data.b_tasks],
+        "heldout_tasks": [str(t) for t in data.heldout_tasks[:10]],
+        "n_bij": len(data.bijections),
+        "n_perm": len(data.permutations),
+        "vocab_size": data.vocab_size,
+        "max_doc_len": int(eval_docs["target"].shape[1]),
+        "prompt_len": prompt_len,
+    }
+
+    return target_pool, bg_pool, eval_docs, prompt_len, space_pos, task_info
 
 
 def build_jobs():
@@ -119,7 +143,7 @@ def build_jobs():
 
 
 def main():
-    run_dir = Path("data") / f"burst_parallel_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    run_dir = Path("data") / f"burst_crossfam_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=True)
     progress_dir = run_dir / "_progress"
     progress_dir.mkdir(exist_ok=True)
@@ -129,26 +153,35 @@ def main():
     if DEVICE == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
 
+    print("\nBuilding cross-family data (bijections + permutations)...", flush=True)
+    target_pool, bg_pool, eval_docs, prompt_len, space_pos, task_info = build_data(BASE_CFG)
+    print(f"A tasks (bijections): {len(bg_pool)}", flush=True)
+    print(f"B tasks (bij∘perm):   {len(target_pool)}", flush=True)
+    print(f"Held-out (bij∘perm∘bij): {len(eval_docs['heldout'])} eval docs", flush=True)
+    print(f"Vocab: {task_info['vocab_size']}, Doc len: {task_info['max_doc_len']}, Prompt len: {prompt_len}", flush=True)
+
     jobs = build_jobs()
+    for job in jobs:
+        job["cfg"]["vocab_size"] = BASE_CFG["vocab_size"]
+        job["cfg"]["context_size"] = BASE_CFG["context_size"]
+
     n_workers = min(len(jobs), 10)
     steps_per_job = BASE_CFG["total_steps"] + BASE_CFG["undo_steps"]
     total_steps = len(jobs) * steps_per_job
 
-    print(f"\nTotal jobs: {len(jobs)}, workers: {n_workers} (all parallel)", flush=True)
+    print(f"\nModel: {BASE_CFG['n_layer']}L/{BASE_CFG['n_embd']}d/{BASE_CFG['n_head']}H", flush=True)
+    print(f"Total jobs: {len(jobs)}, workers: {n_workers}", flush=True)
     print(f"Steps per job: {BASE_CFG['total_steps']} train + {BASE_CFG['undo_steps']} undo", flush=True)
+    print(f"Eval: free generation (autoregressive) every {BASE_CFG['eval_every']} steps", flush=True)
     print(f"Batch size: {BASE_CFG['batch_size']}", flush=True)
-    print(f"Est. VRAM: {n_workers * 2.9:.1f} GB / 32 GB", flush=True)
-
-    print("\nBuilding shared data pool...", flush=True)
-    target_pool, bg_pool, eval_docs, space_pos = build_data(BASE_CFG["seed_base"], BASE_CFG)
-    print(f"A:B split = {len(bg_pool)}:{len(target_pool)}", flush=True)
 
     shared_data_path = str(run_dir / "_shared_data.pkl")
     with open(shared_data_path, "wb") as f:
-        pickle.dump((target_pool, bg_pool, eval_docs, space_pos), f)
+        pickle.dump((target_pool, bg_pool, eval_docs, prompt_len, space_pos), f)
 
     with open(run_dir / "config.json", "w") as f:
         json.dump({"base_cfg": BASE_CFG, "n_jobs": len(jobs),
+                    "task_info": task_info,
                     "jobs": [{"label": j["label"], "schedule": j["schedule"],
                               "seed": j["seed"]} for j in jobs]},
                    f, indent=2, cls=NpEncoder)
@@ -216,18 +249,19 @@ def main():
                 if result_path.exists():
                     with open(result_path, "rb") as f:
                         result = pickle.load(f)
+                    ho_str = f"held={result.get('heldout_train_end', 0):.4f}" if result.get('heldout_train_end') else ""
                     tqdm.write(
                         f"  [{n_done}/{len(jobs)}] {job['label']:30s} "
-                        f"train={result['train_end_acc']:.4f}  "
-                        f"undo={result['undo_end_acc']:.4f}  "
+                        f"train_B={result['train_end_acc']:.4f}  "
+                        f"undo_B={result['undo_end_acc']:.4f}  "
                         f"auc={result['undo_auc']:.0f}  "
-                        f"({elapsed:.0f}s)"
+                        f"{ho_str}  ({elapsed:.0f}s)"
                     )
                 else:
                     stderr_out = proc.stderr.read().decode() if proc.stderr else ""
                     tqdm.write(f"  FAILED [{n_done}/{len(jobs)}]: {job['label']} (exit {ret})")
                     if stderr_out:
-                        tqdm.write(f"    {stderr_out[:300]}")
+                        tqdm.write(f"    {stderr_out[:500]}")
 
         for label in finished:
             del active[label]

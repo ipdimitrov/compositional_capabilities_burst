@@ -1,4 +1,8 @@
-"""Single-job worker process for parallel experiments."""
+"""Single-job worker for parallel cross-family burst experiments.
+
+Uses free generation (autoregressive) evaluation: the model generates
+its own intermediate outputs rather than being fed ground truth.
+"""
 import sys, os, argparse, pickle, json, math, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -73,18 +77,39 @@ def sample_batch(target_pool, bg_pool, n_target, batch_size):
     return batch[np.random.permutation(len(batch))]
 
 
-def eval_accuracy(net, docs_BL, space_pos):
+@torch.no_grad()
+def eval_free_generation(net, docs_BL, prompt_len: int, space_pos: int):
+    """Autoregressive (free generation) evaluation.
+
+    Feed the model only the prompt (task tokens + input), then let it
+    generate all intermediate/output tokens autoregressively.
+    Only measure accuracy on the final output segment (after last space).
+    """
     net.eval()
     ds = BurstDataset(docs_BL)
     loader = torch.utils.data.DataLoader(ds, batch_size=256, shuffle=False)
     correct, total = 0, 0
-    with torch.no_grad():
-        for dat, tgt in loader:
-            dat, tgt = dat.to(DEVICE), tgt.to(DEVICE)
-            logits = net(dat)[:, space_pos:]
-            preds = logits.argmax(-1)
-            correct += (preds == tgt[:, space_pos:]).float().sum().item()
-            total += tgt[:, space_pos:].numel()
+
+    for dat, tgt in loader:
+        dat, tgt = dat.to(DEVICE), tgt.to(DEVICE)
+        full_len = dat.shape[1]
+        inp = dat[:, :prompt_len]
+        n_generate = full_len - prompt_len
+
+        for _ in range(n_generate):
+            logits = net(inp)
+            next_tok = logits[:, -1, :].argmax(-1, keepdim=True)
+            inp = torch.cat([inp, next_tok], dim=1)
+
+        generated = inp[:, prompt_len:]
+        target = tgt[:, prompt_len - 1:]
+        min_len = min(generated.shape[1], target.shape[1])
+        generated = generated[:, :min_len]
+        target = target[:, :min_len]
+
+        correct += (generated == target).float().sum().item()
+        total += target.numel()
+
     net.train()
     return correct / max(total, 1)
 
@@ -107,19 +132,21 @@ def run(job, shared_data_path, run_dir, progress_dir):
     progress_file.write_text("0")
 
     with open(shared_data_path, "rb") as f:
-        target_pool, bg_pool, eval_docs, space_pos = pickle.load(f)
+        target_pool, bg_pool, eval_docs, prompt_len, space_pos = pickle.load(f)
 
     set_seed(seed)
     net_cfg = OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"], "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"], "n_embd": cfg["n_embd"],
-        "dropout": 0.0, "bias": False, "mlp": True,
+        "compile": False, "vocab_size": cfg["vocab_size"],
+        "context_size": cfg["context_size"],
+        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
+        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
     })
     net = nanoGPT(net_cfg).to(DEVICE)
     optim_cfg = OmegaConf.create({
         "learning_rate": cfg["lr"], "weight_decay": cfg["weight_decay"],
-        "beta1": cfg["beta1"], "beta2": cfg["beta2"], "grad_clip": cfg["grad_clip"],
-        "decay_lr": True, "warmup_iters": cfg["warmup_iters"], "min_lr": cfg["min_lr"],
+        "beta1": cfg["beta1"], "beta2": cfg["beta2"],
+        "grad_clip": cfg["grad_clip"], "decay_lr": True,
+        "warmup_iters": cfg["warmup_iters"], "min_lr": cfg["min_lr"],
     })
     optimizer = configure_optimizers(net, optim_cfg)
 
@@ -130,8 +157,11 @@ def run(job, shared_data_path, run_dir, progress_dir):
     total_lr_steps = T + U
     bs, p, ev = cfg["batch_size"], cfg["p_target"], cfg["eval_every"]
 
-    log = {"step": [], "loss": [], "acc_target": [], "acc_background": [],
-           "phase": [], "n_target_in_batch": [], "weight_deltas": []}
+    log = {
+        "step": [], "loss": [], "phase": [],
+        "acc_target": [], "acc_background": [], "acc_heldout": [],
+        "n_target_in_batch": [], "weight_deltas": [],
+    }
 
     w0 = snapshot_weights(net)
     net.train()
@@ -157,14 +187,18 @@ def run(job, shared_data_path, run_dir, progress_dir):
         scaler.update()
 
         steps_done += 1
-        if steps_done % 100 == 0:
+        if steps_done % 50 == 0:
             progress_file.write_text(str(steps_done))
 
         if s % ev == 0 or s == T - 1:
             log["step"].append(it)
             log["loss"].append(loss.item())
-            log["acc_target"].append(eval_accuracy(net, eval_docs["target"], space_pos))
-            log["acc_background"].append(eval_accuracy(net, eval_docs["background"], space_pos))
+            log["acc_target"].append(
+                eval_free_generation(net, eval_docs["target"], prompt_len, space_pos))
+            log["acc_background"].append(
+                eval_free_generation(net, eval_docs["background"], prompt_len, space_pos))
+            log["acc_heldout"].append(
+                eval_free_generation(net, eval_docs["heldout"], prompt_len, space_pos))
             log["phase"].append("train")
             log["n_target_in_batch"].append(nt)
             log["weight_deltas"].append(weight_deltas(w0, snapshot_weights(net)))
@@ -172,8 +206,6 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     w_train_end = snapshot_weights(net)
 
-    # Passive forgetting: train on background (A) data only with CORRECT labels.
-    # No shuffling, no adversarial intervention - just neglect of B data.
     for s in range(U):
         batch = sample_batch(target_pool, bg_pool, 0, bs)
         dat = torch.from_numpy(batch).long().to(DEVICE)
@@ -192,15 +224,18 @@ def run(job, shared_data_path, run_dir, progress_dir):
         scaler.update()
 
         steps_done += 1
-        if steps_done % 100 == 0:
+        if steps_done % 50 == 0:
             progress_file.write_text(str(steps_done))
 
         if s % ev == 0 or s == U - 1:
             log["step"].append(it)
             log["loss"].append(loss.item())
-            acc_t = eval_accuracy(net, eval_docs["target"], space_pos)
-            log["acc_target"].append(acc_t)
-            log["acc_background"].append(eval_accuracy(net, eval_docs["background"], space_pos))
+            log["acc_target"].append(
+                eval_free_generation(net, eval_docs["target"], prompt_len, space_pos))
+            log["acc_background"].append(
+                eval_free_generation(net, eval_docs["background"], prompt_len, space_pos))
+            log["acc_heldout"].append(
+                eval_free_generation(net, eval_docs["heldout"], prompt_len, space_pos))
             log["phase"].append("undo")
             log["n_target_in_batch"].append(0)
             log["weight_deltas"].append(weight_deltas(w_train_end, snapshot_weights(net)))
@@ -212,7 +247,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
     train_end_acc, unlearn_step = None, None
     undo_accs, undo_steps_list = [], []
     for i, ph in enumerate(log["phase"]):
-        if ph == "train": train_end_acc = log["acc_target"][i]
+        if ph == "train":
+            train_end_acc = log["acc_target"][i]
         if ph == "undo":
             undo_accs.append(log["acc_target"][i])
             undo_steps_list.append(log["step"][i] - T)
@@ -228,11 +264,22 @@ def run(job, shared_data_path, run_dir, progress_dir):
         mlp_undo = sum(v for k, v in last.items() if "mlp" in k)
         attn_undo = sum(v for k, v in last.items() if "attn" in k)
 
+    heldout_end = None
+    for i, ph in enumerate(log["phase"]):
+        if ph == "train":
+            heldout_end = log["acc_heldout"][i]
+    heldout_undo_end = None
+    for i, ph in enumerate(log["phase"]):
+        if ph == "undo":
+            heldout_undo_end = log["acc_heldout"][i]
+
     result = {
         "schedule": schedule, "seed": seed, "log": log,
         "train_end_acc": train_end_acc, "undo_end_acc": undo_end_acc,
         "undo_auc": undo_auc, "unlearn_step": unlearn_step,
         "mlp_undo_delta": mlp_undo, "attn_undo_delta": attn_undo,
+        "heldout_train_end": heldout_end,
+        "heldout_undo_end": heldout_undo_end,
         "config": dict(cfg), "label": label,
     }
     with open(Path(run_dir) / f"{label}.pkl", "wb") as f:
