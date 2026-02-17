@@ -11,15 +11,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 from fpdf import FPDF
+from collections import defaultdict
 from burst._worker_new_split import n_target_for_step
 
-EVAL_KEYS = ["acc_A_base", "acc_A_comp", "acc_A_heldout", "acc_B_comp", "acc_B_heldout"]
+EVAL_KEYS = ["acc_A_comp", "acc_A_heldout", "acc_B_comp", "acc_B_heldout"]
 CURVE_STYLE = {
-    "acc_A_base":    {"color": "#2196F3", "ls": "-",  "label": "A base (single fn)"},
-    "acc_A_comp":    {"color": "#4CAF50", "ls": "-",  "label": "A comp (train)"},
-    "acc_A_heldout": {"color": "#4CAF50", "ls": ":",  "label": "A comp (held)"},
-    "acc_B_comp":    {"color": "#F44336", "ls": "-",  "label": "B comp (train)"},
-    "acc_B_heldout": {"color": "#F44336", "ls": ":",  "label": "B comp (held)"},
+    "acc_A_comp":    {"color": "#2196F3", "ls": "-",  "label": "A comp (train)"},
+    "acc_A_heldout": {"color": "#FF9800", "ls": "-",  "label": "A comp (held)"},
+    "acc_B_comp":    {"color": "#E91E63", "ls": "-",  "label": "B comp (train)"},
+    "acc_B_heldout": {"color": "#9C27B0", "ls": "-",  "label": "B comp (held)"},
 }
 SCHED_COLORS = {
     "uniform": "#2196F3", "end_block": "#F44336", "mid_block": "#9C27B0",
@@ -149,36 +149,29 @@ def plot_per_run(result, plots_dir):
     ax = axes[1]
     for k, sty in CURVE_STYLE.items():
         vals = np.array(log.get(k, [0.0] * len(steps)))
-        ax.plot(steps[train_m], vals[train_m], color=sty["color"],
-                ls=sty["ls"], lw=1.5, label=f"{sty['label']} train")
-        if undo_m.any():
-            ax.plot(steps[undo_m], vals[undo_m], color=sty["color"],
-                    ls="--" if sty["ls"] == "-" else sty["ls"], lw=1.5, alpha=0.7,
-                    label=f"{sty['label']} undo")
+        ax.plot(steps, vals, color=sty["color"], ls=sty["ls"], lw=1.5, label=sty["label"])
     ax.axvline(T, color="gray", ls="--", alpha=0.5)
     ax.set_xlim(0, T + U)
     ax.set_ylim(-0.05, 1.05)
     ax.set_ylabel("Free-gen Accuracy (last 6 tok)")
-    ax.legend(fontsize=5, loc="lower left", ncol=3)
+    ax.legend(fontsize=5, loc="lower left", ncol=2)
     ax.grid(True, alpha=0.2)
 
     peak = result.get("train_end_B_comp", 0)
-    hl = result.get("half_life", 400)
-    hl_str = f"{hl:.0f}" if hl < 400 else ">400"
+    ql = result.get("quarter_life", 400)
+    ql_str = f"{ql:.0f}" if ql < 400 else ">400"
     drop = result.get("dropoff_abs", 0)
     drop_pct = result.get("dropoff_pct", 0)
     ax.text(T + U * 0.5, 0.95,
-            f"peak={peak:.3f}  t1/2={hl_str}  drop={drop:.3f}({drop_pct:.0f}%)",
+            f"peak={peak:.3f}  t1/4={ql_str}  drop={drop:.3f}({drop_pct:.0f}%)",
             ha="center", fontsize=7, color="#D32F2F", fontweight="bold",
             transform=ax.get_xaxis_transform())
-    if hl < 400:
-        ax.axvline(T + hl, color="#D32F2F", ls="--", lw=1.5, alpha=0.7)
-        ax.axhline(peak * 0.5, color="#D32F2F", ls=":", lw=1, alpha=0.4)
+    if ql < 400:
+        ax.axvline(T + ql, color="#D32F2F", ls="--", lw=1.5, alpha=0.7)
+        ax.axhline(peak * 0.25, color="#D32F2F", ls=":", lw=1, alpha=0.4)
 
     ax = axes[2]
-    ax.plot(steps[train_m], loss[train_m], color="#333", lw=1, label="loss train")
-    if undo_m.any():
-        ax.plot(steps[undo_m], loss[undo_m], color="#333", lw=1, ls="--", label="loss undo")
+    ax.plot(steps, loss, color="#333", lw=1, label="loss")
     ax.axvline(T, color="gray", ls="--", alpha=0.5)
     ax.set_xlim(0, T + U)
     ax.set_ylabel("Loss")
@@ -196,19 +189,19 @@ def plot_per_run(result, plots_dir):
 def plot_summary_bars(results, plots_dir):
     scheds = [r["schedule"] for r in results]
     peaks = [r.get("train_end_B_comp", 0) for r in results]
-    halflives = [r.get("half_life", 400) for r in results]
+    quarterlives = [r.get("quarter_life", 400) for r in results]
     aucs = [r.get("undo_auc", 0) for r in results]
     colors = [SCHED_COLORS.get(s, "gray") for s in scheds]
     xs = np.arange(len(scheds))
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-    fig.suptitle("Peak B Accuracy + Half-life + AUC by Schedule", fontsize=14, fontweight="bold")
+    fig.suptitle("Peak B Accuracy + Quarter-life + AUC by Schedule", fontsize=14, fontweight="bold")
 
     titles = ["Peak B Accuracy at step 600",
-              "Half-life t1/2 (lower = faster forgetting)",
+              "Quarter-life t1/4 (lower = faster forgetting)",
               "Undo AUC (lower = faster forgetting)"]
-    ylabels = ["Peak B comp accuracy", "Half-life (undo steps)", "Undo AUC"]
-    data = [peaks, halflives, aucs]
+    ylabels = ["Peak B comp accuracy", "Quarter-life (undo steps)", "Undo AUC"]
+    data = [peaks, quarterlives, aucs]
 
     for ax, vals, title, ylabel in zip(axes, data, titles, ylabels):
         bars = ax.bar(xs, vals, color=colors, edgecolor="black", lw=0.5)
@@ -228,34 +221,125 @@ def plot_summary_bars(results, plots_dir):
     plt.close(fig)
 
 
-def plot_overlay(results, plots_dir):
-    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
-    fig.suptitle("All Schedules - Accuracy Overlay (depth-3 bijection chain)",
-                 fontsize=13, fontweight="bold")
-    T_ov = results[0]["config"]["total_steps"] + results[0]["config"]["undo_steps"]
-
-    for ki, k in enumerate(EVAL_KEYS):
-        ax = axes[ki // 3, ki % 3]
-        for r in results:
-            c = SCHED_COLORS.get(r["schedule"], "gray")
-            steps = np.array(r["log"]["step"])
+def plot_overlay_per_schedule(results, plots_dir):
+    T_ov = results[0]["config"]["total_steps"]
+    U_ov = results[0]["config"]["undo_steps"]
+    total_steps = T_ov + U_ov
+    
+    sched_data = defaultdict(lambda: defaultdict(list))
+    for r in results:
+        sched = r["schedule"]
+        steps = np.array(r["log"]["step"])
+        for k in EVAL_KEYS:
             vals = np.array(r["log"].get(k, [0.0] * len(steps)))
-            ax.plot(steps, vals, color=c, lw=1.5, label=r["schedule"])
-        ax.set_title(CURVE_STYLE[k]["label"], fontsize=10)
-        ax.set_xlim(0, T_ov)
+            sched_data[sched][k].append((steps, vals))
+    
+    for sched in sorted(sched_data.keys()):
+        fig, ax = plt.subplots(figsize=(14, 8))
+        fig.suptitle(f"{sched} - All Metrics (mean ± 95% CI across seeds)",
+                     fontsize=14, fontweight="bold")
+        
+        for k in EVAL_KEYS:
+            runs = sched_data[sched][k]
+            
+            if len(runs) == 0:
+                continue
+            
+            steps_ref = runs[0][0]
+            all_vals = np.array([vals for _, vals in runs])
+            
+            mean_vals = np.mean(all_vals, axis=0)
+            std_vals = np.std(all_vals, axis=0)
+            n_seeds = len(runs)
+            
+            if n_seeds > 1:
+                ci = 1.96 * std_vals / np.sqrt(n_seeds)
+            else:
+                ci = std_vals
+            
+            sty = CURVE_STYLE[k]
+            ax.plot(steps_ref, mean_vals, color=sty["color"], ls=sty["ls"], 
+                   lw=2.5, label=sty["label"])
+            ax.fill_between(steps_ref, mean_vals - ci, mean_vals + ci, 
+                           color=sty["color"], alpha=0.25)
+        
+        ax.axvline(T_ov, color="gray", ls="--", alpha=0.6, lw=2)
+        ax.text(T_ov * 0.5, 0.05, "TRAIN", ha="center", fontsize=11, 
+               color="gray", fontweight="bold")
+        ax.text(T_ov + U_ov * 0.5, 0.05, "UNDO", ha="center", fontsize=11, 
+               color="gray", fontweight="bold")
+        
+        ax.set_xlim(0, total_steps)
         ax.set_ylim(-0.05, 1.05)
-        ax.set_xlabel("Step")
-        ax.set_ylabel("Accuracy")
+        ax.set_xlabel("Global Step", fontsize=11)
+        ax.set_ylabel("Free-gen Accuracy (last 6 tok)", fontsize=11)
+        ax.legend(fontsize=9, loc="best", framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+        
+        fig.tight_layout()
+        fig.savefig(plots_dir / f"overlay_{sched}.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_overlay_all_schedules(results, plots_dir):
+    T_ov = results[0]["config"]["total_steps"]
+    U_ov = results[0]["config"]["undo_steps"]
+    total_steps = T_ov + U_ov
+    
+    sched_data = defaultdict(lambda: defaultdict(list))
+    for r in results:
+        sched = r["schedule"]
+        steps = np.array(r["log"]["step"])
+        for k in EVAL_KEYS:
+            vals = np.array(r["log"].get(k, [0.0] * len(steps)))
+            sched_data[sched][k].append((steps, vals))
+    
+    for ki, k in enumerate(EVAL_KEYS):
+        fig, ax = plt.subplots(figsize=(11.7, 8.3))
+        fig.suptitle(f"All Schedules - {CURVE_STYLE[k]['label']}\n(mean ± 95% CI across seeds)",
+                     fontsize=16, fontweight="bold")
+        
+        for sched in sorted(sched_data.keys()):
+            c = SCHED_COLORS.get(sched, "gray")
+            runs = sched_data[sched][k]
+            
+            if len(runs) == 0:
+                continue
+                
+            steps_ref = runs[0][0]
+            all_vals = np.array([vals for _, vals in runs])
+            
+            mean_vals = np.mean(all_vals, axis=0)
+            std_vals = np.std(all_vals, axis=0)
+            n_seeds = len(runs)
+            
+            if n_seeds > 1:
+                ci = 1.96 * std_vals / np.sqrt(n_seeds)
+            else:
+                ci = std_vals
+            
+            ax.plot(steps_ref, mean_vals, color=c, lw=2.5, label=sched)
+            ax.fill_between(steps_ref, mean_vals - ci, mean_vals + ci, 
+                           color=c, alpha=0.2)
+        
+        ax.axvline(T_ov, color="gray", ls="--", alpha=0.6, lw=2)
+        ax.text(T_ov * 0.5, 0.05, "TRAIN", ha="center", fontsize=12, 
+               color="gray", fontweight="bold")
+        ax.text(T_ov + U_ov * 0.5, 0.05, "UNDO", ha="center", fontsize=12, 
+               color="gray", fontweight="bold")
+        
+        ax.set_xlim(0, total_steps)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlabel("Step", fontsize=13)
+        ax.set_ylabel("Accuracy", fontsize=13)
         handles, labels = ax.get_legend_handles_labels()
         ax.legend(dict(zip(labels, handles)).values(),
-                  dict(zip(labels, handles)).keys(), fontsize=6)
-        ax.grid(True, alpha=0.2)
-
-    if len(EVAL_KEYS) < 6:
-        axes[1, 2].axis("off")
-    fig.tight_layout()
-    fig.savefig(plots_dir / "overlay.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
+                  dict(zip(labels, handles)).keys(), fontsize=10, loc="best", framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+        
+        fig.tight_layout()
+        fig.savefig(plots_dir / f"overlay_all_{k}.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
 
 
 class ReportPDF(FPDF):
@@ -323,12 +407,11 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "(0-9) to a different digit. Every sequence has the same format: three "
         "function slots followed by the input, then the result after each function.")
 
-    pdf.sub("Base Tasks vs Complex Tasks")
+    pdf.sub("Complex Tasks")
     pdf.body(
-        "Base (single-function) tasks: a real function in one slot and identity "
-        "(do-nothing) functions in the other two. The sequence format is identical "
-        "to a complex task. This measures whether the model learned each function. "
-        "Complex (compositional) tasks: all three slots have real functions.")
+        "Complex (compositional) tasks: all three slots have real functions. "
+        "The model must learn to compose multiple bijections together to produce "
+        "the correct output sequence.")
 
     pdf.sub("Training Data (A = background knowledge)")
     pdf.body(
@@ -348,11 +431,10 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "Phase 2 (Undo, 400 steps): B removed, A only. We measure forgetting speed.")
 
     pdf.sub("Metrics")
-    pdf.bul("A base: single-function accuracy (lower bound)")
     pdf.bul("A comp train/held: compositional accuracy on known functions")
     pdf.bul("B comp train/held: accuracy on b* chains (acquisition + retention)")
     pdf.bul("Peak B: b* accuracy at end of training")
-    pdf.bul("Half-life: undo steps until B drops to 50% of peak (capped at 400)")
+    pdf.bul("Quarter-life: undo steps until B drops to 25% of peak (capped at 400)")
     pdf.bul("Undo AUC: area under B curve during undo (lower = faster forgetting)")
 
     pdf.sub("The 7 Schedules")
@@ -377,34 +459,56 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     pdf.stitle("Summary: Forgetting Speed by Schedule")
     pdf.chart(plots_dir / "summary_bars.png", w=260)
     pdf.body(
-        "Left: Peak B accuracy. Center: Half-life (lower = faster forgetting). "
+        "Left: Peak B accuracy. Center: Quarter-life (lower = faster forgetting). "
         "Right: Undo AUC (secondary). Schedules that deliver B near the end "
         "achieve high acquisition. Mixed schedules retain B longer because A "
         "is present alongside B during the burst.")
 
     pdf.add_page()
     pdf.stitle("Ranking: Fastest Forgetting First")
-    rows = sorted(results, key=lambda r: r.get("half_life", 400))
+    rows = sorted(results, key=lambda r: r.get("quarter_life", 400))
     pdf.set_font("Courier", "", 7.5); pdf.set_text_color(40, 40, 40)
     pdf.cell(0, 4,
-             f"  {'Rank':<5}{'Schedule':<16}{'Peak B':>8}{'t1/2':>8}{'AUC':>7}",
+             f"  {'Rank':<5}{'Schedule':<16}{'Peak B':>8}{'t1/4':>8}{'AUC':>7}",
              new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 4, "  " + "-" * 44, new_x="LMARGIN", new_y="NEXT")
     for i, r in enumerate(rows):
-        hl = r.get("half_life", 400)
-        hl_str = f"{hl:.0f}" if hl < 400 else ">400"
+        ql = r.get("quarter_life", 400)
+        ql_str = f"{ql:.0f}" if ql < 400 else ">400"
         pdf.cell(0, 4,
                  f"  {i+1:<5}{r['schedule']:<16}{r.get('train_end_B_comp',0):>8.3f}"
-                 f"{hl_str:>8}{r.get('undo_auc',0):>7.0f}",
+                 f"{ql_str:>8}{r.get('undo_auc',0):>7.0f}",
                  new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
     pdf.add_page()
     pdf.stitle("Accuracy Overlay - All Schedules")
-    pdf.chart(plots_dir / "overlay.png", w=260)
     pdf.body(
-        "Each panel shows one accuracy curve with all schedules overlaid. "
-        "Vertical dashed line at step 600 marks the start of the undo phase.")
+        "Each page shows one accuracy metric with all schedules overlaid. "
+        "Lines show mean accuracy across seeds, with shaded regions showing "
+        "95% confidence intervals. Vertical dashed line marks "
+        "the start of the undo phase.")
+    
+    for k in EVAL_KEYS:
+        overlay_all_path = plots_dir / f"overlay_all_{k}.png"
+        if overlay_all_path.exists():
+            pdf.add_page()
+            pdf.sub(f"{CURVE_STYLE[k]['label']}")
+            pdf.chart(overlay_all_path, w=270)
+    
+    pdf.add_page()
+    pdf.stitle("Accuracy Overlay - Per Schedule")
+    pdf.body(
+        "Each chart shows all metrics for one schedule. "
+        "Lines show mean accuracy across seeds, with shaded regions showing "
+        "95% confidence intervals. Vertical dashed line marks "
+        "the start of the undo phase.")
+    
+    for sched in sorted(set(r["schedule"] for r in results)):
+        overlay_path = plots_dir / f"overlay_{sched}.png"
+        if overlay_path.exists():
+            pdf.sub(f"Schedule: {sched}")
+            pdf.chart(overlay_path, w=240)
 
     pdf.add_page()
     pdf.stitle("Per-Run Details")
@@ -443,8 +547,11 @@ def main():
     print("Summary bars...")
     plot_summary_bars(results, plots_dir)
 
-    print("Overlay plot...")
-    plot_overlay(results, plots_dir)
+    print("Overlay per schedule...")
+    plot_overlay_per_schedule(results, plots_dir)
+
+    print("Overlay all schedules...")
+    plot_overlay_all_schedules(results, plots_dir)
 
     print("LR schedule...")
     plot_lr_schedule(cfg.get("base_cfg", cfg), plots_dir)

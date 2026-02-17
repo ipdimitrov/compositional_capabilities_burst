@@ -21,17 +21,18 @@ from burst.data import BurstDataset, pad_pools_to_same_length
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SCHEDULES = ["end_block", "uniform", "mid_block",
              "end_mixed_50", "end_mixed_75b", "end_mixed_25b", "ramp_up"]
-N_A, NB_SEEN, SEED = 4, 10, 42
+N_A, NB_SEEN, SEED_BASE = 4, 10, 42
+N_SEEDS = 10
 
 BASE_CFG = {
     "n_alphabets": 10, "seq_len": 6,
-    "n_layer": 4, "n_embd": 96, "n_head": 4,
+    "n_layer": 4, "n_embd": 120, "n_head": 4,
     "vocab_size": 128, "context_size": 80,
     "lr": 3e-4, "weight_decay": 1e-3,
     "beta1": 0.9, "beta2": 0.95, "grad_clip": 1.0,
     "warmup_iters": 50, "min_lr": 6e-5,
-    "batch_size": 256, "total_steps": 600, "p_target": 0.10,
-    "undo_steps": 400, "eval_every": 10, "unlearn_threshold": 0.25,
+    "batch_size": 512, "total_steps": 400, "p_target": 0.10,
+    "undo_steps": 400, "eval_every": 3, "unlearn_threshold": 0.25,
     "n_docs_per_task": 1500, "n_eval_per_task": 300,
 }
 
@@ -88,8 +89,6 @@ class Depth3Data:
         na, b_star = self.n_a, self.n_a + 1
         r = range(1, na + 1)
 
-        self.a_base = [("a3", fi, 0, 0) for fi in r]
-
         all_a = [("a3", fi, fj, fk) for fi in r for fj in r for fk in r]
         rng.shuffle(all_a)
         split = max(1, int(0.8 * len(all_a)))
@@ -130,7 +129,7 @@ def build_data(cfg: dict):
     target_pool = d.gen_pool(d.b_comp_train, nd)
 
     eval_pools = {
-        "A_base":    d.gen_pool(d.a_base, ne),
+
         "A_comp":    d.gen_pool(d.a_comp_train[:min(8, len(d.a_comp_train))], ne),
         "A_heldout": d.gen_pool(d.a_comp_heldout[:min(8, len(d.a_comp_heldout))], ne) if d.a_comp_heldout else {},
         "B_comp":    d.gen_pool(d.b_comp_train, ne),
@@ -162,7 +161,6 @@ def build_data(cfg: dict):
         "n_a": N_A, "n_b_seen": NB_SEEN,
         "n_a_comp_train": len(d.a_comp_train), "n_a_comp_heldout": len(d.a_comp_heldout),
         "n_b_comp_train": len(d.b_comp_train), "n_b_comp_heldout": len(d.b_comp_heldout),
-        "n_a_base": len(d.a_base), "vocab_size": d.vocab_size,
         "doc_len": int(ref.shape[1]), "prompt_len": prompt_len,
     }
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
@@ -182,7 +180,6 @@ def main():
     tp, bp, ed, pl, cfg_out, ti = build_data(BASE_CFG)
     print(f"  A_comp: {ti['n_a_comp_train']}/{ti['n_a_comp_heldout']}  "
           f"B_comp: {ti['n_b_comp_train']}/{ti['n_b_comp_heldout']}  "
-          f"A_base: {ti['n_a_base']}  vocab: {ti['vocab_size']}  "
           f"doc_len: {ti['doc_len']}  prompt: {ti['prompt_len']}", flush=True)
 
     data_path = str(run_dir / "_data.pkl")
@@ -191,21 +188,23 @@ def main():
 
     jobs = []
     for sched in SCHEDULES:
-        cfg = {**BASE_CFG, "seed": SEED, "n_b_seen": NB_SEEN,
-               "vocab_size": cfg_out["vocab_size"], "context_size": cfg_out["context_size"]}
-        label = f"{sched}_s{SEED}"
-        jobs.append({"schedule": sched, "seed": SEED, "cfg": cfg,
-                     "label": label, "n_b_seen": NB_SEEN})
+        for seed_idx in range(N_SEEDS):
+            seed = SEED_BASE + seed_idx
+            cfg = {**BASE_CFG, "seed": seed, "n_b_seen": NB_SEEN,
+                   "vocab_size": cfg_out["vocab_size"], "context_size": cfg_out["context_size"]}
+            label = f"{sched}_s{seed}"
+            jobs.append({"schedule": sched, "seed": seed, "cfg": cfg,
+                         "label": label, "n_b_seen": NB_SEEN})
 
     with open(run_dir / "config.json", "w") as f:
         json.dump({
-            "base_cfg": BASE_CFG, "n_a": N_A, "nb_seen": NB_SEEN, "seed": SEED,
-            "schedules": SCHEDULES, "n_jobs": len(jobs), "task_info": ti,
+            "base_cfg": BASE_CFG, "n_a": N_A, "nb_seen": NB_SEEN, "seed_base": SEED_BASE,
+            "n_seeds": N_SEEDS, "schedules": SCHEDULES, "n_jobs": len(jobs), "task_info": ti,
             "jobs": [{"label": j["label"], "schedule": j["schedule"],
                       "seed": j["seed"], "n_b_seen": j["n_b_seen"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    n_workers = min(len(jobs), 7)
+    n_workers = min(len(jobs), 30)
     steps_per_job = BASE_CFG["total_steps"] + BASE_CFG["undo_steps"]
 
     print(f"\nModel: {BASE_CFG['n_layer']}L/{BASE_CFG['n_embd']}d/{BASE_CFG['n_head']}H", flush=True)
@@ -253,10 +252,10 @@ def main():
             if rp.exists():
                 with open(rp, "rb") as f:
                     r = pickle.load(f)
-                hl = r.get('half_life', '?')
+                ql = r.get('quarter_life', '?')
                 tqdm.write(f"  [{n_done}/{len(jobs)}] {label:30s} "
                            f"peak={r['train_end_B_comp']:.3f} "
-                           f"t1/2={hl} auc={r['undo_auc']:.0f} ({time.time()-t0:.0f}s)")
+                           f"t1/4={ql} auc={r['undo_auc']:.0f} ({time.time()-t0:.0f}s)")
             else:
                 se = proc.stderr.read().decode() if proc.stderr else ""
                 tqdm.write(f"  FAIL [{n_done}/{len(jobs)}]: {label} (exit {proc.returncode})")

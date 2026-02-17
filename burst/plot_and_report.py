@@ -87,8 +87,6 @@ def plot_per_run(result, plots_dir):
 
     ax.plot(steps[train_mask], acc_t[train_mask], color="#F44336", lw=1.5, label="B (bij∘perm) - train")
     ax.plot(steps[undo_mask], acc_t[undo_mask], color="#F44336", lw=1.5, ls="--", label="B (bij∘perm) - undo")
-    ax.plot(steps[train_mask], acc_b[train_mask], color="#2196F3", lw=1.5, label="A (bijections) - train")
-    ax.plot(steps[undo_mask], acc_b[undo_mask], color="#2196F3", lw=1.5, ls="--", label="A (bijections) - undo")
     ax.plot(steps[train_mask], acc_h[train_mask], color="#4CAF50", lw=1.5, label="Held-out (bij∘perm∘bij) - train")
     ax.plot(steps[undo_mask], acc_h[undo_mask], color="#4CAF50", lw=1.5, ls="--", label="Held-out - undo")
 

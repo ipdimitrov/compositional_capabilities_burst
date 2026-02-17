@@ -55,7 +55,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CFG = {
     # seeds - reduced to 1 for <1hr runtime
     "seed_base": 42,
-    "n_seeds": 1,
+    "n_seeds": 10,
 
     # data (paper exact: 10 alphabets, seq_len 6, depth 5, N=4 bijections, 100 compositions)
     "n_alphabets": 10,
@@ -306,26 +306,26 @@ def run_one(schedule, seed, target_pool, bg_pool, eval_docs, space_pos):
         batch = sample_batch(target_pool, bg_pool, nt, bs)
         dat = torch.from_numpy(batch).long().to(DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
-        
+
         if s == 0:
             print(f"  Training on device: {inp.device}", flush=True)
 
         it, lr = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_lr_steps)
         optimizer.zero_grad(set_to_none=True)
-        
+
         with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.bfloat16):
             logits = net(inp)
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)), tgt.reshape(-1)
             )
-        
+
         scaler.scale(loss).backward()
         if CFG["grad_clip"] > 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(net.parameters(), CFG["grad_clip"])
         scaler.step(optimizer)
         scaler.update()
-        
+
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{lr:.2e}"})
 
         if s % ev == 0 or s == T - 1:
@@ -359,20 +359,20 @@ def run_one(schedule, seed, target_pool, bg_pool, eval_docs, space_pos):
 
         it, lr = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_lr_steps)
         optimizer.zero_grad(set_to_none=True)
-        
+
         with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.bfloat16):
             logits = net(inp)
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)), tgt_shuffled.reshape(-1)
             )
-        
+
         scaler.scale(loss).backward()
         if CFG["grad_clip"] > 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(net.parameters(), CFG["grad_clip"])
         scaler.step(optimizer)
         scaler.update()
-        
+
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{lr:.2e}"})
 
         if s % ev == 0 or s == U - 1:
@@ -389,7 +389,7 @@ def run_one(schedule, seed, target_pool, bg_pool, eval_docs, space_pos):
                 weight_deltas(w_train_end, snapshot_weights(net))
             )
             net.train()
-    
+
     pbar.close()
 
     # ── compute summary metrics ────────────────────────────────────────
@@ -467,7 +467,7 @@ def run_all():
     target_pool, bg_pool, eval_docs, space_pos, syn, task_examples = build_data(
         seed_base
     )
-    
+
     print(f"A:B split = {len(bg_pool)}:{len(target_pool)} (background:target tasks)", flush=True)
     print(f"Total compositions: {len(bg_pool) + len(target_pool)}", flush=True)
 
