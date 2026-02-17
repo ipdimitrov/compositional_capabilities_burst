@@ -19,7 +19,7 @@ from net.runner import configure_optimizers, update_cosine_warmup_lr
 from burst.data import BurstDataset
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-EVAL_KEYS = ["acc_A_base", "acc_A_comp", "acc_A_heldout", "acc_B_comp", "acc_B_heldout"]
+EVAL_KEYS = ["acc_A_comp", "acc_A_heldout", "acc_B_comp", "acc_B_heldout"]
 
 MIXED_SCHEDULES = {
     "end_mixed_50":  0.50,
@@ -185,11 +185,11 @@ def run(job, shared_data_path, run_dir, progress_dir):
     undo_end_B = undo_accs[-1] if undo_accs else peak_B
     undo_auc = float(np.trapz(undo_accs, undo_steps)) if len(undo_accs) > 1 else 0.0
 
-    half_life = U
+    quarter_life = U
     if peak_B > 1e-6:
         for acc_val, us in zip(undo_accs, undo_steps):
-            if acc_val <= peak_B * 0.5:
-                half_life = us
+            if acc_val <= peak_B * 0.25:
+                quarter_life = us
                 break
 
     dropoff_abs = peak_B - undo_end_B
@@ -201,7 +201,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
         "label": label, "log": log, "config": dict(cfg),
         "train_end_B_comp": peak_B, "undo_end_B_comp": undo_end_B,
         "dropoff_abs": dropoff_abs, "dropoff_pct": dropoff_pct,
-        "half_life": half_life, "undo_auc": undo_auc,
+        "quarter_life": quarter_life, "undo_auc": undo_auc,
     }
     for k in EVAL_KEYS:
         for phase in ("train", "undo"):
