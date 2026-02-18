@@ -21,7 +21,7 @@ from burst.data import BurstDataset, pad_pools_to_same_length
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SCHEDULES = ["end_block", "uniform", # "mid_block", "ramp_up"
              "end_mixed_50b", "end_mixed_75b", "end_mixed_25b"]
-N_A, NB_SEEN, SEED_BASE = 4, 10, 42
+N_A, NB_SEEN, SEED_BASE = 4, 16, 42
 N_SEEDS = 3
 
 BASE_CFG = {

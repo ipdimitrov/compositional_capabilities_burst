@@ -379,7 +379,7 @@ class ReportPDF(FPDF):
 def make_report(run_dir, results, cfg, per_run_fnames):
     plots_dir = run_dir / "plots"
     bcfg = cfg.get("base_cfg", cfg)
-    nb_seen = cfg.get("nb_seen", 10)
+    nb_seen = cfg.get("nb_seen", 16)
     n_a = cfg.get("n_a", 4)
 
     n_layer = bcfg['n_layer']
