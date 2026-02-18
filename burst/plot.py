@@ -128,7 +128,6 @@ def plot_lr_schedule(cfg, plots_dir):
 
 def plot_per_run(result, plots_dir):
     log, sched, seed, cfg = result["log"], result["schedule"], result["seed"], result["config"]
-    nb = result.get("n_b_seen", "?")
     steps = np.array(log["step"])
     loss = np.array(log["loss"])
     T, U = cfg["total_steps"], cfg["undo_steps"]
@@ -379,7 +378,6 @@ class ReportPDF(FPDF):
 def make_report(run_dir, results, cfg, per_run_fnames):
     plots_dir = run_dir / "plots"
     bcfg = cfg.get("base_cfg", cfg)
-    nb_seen = cfg.get("nb_seen", 16)
     n_a = cfg.get("n_a", 4)
 
     n_layer = bcfg['n_layer']
@@ -433,8 +431,8 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     pdf.sub("Burst Data (B = the new thing to learn)")
     n_b_pairs = n_a * n_a
     pdf.body(
-        f"One brand-new function (b*) placed at position 3. Of the {n_b_pairs} possible "
-        f"pairs for positions 1-2, the model sees {nb_seen} during the burst.")
+        f"One brand-new function (b*) placed at position 3. "
+        f"All {n_b_pairs} possible pairs for positions 1-2 are used during the burst.")
 
     pdf.sub("The Experiment")
     pdf.body(

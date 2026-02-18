@@ -277,7 +277,6 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     result = {
         "schedule": schedule, "seed": seed,
-        "n_b_seen": job.get("n_b_seen", 0),
         "label": label, "log": log, "config": dict(cfg),
         "train_end_B_comp": peak_B, "undo_end_B_comp": undo_end_B,
         "dropoff_abs": dropoff_abs, "dropoff_pct": dropoff_pct,

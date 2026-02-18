@@ -21,7 +21,7 @@ from burst.data import BurstDataset, pad_pools_to_same_length
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SCHEDULES = ["end_block", "uniform", # "mid_block", "ramp_up"
              "end_mixed_50b", "end_mixed_75b", "end_mixed_25b"]
-N_A, NB_SEEN, SEED_BASE = 4, 16, 42
+N_A, SEED_BASE = 4, 107
 N_SEEDS = 3
 
 BASE_CFG = {
@@ -56,7 +56,7 @@ class Depth3Data:
     Token format: S [F3 F2 F1] ' ' [input] ' ' [after F1] ' ' [after F2] ' ' [after F3]
     """
 
-    def __init__(self, n_alph: int, seq_len: int, n_a: int, n_b_seen: int, seed: int):
+    def __init__(self, n_alph: int, seq_len: int, n_a: int, seed: int):
         self.n_alph, self.seq_len, self.n_a = n_alph, seq_len, n_a
         rng = np.random.RandomState(seed)
 
@@ -65,7 +65,7 @@ class Depth3Data:
             self.bijections.append(rng.permutation(n_alph))
 
         self._build_vocab()
-        self._build_splits(n_b_seen, rng)
+        self._build_splits(rng)
 
     def _build_vocab(self):
         self.token, self.token_idx, self.fn_tok = {}, {}, {}
@@ -85,17 +85,14 @@ class Depth3Data:
             idx += 1
         self.vocab_size = idx
 
-    def _build_splits(self, n_b_seen: int, rng):
+    def _build_splits(self, rng):
         na, b_star = self.n_a, self.n_a + 1
         r = range(1, na + 1)
 
         self.a_comp_train = [("a3", fi, fj, fk) for fi in r for fj in r for fk in r]
         rng.shuffle(self.a_comp_train)
 
-        all_b_pairs = [(fj, fk) for fj in r for fk in r]
-        rng.shuffle(all_b_pairs)
-        n_b_seen = min(n_b_seen, len(all_b_pairs))
-        self.b_comp_train = [("b3", b_star, fj, fk) for fj, fk in all_b_pairs[:n_b_seen]]
+        self.b_comp_train = [("b3", b_star, fj, fk) for fj in r for fk in r]
 
     def _make_doc(self, task: tuple) -> np.ndarray:
         inp = np.random.choice(self.n_alph, size=self.seq_len, replace=True)
@@ -119,7 +116,7 @@ class Depth3Data:
 
 def build_data(cfg: dict):
     set_seed(999)
-    d = Depth3Data(cfg["n_alphabets"], cfg["seq_len"], N_A, NB_SEEN, 999)
+    d = Depth3Data(cfg["n_alphabets"], cfg["seq_len"], N_A, 999)
     nd, ne = cfg["n_docs_per_task"], cfg["n_eval_per_task"]
 
     bg_pool = d.gen_pool(d.a_comp_train, nd)
@@ -152,7 +149,7 @@ def build_data(cfg: dict):
     cfg_out["context_size"] = max(cfg["context_size"], ref.shape[1] + 5)
 
     task_info = {
-        "n_a": N_A, "n_b_seen": NB_SEEN,
+        "n_a": N_A,
         "n_a_comp_train": len(d.a_comp_train),
         "n_b_comp_train": len(d.b_comp_train),
         "doc_len": int(ref.shape[1]), "prompt_len": prompt_len,
@@ -177,7 +174,7 @@ def main():
     if DEVICE == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
 
-    print(f"\nBuilding data (pure bijections, n_B_seen={NB_SEEN})...", flush=True)
+    print(f"\nBuilding data (pure bijections, all B pairs)...", flush=True)
     tp, bp, ed, pl, cfg_out, ti = build_data(BASE_CFG)
     print(f"  A_comp: {ti['n_a_comp_train']}  "
           f"B_comp: {ti['n_b_comp_train']}  "
@@ -191,18 +188,17 @@ def main():
     for sched in SCHEDULES:
         for seed_idx in range(N_SEEDS):
             seed = SEED_BASE + seed_idx
-            cfg = {**BASE_CFG, "seed": seed, "n_b_seen": NB_SEEN,
+            cfg = {**BASE_CFG, "seed": seed,
                    "vocab_size": cfg_out["vocab_size"], "context_size": cfg_out["context_size"]}
             label = f"{sched}_s{seed}"
-            jobs.append({"schedule": sched, "seed": seed, "cfg": cfg,
-                         "label": label, "n_b_seen": NB_SEEN})
+            jobs.append({"schedule": sched, "seed": seed, "cfg": cfg, "label": label})
 
     with open(run_dir / "config.json", "w") as f:
         json.dump({
-            "base_cfg": BASE_CFG, "n_a": N_A, "nb_seen": NB_SEEN, "seed_base": SEED_BASE,
+            "base_cfg": BASE_CFG, "n_a": N_A, "seed_base": SEED_BASE,
             "n_seeds": N_SEEDS, "schedules": SCHEDULES, "n_jobs": len(jobs), "task_info": ti,
             "jobs": [{"label": j["label"], "schedule": j["schedule"],
-                      "seed": j["seed"], "n_b_seen": j["n_b_seen"]} for j in jobs],
+                      "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
     n_workers = min(len(jobs), 15)
