@@ -22,7 +22,7 @@ from itertools import combinations
 
 SCHED_COLORS = {
     "uniform": "#2196F3", "end_block": "#F44336", "mid_block": "#9C27B0",
-    "end_mixed_50": "#FF9800", "end_mixed_75b": "#E91E63", "end_mixed_25b": "#009688",
+    "end_mixed_50b": "#FF9800", "end_mixed_75b": "#E91E63", "end_mixed_25b": "#009688",
     "ramp_up": "#795548",
 }
 
@@ -89,7 +89,7 @@ def plot_heatmap(
 ):
     K, T = acc_KT.shape
     fig, ax = plt.subplots(figsize=(max(14, T * 0.5), max(4, K * 0.6)))
-    im = ax.imshow(acc_KT, aspect="auto", cmap="RdYlGn", vmin=vmin, vmax=vmax,
+    im = ax.imshow(acc_KT, aspect="auto", cmap="Blues", vmin=vmin, vmax=vmax,
                    interpolation="nearest")
 
     ax.set_xticks(range(T))
@@ -103,7 +103,7 @@ def plot_heatmap(
     for k in range(K):
         for t in range(T):
             val = acc_KT[k, t]
-            color = "white" if val < 0.65 else "black"
+            color = "white" if val > 0.75 else "black"
             ax.text(t, k, f"{val:.2f}", ha="center", va="center", fontsize=5, color=color)
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
@@ -223,50 +223,45 @@ def plot_mean_dynamics_by_schedule(
 
     total_steps = results[0]["total_steps"]
 
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    fig, ax = plt.subplots(1, 1, figsize=(14, 6))
     fig.suptitle("Mean Probe Accuracy Over Training (averaged across layers & tokens)",
                  fontsize=14, fontweight="bold")
+    ax.set_title("5-fold CV (train compositions)", fontsize=11)
 
-    for ax_idx, acc_key in enumerate(["train_acc_KT", "eval_acc_KT"]):
-        ax = axes[ax_idx]
-        title = "5-fold CV (train compositions)" if ax_idx == 0 else "Held-out compositions"
-        ax.set_title(title, fontsize=11)
+    for sched in sorted(sched_data.keys()):
+        runs = sched_data[sched]
+        all_steps = set()
+        for r in runs:
+            all_steps.update(r["probes"].keys())
+        steps_sorted = sorted(all_steps)
 
-        for sched in sorted(sched_data.keys()):
-            runs = sched_data[sched]
-            all_steps = set()
-            for r in runs:
-                all_steps.update(r["probes"].keys())
-            steps_sorted = sorted(all_steps)
+        per_seed_curves = []
+        for r in runs:
+            curve = []
+            for step in steps_sorted:
+                if step in r["probes"]:
+                    curve.append(r["probes"][step]["train_acc_KT"].mean())
+                else:
+                    curve.append(np.nan)
+            per_seed_curves.append(curve)
 
-            per_seed_curves = []
-            for r in runs:
-                curve = []
-                for step in steps_sorted:
-                    if step in r["probes"]:
-                        curve.append(r["probes"][step][acc_key].mean())
-                    else:
-                        curve.append(np.nan)
-                per_seed_curves.append(curve)
+        arr = np.array(per_seed_curves)
+        mean_vals = np.nanmean(arr, axis=0)
+        std_vals = np.nanstd(arr, axis=0)
+        n = np.sum(~np.isnan(arr), axis=0)
+        ci = np.where(n > 1, 1.96 * std_vals / np.sqrt(n), std_vals)
 
-            arr = np.array(per_seed_curves)
-            mean_vals = np.nanmean(arr, axis=0)
-            std_vals = np.nanstd(arr, axis=0)
-            n = np.sum(~np.isnan(arr), axis=0)
-            ci = np.where(n > 1, 1.96 * std_vals / np.sqrt(n), std_vals)
+        c = SCHED_COLORS.get(sched, "gray")
+        ax.plot(steps_sorted, mean_vals, color=c, lw=2.5, label=sched)
+        ax.fill_between(steps_sorted, mean_vals - ci, mean_vals + ci, color=c, alpha=0.2)
 
-            c = SCHED_COLORS.get(sched, "gray")
-            ax.plot(steps_sorted, mean_vals, color=c, lw=2.5, label=sched)
-            ax.fill_between(steps_sorted, mean_vals - ci, mean_vals + ci, color=c, alpha=0.2)
-
-        ax.axvline(total_steps, color="gray", ls="--", alpha=0.5, lw=2)
-        ax.axhline(0.5, color="gray", ls=":", alpha=0.3)
-        ax.set_ylabel("Mean Probe Accuracy", fontsize=10)
-        ax.set_ylim(0.35, 1.05)
-        ax.legend(fontsize=9, loc="best")
-        ax.grid(True, alpha=0.2)
-
-    axes[-1].set_xlabel("Global Step", fontsize=10)
+    ax.axvline(total_steps, color="gray", ls="--", alpha=0.5, lw=2)
+    ax.axhline(0.5, color="gray", ls=":", alpha=0.3)
+    ax.set_ylabel("Mean Probe Accuracy", fontsize=10)
+    ax.set_ylim(0.35, 1.05)
+    ax.legend(fontsize=9, loc="best")
+    ax.grid(True, alpha=0.2)
+    ax.set_xlabel("Global Step", fontsize=10)
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -337,7 +332,7 @@ def plot_layer_depth_dynamics(
     plt.close(fig)
 
 
-SCHEDULE_ORDER = ["end_block", "end_mixed_25b", "end_mixed_50", "end_mixed_75b", "uniform"]
+SCHEDULE_ORDER = ["end_block", "end_mixed_25b", "end_mixed_50b", "end_mixed_75b", "uniform"]
 
 
 def plot_layer_schedule_heatmap(
@@ -377,7 +372,7 @@ def plot_layer_schedule_heatmap(
             grid[:, ci] = np.mean(seed_means, axis=0)
 
     fig, ax = plt.subplots(figsize=(max(6, len(col_scheds) * 1.4), max(3, n_layers * 0.6)))
-    im = ax.imshow(grid, aspect="auto", cmap="RdYlGn", vmin=0.4, vmax=1.0,
+    im = ax.imshow(grid, aspect="auto", cmap="Blues", vmin=0.4, vmax=1.0,
                    interpolation="nearest")
 
     ax.set_xticks(range(len(col_scheds)))
@@ -393,7 +388,7 @@ def plot_layer_schedule_heatmap(
             val = grid[row, col]
             if np.isnan(val):
                 continue
-            color = "white" if val < 0.65 else "black"
+            color = "white" if val > 0.75 else "black"
             ax.text(col, row, f"{val:.3f}", ha="center", va="center", fontsize=10, color=color)
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.03)
