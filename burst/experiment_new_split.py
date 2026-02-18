@@ -20,7 +20,7 @@ from burst.data import BurstDataset, pad_pools_to_same_length
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SCHEDULES = ["end_block", "uniform", # "mid_block", "ramp_up"
-             "end_mixed_50", "end_mixed_75b", "end_mixed_25b"]
+             "end_mixed_50b", "end_mixed_75b", "end_mixed_25b"]
 N_A, NB_SEEN, SEED_BASE = 4, 10, 42
 N_SEEDS = 3
 
@@ -89,16 +89,13 @@ class Depth3Data:
         na, b_star = self.n_a, self.n_a + 1
         r = range(1, na + 1)
 
-        all_a = [("a3", fi, fj, fk) for fi in r for fj in r for fk in r]
-        rng.shuffle(all_a)
-        split = max(1, int(0.8 * len(all_a)))
-        self.a_comp_train, self.a_comp_heldout = all_a[:split], all_a[split:]
+        self.a_comp_train = [("a3", fi, fj, fk) for fi in r for fj in r for fk in r]
+        rng.shuffle(self.a_comp_train)
 
         all_b_pairs = [(fj, fk) for fj in r for fk in r]
         rng.shuffle(all_b_pairs)
         n_b_seen = min(n_b_seen, len(all_b_pairs))
         self.b_comp_train = [("b3", b_star, fj, fk) for fj, fk in all_b_pairs[:n_b_seen]]
-        self.b_comp_heldout = [("b3", b_star, fj, fk) for fj, fk in all_b_pairs[n_b_seen:]]
 
     def _make_doc(self, task: tuple) -> np.ndarray:
         inp = np.random.choice(self.n_alph, size=self.seq_len, replace=True)
@@ -129,11 +126,8 @@ def build_data(cfg: dict):
     target_pool = d.gen_pool(d.b_comp_train, nd)
 
     eval_pools = {
-
-        "A_comp":    d.gen_pool(d.a_comp_train[:min(8, len(d.a_comp_train))], ne),
-        "A_heldout": d.gen_pool(d.a_comp_heldout[:min(8, len(d.a_comp_heldout))], ne) if d.a_comp_heldout else {},
-        "B_comp":    d.gen_pool(d.b_comp_train, ne),
-        "B_heldout": d.gen_pool(d.b_comp_heldout[:min(8, len(d.b_comp_heldout))], ne) if d.b_comp_heldout else {},
+        "A_comp": d.gen_pool(d.a_comp_train[:min(8, len(d.a_comp_train))], ne),
+        "B_comp": d.gen_pool(d.b_comp_train, ne),
     }
 
     all_pools = [bg_pool, target_pool] + list(eval_pools.values())
@@ -159,8 +153,8 @@ def build_data(cfg: dict):
 
     task_info = {
         "n_a": N_A, "n_b_seen": NB_SEEN,
-        "n_a_comp_train": len(d.a_comp_train), "n_a_comp_heldout": len(d.a_comp_heldout),
-        "n_b_comp_train": len(d.b_comp_train), "n_b_comp_heldout": len(d.b_comp_heldout),
+        "n_a_comp_train": len(d.a_comp_train),
+        "n_b_comp_train": len(d.b_comp_train),
         "doc_len": int(ref.shape[1]), "prompt_len": prompt_len,
     }
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
@@ -178,8 +172,8 @@ def main():
 
     print(f"\nBuilding data (pure bijections, n_B_seen={NB_SEEN})...", flush=True)
     tp, bp, ed, pl, cfg_out, ti = build_data(BASE_CFG)
-    print(f"  A_comp: {ti['n_a_comp_train']}/{ti['n_a_comp_heldout']}  "
-          f"B_comp: {ti['n_b_comp_train']}/{ti['n_b_comp_heldout']}  "
+    print(f"  A_comp: {ti['n_a_comp_train']}  "
+          f"B_comp: {ti['n_b_comp_train']}  "
           f"doc_len: {ti['doc_len']}  prompt: {ti['prompt_len']}", flush=True)
 
     data_path = str(run_dir / "_data.pkl")

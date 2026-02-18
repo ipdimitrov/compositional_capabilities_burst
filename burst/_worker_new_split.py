@@ -20,10 +20,10 @@ from net.runner import configure_optimizers, update_cosine_warmup_lr
 from burst.data import BurstDataset
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-EVAL_KEYS = ["acc_A_comp", "acc_A_heldout", "acc_B_comp", "acc_B_heldout"]
+EVAL_KEYS = ["acc_A_comp", "acc_B_comp"]
 
 MIXED_SCHEDULES = {
-    "end_mixed_50":  0.50,
+    "end_mixed_50b":  0.50,
     "end_mixed_75b": 0.75,
     "end_mixed_25b": 0.25,
 }
@@ -68,7 +68,7 @@ def sample_batch(target_pool, bg_pool, n_target, batch_size):
     b_ids = list(bg_pool.keys())
     parts = []
     sampled_tasks = []
-    
+
     if n_target > 0:
         per_chain = n_target // len(t_ids)
         remainder = n_target % len(t_ids)
@@ -77,7 +77,7 @@ def sample_batch(target_pool, bg_pool, n_target, batch_size):
             for _ in range(n_samples):
                 parts.append(target_pool[tid][np.random.randint(len(target_pool[tid]))])
                 sampled_tasks.append(tid)
-    
+
     n_bg = batch_size - n_target
     if n_bg > 0:
         per_chain = n_bg // len(b_ids)
@@ -87,7 +87,7 @@ def sample_batch(target_pool, bg_pool, n_target, batch_size):
             for _ in range(n_samples):
                 parts.append(bg_pool[bid][np.random.randint(len(bg_pool[bid]))])
                 sampled_tasks.append(bid)
-    
+
     perm = np.random.permutation(batch_size)
     return np.array(parts)[perm], [sampled_tasks[i] for i in perm]
 
@@ -180,7 +180,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
     task_counts_train_phase1 = Counter()
     task_counts_train_phase2 = Counter()
     task_counts_undo = Counter()
-    
+
     burst_len = max(int(p * T), 1)
     if schedule == "uniform":
         train_phase1_end = T
@@ -192,16 +192,16 @@ def run(job, shared_data_path, run_dir, progress_dir):
         train_phase1_end = T - window
     else:
         train_phase1_end = T // 2
-    
+
     for s in range(T):
         nt = n_target_for_step(s, T, schedule, p, bs)
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, nt, bs)
-        
+
         if s < train_phase1_end:
             task_counts_train_phase1.update(sampled_tasks)
         else:
             task_counts_train_phase2.update(sampled_tasks)
-        
+
         loss_val = train_step(batch_np, sampled_tasks)
         if s % ev == 0 or s == T - 1:
             do_eval("train", loss_val)
@@ -211,7 +211,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
     for s in range(U):
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, 0, bs)
         task_counts_undo.update(sampled_tasks)
-        
+
         loss_val = train_step(batch_np, sampled_tasks)
         if s % ev == 0 or s == U - 1:
             do_eval("undo", loss_val)
@@ -219,18 +219,18 @@ def run(job, shared_data_path, run_dir, progress_dir):
             progress_file.write_text(str(T + s + 1))
 
     progress_file.write_text(str(T + U))
-    
+
     stats_dir = Path(run_dir) / "task_distributions"
     stats_dir.mkdir(exist_ok=True)
-    
+
     def save_task_distribution_stats(phase_name, counter_data):
         csv_path = stats_dir / f"{label}_{phase_name}.csv"
-        
+
         rows = []
         for task, count in counter_data.items():
             task_type = task[0]
             f3, f2, f1 = task[1], task[2], task[3]
-            
+
             rows.append({
                 "schedule": schedule,
                 "seed": seed,
@@ -242,14 +242,14 @@ def run(job, shared_data_path, run_dir, progress_dir):
                 "composition": f"{f3}_{f2}_{f1}",
                 "count": count
             })
-        
+
         if rows:
             with open(csv_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["schedule", "seed", "phase", "task_type", 
+                writer = csv.DictWriter(f, fieldnames=["schedule", "seed", "phase", "task_type",
                                                        "f3", "f2", "f1", "composition", "count"])
                 writer.writeheader()
                 writer.writerows(rows)
-    
+
     if task_counts_train_phase1:
         save_task_distribution_stats("train_phase1", task_counts_train_phase1)
     if task_counts_train_phase2:
