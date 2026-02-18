@@ -1,14 +1,14 @@
 """Linear probes for A-vs-B representation analysis.
 
-Retrains models from experiment_new_split.py using saved config.json,
+Retrains models from experiment.py using saved config.json,
 collects residual-stream activations at (layer, token_position) pairs
 across training checkpoints, and fits logistic regression probes to
 classify A-data vs B-data representations.
 
 Usage:
-    python burst/probe_new_split.py data/burst_d3_<timestamp>
-    python burst/probe_new_split.py data/burst_d3_<timestamp> --jobs end_block_s42 uniform_s42
-    python burst/probe_new_split.py data/burst_d3_<timestamp> --checkpoint-every 50
+    python burst/probe.py data/burst_d3_<run_tag>
+    python burst/probe.py data/burst_d3_<run_tag> --jobs end_block_s42 uniform_s42
+    python burst/probe.py data/burst_d3_<run_tag> --checkpoint-every 50
 """
 import sys, os, argparse, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -24,8 +24,8 @@ from omegaconf import OmegaConf
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
-from burst.experiment_new_split import Depth3Data, build_data, N_A, NB_SEEN
-from burst._worker_new_split import n_target_for_step, sample_batch
+from burst.experiment import Depth3Data, build_data, N_A, NB_SEEN
+from burst._worker import n_target_for_step, sample_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PROBE_SEED = 1337
@@ -350,6 +350,7 @@ def main():
 
     print(f"\nAll probes saved to {probe_dir}")
     print(f"Plot: python burst/plot_probes.py {run_dir}")
+
 
 
 if __name__ == "__main__":

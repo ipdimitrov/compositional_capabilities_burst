@@ -6,7 +6,7 @@ B data: 1 new bijection b* at position 3 -> b* . F_j . F_k
 
 7 schedules x 1 seed = 7 parallel jobs
 """
-import sys, os, time, pickle, json, subprocess
+import sys, os, time, pickle, json, subprocess, argparse
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -161,7 +161,14 @@ def build_data(cfg: dict):
 
 
 def main():
-    run_dir = Path("data") / f"burst_d3_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run-tag", default=None,
+                        help="Folder name suffix: data/burst_d3_<run_tag>. "
+                             "Defaults to current timestamp.")
+    args = parser.parse_args()
+
+    tag = args.run_tag or datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = Path("data") / f"burst_d3_{tag}"
     run_dir.mkdir(parents=True, exist_ok=True)
     progress_dir = run_dir / "_progress"
     progress_dir.mkdir(exist_ok=True)
@@ -206,7 +213,7 @@ def main():
     print(f"Steps/job: {BASE_CFG['total_steps']} train + {BASE_CFG['undo_steps']} undo", flush=True)
     print(f"Schedules: {SCHEDULES}\n", flush=True)
 
-    worker_script = str(Path(__file__).parent / "_worker_new_split.py")
+    worker_script = str(Path(__file__).parent / "_worker.py")
     t0 = time.time()
 
     def launch(idx, job):
@@ -298,7 +305,7 @@ def main():
     except Exception:
         pass
 
-    print(f"\nPlot: .venv/bin/python burst/plot_new_split.py {run_dir}", flush=True)
+    print(f"\nPlot: python burst/plot.py {run_dir}", flush=True)
 
 
 if __name__ == "__main__":
