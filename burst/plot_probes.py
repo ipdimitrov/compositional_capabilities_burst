@@ -1,0 +1,558 @@
+"""Plot probe heatmaps for A-vs-B representation analysis.
+
+Reads probe results from probe_new_split.py and generates:
+  1. Per-model layer×token heatmaps at key checkpoints
+  2. Training dynamics curves (probe accuracy over training steps)
+  3. Cross-model comparison heatmaps (e.g. end_block vs end_mixed_25b)
+  4. Mean-pooled probe accuracy over time per schedule
+
+Usage:
+    python burst/plot_probes.py data/burst_d3_<timestamp>
+"""
+import sys, os, pickle, json
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
+from pathlib import Path
+from itertools import combinations
+
+SCHED_COLORS = {
+    "uniform": "#2196F3", "end_block": "#F44336", "mid_block": "#9C27B0",
+    "end_mixed_50": "#FF9800", "end_mixed_75b": "#E91E63", "end_mixed_25b": "#009688",
+    "ramp_up": "#795548",
+}
+
+
+def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
+    probe_dir = run_dir / "probes"
+    if not probe_dir.exists():
+        print(f"ERROR: No probes/ directory found in {run_dir}")
+        print(f"Run the probe script first:")
+        print(f"  .venv/bin/python burst/probe_new_split.py {run_dir}")
+        sys.exit(1)
+
+    all_path = probe_dir / "all_probes.pkl"
+    if not all_path.exists():
+        individual = sorted(probe_dir.glob("*_probe.pkl"))
+        if individual:
+            print(f"No all_probes.pkl found, loading {len(individual)} individual probe files...")
+            results = []
+            for p in individual:
+                with open(p, "rb") as f:
+                    results.append(pickle.load(f))
+            with open(all_path, "wb") as f:
+                pickle.dump(results, f)
+        else:
+            print(f"ERROR: No probe results found in {probe_dir}")
+            print(f"Run the probe script first:")
+            print(f"  .venv/bin/python burst/probe_new_split.py {run_dir}")
+            sys.exit(1)
+    else:
+        with open(all_path, "rb") as f:
+            results = pickle.load(f)
+
+    meta_path = probe_dir / "probe_meta.json"
+    if not meta_path.exists():
+        print("No probe_meta.json found, reconstructing from results...")
+        r0 = results[0]
+        meta = {
+            "checkpoint_steps": r0.get("checkpoint_steps", sorted(r0["probes"].keys())),
+            "token_labels": r0.get("token_labels", [f"t{i}" for i in range(
+                list(r0["probes"].values())[0]["train_acc_KT"].shape[1])]),
+            "n_layers": r0.get("n_layers", list(r0["probes"].values())[0]["train_acc_KT"].shape[0] - 1),
+            "total_steps": r0.get("total_steps", 400),
+            "undo_steps": r0.get("undo_steps", 400),
+        }
+    else:
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+    return results, meta
+
+
+def _layer_labels(n_layers: int) -> list[str]:
+    return ["emb"] + [f"L{i}" for i in range(n_layers)]
+
+
+def plot_heatmap(
+    acc_KT: np.ndarray,
+    token_labels: list[str],
+    layer_labels: list[str],
+    title: str,
+    save_path: Path,
+    vmin: float = 0.4,
+    vmax: float = 1.0,
+):
+    K, T = acc_KT.shape
+    fig, ax = plt.subplots(figsize=(max(14, T * 0.5), max(4, K * 0.6)))
+    im = ax.imshow(acc_KT, aspect="auto", cmap="RdYlGn", vmin=vmin, vmax=vmax,
+                   interpolation="nearest")
+
+    ax.set_xticks(range(T))
+    ax.set_xticklabels(token_labels[:T], rotation=60, ha="right", fontsize=7)
+    ax.set_yticks(range(K))
+    ax.set_yticklabels(layer_labels[:K], fontsize=8)
+    ax.set_xlabel("Token Position", fontsize=10)
+    ax.set_ylabel("Layer", fontsize=10)
+    ax.set_title(title, fontsize=12, fontweight="bold")
+
+    for k in range(K):
+        for t in range(T):
+            val = acc_KT[k, t]
+            color = "white" if val < 0.65 else "black"
+            ax.text(t, k, f"{val:.2f}", ha="center", va="center", fontsize=5, color=color)
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label("Probe Accuracy (A vs B)", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_diff_heatmap(
+    acc_a_KT: np.ndarray,
+    acc_b_KT: np.ndarray,
+    token_labels: list[str],
+    layer_labels: list[str],
+    title: str,
+    label_a: str,
+    label_b: str,
+    save_path: Path,
+):
+    diff_KT = acc_a_KT - acc_b_KT
+    K, T = diff_KT.shape
+    vmax = max(abs(diff_KT.min()), abs(diff_KT.max()), 0.1)
+
+    fig, ax = plt.subplots(figsize=(max(14, T * 0.5), max(4, K * 0.6)))
+    im = ax.imshow(diff_KT, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax,
+                   interpolation="nearest")
+
+    ax.set_xticks(range(T))
+    ax.set_xticklabels(token_labels[:T], rotation=60, ha="right", fontsize=7)
+    ax.set_yticks(range(K))
+    ax.set_yticklabels(layer_labels[:K], fontsize=8)
+    ax.set_xlabel("Token Position", fontsize=10)
+    ax.set_ylabel("Layer", fontsize=10)
+    ax.set_title(title, fontsize=12, fontweight="bold")
+
+    for k in range(K):
+        for t in range(T):
+            val = diff_KT[k, t]
+            color = "white" if abs(val) > vmax * 0.6 else "black"
+            ax.text(t, k, f"{val:+.2f}", ha="center", va="center", fontsize=5, color=color)
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label(f"Δ accuracy ({label_a} − {label_b})", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_training_dynamics(
+    result: dict,
+    token_labels: list[str],
+    layer_labels: list[str],
+    save_path: Path,
+):
+    """Plot probe accuracy over training steps for selected (layer, token) combos."""
+    probes = result["probes"]
+    total_steps = result["total_steps"]
+    n_layers = result["n_layers"]
+
+    interesting_tokens = []
+    for i, lbl in enumerate(token_labels):
+        if lbl in ("F3", "F2", "F1", "sp1", "o1_0", "o3_5", "sp3"):
+            interesting_tokens.append((i, lbl))
+    if not interesting_tokens:
+        interesting_tokens = [(i, token_labels[i]) for i in range(min(5, len(token_labels)))]
+
+    interesting_layers = [0, n_layers // 2, n_layers]
+
+    steps_sorted = sorted(probes.keys())
+    fig, axes = plt.subplots(len(interesting_layers), 1,
+                             figsize=(14, 4 * len(interesting_layers)), sharex=True)
+    if len(interesting_layers) == 1:
+        axes = [axes]
+
+    fig.suptitle(f"Training Dynamics — {result['label']}\nProbe accuracy (A vs B) over training",
+                 fontsize=13, fontweight="bold")
+
+    for ax_idx, layer_k in enumerate(interesting_layers):
+        ax = axes[ax_idx]
+        for tok_idx, tok_lbl in interesting_tokens:
+            accs = []
+            valid_steps = []
+            for step in steps_sorted:
+                acc_KT = probes[step]["train_acc_KT"]
+                if layer_k < acc_KT.shape[0] and tok_idx < acc_KT.shape[1]:
+                    accs.append(acc_KT[layer_k, tok_idx])
+                    valid_steps.append(step)
+            if accs:
+                ax.plot(valid_steps, accs, marker=".", markersize=3, lw=1.5, label=tok_lbl)
+
+        ax.axvline(total_steps, color="gray", ls="--", alpha=0.5, lw=2)
+        ax.axhline(0.5, color="gray", ls=":", alpha=0.3)
+        ax.set_ylabel(f"{layer_labels[layer_k]}\nAccuracy", fontsize=9)
+        ax.set_ylim(0.35, 1.05)
+        ax.legend(fontsize=7, ncol=4, loc="upper left")
+        ax.grid(True, alpha=0.2)
+
+    axes[-1].set_xlabel("Global Step", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_mean_dynamics_by_schedule(
+    results: list[dict],
+    save_path: Path,
+):
+    """Mean-pooled probe accuracy over time, one line per schedule."""
+    sched_data = {}
+    for r in results:
+        sched = r["schedule"]
+        if sched not in sched_data:
+            sched_data[sched] = []
+        sched_data[sched].append(r)
+
+    total_steps = results[0]["total_steps"]
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    fig.suptitle("Mean Probe Accuracy Over Training (averaged across layers & tokens)",
+                 fontsize=14, fontweight="bold")
+
+    for ax_idx, acc_key in enumerate(["train_acc_KT", "eval_acc_KT"]):
+        ax = axes[ax_idx]
+        title = "5-fold CV (train compositions)" if ax_idx == 0 else "Held-out compositions"
+        ax.set_title(title, fontsize=11)
+
+        for sched in sorted(sched_data.keys()):
+            runs = sched_data[sched]
+            all_steps = set()
+            for r in runs:
+                all_steps.update(r["probes"].keys())
+            steps_sorted = sorted(all_steps)
+
+            per_seed_curves = []
+            for r in runs:
+                curve = []
+                for step in steps_sorted:
+                    if step in r["probes"]:
+                        curve.append(r["probes"][step][acc_key].mean())
+                    else:
+                        curve.append(np.nan)
+                per_seed_curves.append(curve)
+
+            arr = np.array(per_seed_curves)
+            mean_vals = np.nanmean(arr, axis=0)
+            std_vals = np.nanstd(arr, axis=0)
+            n = np.sum(~np.isnan(arr), axis=0)
+            ci = np.where(n > 1, 1.96 * std_vals / np.sqrt(n), std_vals)
+
+            c = SCHED_COLORS.get(sched, "gray")
+            ax.plot(steps_sorted, mean_vals, color=c, lw=2.5, label=sched)
+            ax.fill_between(steps_sorted, mean_vals - ci, mean_vals + ci, color=c, alpha=0.2)
+
+        ax.axvline(total_steps, color="gray", ls="--", alpha=0.5, lw=2)
+        ax.axhline(0.5, color="gray", ls=":", alpha=0.3)
+        ax.set_ylabel("Mean Probe Accuracy", fontsize=10)
+        ax.set_ylim(0.35, 1.05)
+        ax.legend(fontsize=9, loc="best")
+        ax.grid(True, alpha=0.2)
+
+    axes[-1].set_xlabel("Global Step", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_layer_depth_dynamics(
+    results: list[dict],
+    save_path: Path,
+):
+    """Per-layer mean probe accuracy over time, one subplot per schedule."""
+    sched_data = {}
+    for r in results:
+        sched = r["schedule"]
+        if sched not in sched_data:
+            sched_data[sched] = []
+        sched_data[sched].append(r)
+
+    n_layers = results[0]["n_layers"]
+    total_steps = results[0]["total_steps"]
+    layer_labels = _layer_labels(n_layers)
+    K = n_layers + 1
+
+    n_scheds = len(sched_data)
+    fig, axes = plt.subplots(n_scheds, 1, figsize=(14, 4 * n_scheds), sharex=True)
+    if n_scheds == 1:
+        axes = [axes]
+
+    fig.suptitle("Per-Layer Probe Accuracy Over Training\n(mean across token positions & seeds)",
+                 fontsize=14, fontweight="bold")
+
+    cmap = plt.cm.viridis(np.linspace(0.1, 0.9, K))
+
+    for ax_idx, sched in enumerate(sorted(sched_data.keys())):
+        ax = axes[ax_idx]
+        runs = sched_data[sched]
+
+        all_steps = set()
+        for r in runs:
+            all_steps.update(r["probes"].keys())
+        steps_sorted = sorted(all_steps)
+
+        for k in range(K):
+            per_seed = []
+            for r in runs:
+                curve = []
+                for step in steps_sorted:
+                    if step in r["probes"]:
+                        curve.append(r["probes"][step]["train_acc_KT"][k, :].mean())
+                    else:
+                        curve.append(np.nan)
+                per_seed.append(curve)
+
+            arr = np.array(per_seed)
+            mean_vals = np.nanmean(arr, axis=0)
+            ax.plot(steps_sorted, mean_vals, color=cmap[k], lw=2, label=layer_labels[k])
+
+        ax.axvline(total_steps, color="gray", ls="--", alpha=0.5, lw=2)
+        ax.axhline(0.5, color="gray", ls=":", alpha=0.3)
+        ax.set_ylabel("Probe Acc", fontsize=9)
+        ax.set_title(sched, fontsize=10, fontweight="bold")
+        ax.set_ylim(0.35, 1.05)
+        ax.legend(fontsize=7, ncol=K, loc="upper left")
+        ax.grid(True, alpha=0.2)
+
+    axes[-1].set_xlabel("Global Step", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+SCHEDULE_ORDER = ["end_block", "end_mixed_25b", "end_mixed_50", "end_mixed_75b", "uniform"]
+
+
+def plot_layer_schedule_heatmap(
+    results: list[dict],
+    step: int,
+    save_path: Path,
+    acc_key: str = "train_acc_KT",
+):
+    """Layer × Schedule heatmap of mean probe accuracy at a given step.
+
+    Rows: L0 … L{n-1}  (transformer blocks, excludes embedding)
+    Columns: schedules in SCHEDULE_ORDER
+    Values: mean across token positions and seeds
+    """
+    n_layers = results[0]["n_layers"]
+    layer_labels = [f"L{i}" for i in range(n_layers)]
+
+    sched_set = set(r["schedule"] for r in results)
+    col_scheds = [s for s in SCHEDULE_ORDER if s in sched_set]
+    if not col_scheds:
+        col_scheds = sorted(sched_set)
+
+    grid = np.full((n_layers, len(col_scheds)), np.nan)
+
+    for ci, sched in enumerate(col_scheds):
+        seed_means = []
+        for r in results:
+            if r["schedule"] != sched:
+                continue
+            closest = min(r["probes"].keys(), key=lambda s: abs(s - step))
+            if abs(closest - step) > 30:
+                continue
+            acc_KT = r["probes"][closest][acc_key]
+            per_layer = acc_KT[1:, :].mean(axis=1)  # skip emb row
+            seed_means.append(per_layer)
+        if seed_means:
+            grid[:, ci] = np.mean(seed_means, axis=0)
+
+    fig, ax = plt.subplots(figsize=(max(6, len(col_scheds) * 1.4), max(3, n_layers * 0.6)))
+    im = ax.imshow(grid, aspect="auto", cmap="RdYlGn", vmin=0.4, vmax=1.0,
+                   interpolation="nearest")
+
+    ax.set_xticks(range(len(col_scheds)))
+    ax.set_xticklabels(col_scheds, rotation=30, ha="right", fontsize=10)
+    ax.set_yticks(range(n_layers))
+    ax.set_yticklabels(layer_labels, fontsize=10)
+    ax.set_xlabel("Schedule", fontsize=11)
+    ax.set_ylabel("Layer", fontsize=11)
+    ax.set_title(f"Layer × Schedule — mean probe accuracy at step {step}", fontsize=13, fontweight="bold")
+
+    for row in range(n_layers):
+        for col in range(len(col_scheds)):
+            val = grid[row, col]
+            if np.isnan(val):
+                continue
+            color = "white" if val < 0.65 else "black"
+            ax.text(col, row, f"{val:.3f}", ha="center", va="center", fontsize=10, color=color)
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.03)
+    cbar.set_label("Mean Probe Accuracy", fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _pick_representative_seed(results: list[dict], schedule: str) -> dict | None:
+    """Pick the first seed for a given schedule."""
+    for r in results:
+        if r["schedule"] == schedule:
+            return r
+    return None
+
+
+def _mean_acc_at_step(results: list[dict], schedule: str, step: int, key: str) -> np.ndarray | None:
+    """Average probe accuracy across seeds for a schedule at a given step."""
+    arrs = []
+    for r in results:
+        if r["schedule"] == schedule and step in r["probes"]:
+            arrs.append(r["probes"][step][key])
+    if not arrs:
+        return None
+    return np.mean(arrs, axis=0)
+
+
+def main():
+    if len(sys.argv) < 2:
+        data_dir = Path("data")
+        burst_dirs = sorted([d for d in data_dir.glob("burst_d3_*") if d.is_dir()])
+        if not burst_dirs:
+            print("No burst_d3_* dirs found"); sys.exit(1)
+        run_dir = burst_dirs[-1]
+        print(f"Auto-detected: {run_dir}")
+    else:
+        run_dir = Path(sys.argv[1])
+
+    results, meta = load_probe_results(run_dir)
+    token_labels = meta["token_labels"]
+    n_layers = meta["n_layers"]
+    total_steps = meta["total_steps"]
+    undo_steps = meta["undo_steps"]
+    layer_labels = _layer_labels(n_layers)
+
+    plots_dir = run_dir / "probes" / "plots"
+    plots_dir.mkdir(exist_ok=True)
+
+    schedules = sorted(set(r["schedule"] for r in results))
+    key_steps = [0, total_steps // 2, total_steps, total_steps + undo_steps // 2,
+                 total_steps + undo_steps]
+
+    print("Per-model heatmaps at key checkpoints...")
+    for r in results:
+        label = r["label"]
+        probes = r["probes"]
+        for step in key_steps:
+            closest = min(probes.keys(), key=lambda s: abs(s - step))
+            if abs(closest - step) > 30:
+                continue
+            phase = "train" if closest <= total_steps else "undo"
+            acc_KT = probes[closest]["train_acc_KT"]
+            plot_heatmap(
+                acc_KT, token_labels, layer_labels,
+                f"{label} — step {closest} ({phase})\n5-fold CV probe accuracy (A vs B)",
+                plots_dir / f"heatmap_{label}_step{closest}.png")
+        print(f"  {label}")
+
+    print("Training dynamics per model...")
+    for r in results:
+        plot_training_dynamics(r, token_labels, layer_labels,
+                               plots_dir / f"dynamics_{r['label']}.png")
+    print(f"  {len(results)} dynamics plots")
+
+    print("Mean dynamics by schedule...")
+    plot_mean_dynamics_by_schedule(results, plots_dir / "mean_dynamics_by_schedule.png")
+
+    print("Per-layer depth dynamics...")
+    plot_layer_depth_dynamics(results, plots_dir / "layer_depth_dynamics.png")
+
+    print("Cross-model comparison heatmaps...")
+    comparison_dir = plots_dir / "comparisons"
+    comparison_dir.mkdir(exist_ok=True)
+
+    for step in [total_steps, total_steps + undo_steps]:
+        phase_label = "end_train" if step == total_steps else "end_undo"
+
+        for sa, sb in combinations(schedules, 2):
+            acc_a = _mean_acc_at_step(results, sa, step, "train_acc_KT")
+            acc_b = _mean_acc_at_step(results, sb, step, "train_acc_KT")
+            if acc_a is None or acc_b is None:
+                closest_a = min(
+                    [s for r in results if r["schedule"] == sa for s in r["probes"].keys()],
+                    key=lambda s: abs(s - step), default=None)
+                closest_b = min(
+                    [s for r in results if r["schedule"] == sb for s in r["probes"].keys()],
+                    key=lambda s: abs(s - step), default=None)
+                if closest_a is not None and abs(closest_a - step) <= 30:
+                    acc_a = _mean_acc_at_step(results, sa, closest_a, "train_acc_KT")
+                if closest_b is not None and abs(closest_b - step) <= 30:
+                    acc_b = _mean_acc_at_step(results, sb, closest_b, "train_acc_KT")
+            if acc_a is None or acc_b is None:
+                continue
+
+            plot_diff_heatmap(
+                acc_a, acc_b, token_labels, layer_labels,
+                f"{sa} vs {sb} — step {step} ({phase_label})\n"
+                f"Δ probe accuracy (positive = {sa} higher)",
+                sa, sb,
+                comparison_dir / f"diff_{sa}_vs_{sb}_{phase_label}.png")
+
+        for sched in schedules:
+            acc_train_end = _mean_acc_at_step(results, sched, total_steps, "train_acc_KT")
+            acc_undo_end = _mean_acc_at_step(results, sched, total_steps + undo_steps, "train_acc_KT")
+            if acc_train_end is not None and acc_undo_end is not None:
+                plot_diff_heatmap(
+                    acc_train_end, acc_undo_end, token_labels, layer_labels,
+                    f"{sched} — end_train vs end_undo\n"
+                    f"Δ probe accuracy (positive = more A/B distinction at end of training)",
+                    "end_train", "end_undo",
+                    comparison_dir / f"diff_{sched}_train_vs_undo.png")
+
+    print(f"  Comparisons saved to {comparison_dir}")
+
+    print("Per-schedule heatmaps (mean across seeds)...")
+    sched_dir = plots_dir / "by_schedule"
+    sched_dir.mkdir(exist_ok=True)
+
+    for sched in schedules:
+        for step in key_steps:
+            acc = _mean_acc_at_step(results, sched, step, "train_acc_KT")
+            if acc is None:
+                closest = min(
+                    [s for r in results if r["schedule"] == sched for s in r["probes"].keys()],
+                    key=lambda s: abs(s - step), default=None)
+                if closest is not None and abs(closest - step) <= 30:
+                    acc = _mean_acc_at_step(results, sched, closest, "train_acc_KT")
+                    step = closest
+            if acc is None:
+                continue
+            phase = "train" if step <= total_steps else "undo"
+            plot_heatmap(
+                acc, token_labels, layer_labels,
+                f"{sched} (mean across seeds) — step {step} ({phase})\n"
+                f"5-fold CV probe accuracy (A vs B)",
+                sched_dir / f"heatmap_{sched}_step{step}.png")
+        print(f"  {sched}")
+
+    print("Layer × Schedule heatmap...")
+    final_step = total_steps + undo_steps
+    plot_layer_schedule_heatmap(
+        results, final_step,
+        plots_dir / f"layer_schedule_heatmap_step{final_step}.png")
+    print(f"  step {final_step}")
+
+    print(f"\nAll probe plots saved to {plots_dir}")
+
+
+if __name__ == "__main__":
+    main()
