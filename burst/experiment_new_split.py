@@ -19,21 +19,21 @@ from synthetic.init import set_seed
 from burst.data import BurstDataset, pad_pools_to_same_length
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SCHEDULES = ["end_block", "uniform", "mid_block",
-             "end_mixed_50", "end_mixed_75b", "end_mixed_25b", "ramp_up"]
+SCHEDULES = ["end_block", "uniform", # "mid_block", "ramp_up"
+             "end_mixed_50", "end_mixed_75b", "end_mixed_25b"]
 N_A, NB_SEEN, SEED_BASE = 4, 10, 42
-N_SEEDS = 10
+N_SEEDS = 3
 
 BASE_CFG = {
     "n_alphabets": 10, "seq_len": 6,
-    "n_layer": 4, "n_embd": 120, "n_head": 4,
+    "n_layer": 6, "n_embd": 120, "n_head": 4,
     "vocab_size": 128, "context_size": 80,
     "lr": 3e-4, "weight_decay": 1e-3,
     "beta1": 0.9, "beta2": 0.95, "grad_clip": 1.0,
     "warmup_iters": 50, "min_lr": 6e-5,
     "batch_size": 512, "total_steps": 400, "p_target": 0.10,
-    "undo_steps": 400, "eval_every": 3, "unlearn_threshold": 0.25,
-    "n_docs_per_task": 1500, "n_eval_per_task": 300,
+    "undo_steps": 400, "eval_every": 10, "unlearn_threshold": 0.25,
+    "n_docs_per_task": 500, "n_eval_per_task": 500,
 }
 
 
@@ -204,7 +204,7 @@ def main():
                       "seed": j["seed"], "n_b_seen": j["n_b_seen"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    n_workers = min(len(jobs), 30)
+    n_workers = min(len(jobs), 15)
     steps_per_job = BASE_CFG["total_steps"] + BASE_CFG["undo_steps"]
 
     print(f"\nModel: {BASE_CFG['n_layer']}L/{BASE_CFG['n_embd']}d/{BASE_CFG['n_head']}H", flush=True)

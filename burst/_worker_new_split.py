@@ -9,9 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import torch
 import torch.nn.functional as F
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from pathlib import Path
 from omegaconf import OmegaConf
+import csv
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
@@ -66,13 +67,29 @@ def sample_batch(target_pool, bg_pool, n_target, batch_size):
     t_ids = list(target_pool.keys())
     b_ids = list(bg_pool.keys())
     parts = []
-    for _ in range(n_target):
-        tid = t_ids[np.random.randint(len(t_ids))]
-        parts.append(target_pool[tid][np.random.randint(len(target_pool[tid]))])
-    for _ in range(batch_size - n_target):
-        bid = b_ids[np.random.randint(len(b_ids))]
-        parts.append(bg_pool[bid][np.random.randint(len(bg_pool[bid]))])
-    return np.array(parts)[np.random.permutation(batch_size)]
+    sampled_tasks = []
+    
+    if n_target > 0:
+        per_chain = n_target // len(t_ids)
+        remainder = n_target % len(t_ids)
+        for i, tid in enumerate(t_ids):
+            n_samples = per_chain + (1 if i < remainder else 0)
+            for _ in range(n_samples):
+                parts.append(target_pool[tid][np.random.randint(len(target_pool[tid]))])
+                sampled_tasks.append(tid)
+    
+    n_bg = batch_size - n_target
+    if n_bg > 0:
+        per_chain = n_bg // len(b_ids)
+        remainder = n_bg % len(b_ids)
+        for i, bid in enumerate(b_ids):
+            n_samples = per_chain + (1 if i < remainder else 0)
+            for _ in range(n_samples):
+                parts.append(bg_pool[bid][np.random.randint(len(bg_pool[bid]))])
+                sampled_tasks.append(bid)
+    
+    perm = np.random.permutation(batch_size)
+    return np.array(parts)[perm], [sampled_tasks[i] for i in perm]
 
 
 @torch.no_grad()
@@ -140,7 +157,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
             log[k].append(eval_free_gen(net, eval_docs[k.replace("acc_", "")], prompt_len))
         net.train()
 
-    def train_step(batch_np):
+    def train_step(batch_np, tasks_sampled):
         nonlocal it
         dat = torch.from_numpy(batch_np).long().to(DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
@@ -160,22 +177,85 @@ def run(job, shared_data_path, run_dir, progress_dir):
     net.train()
     it = 0
 
+    task_counts_train_phase1 = Counter()
+    task_counts_train_phase2 = Counter()
+    task_counts_undo = Counter()
+    
+    burst_len = max(int(p * T), 1)
+    if schedule == "uniform":
+        train_phase1_end = T
+    elif schedule == "end_block":
+        train_phase1_end = T - burst_len
+    elif schedule in MIXED_SCHEDULES:
+        frac = MIXED_SCHEDULES[schedule]
+        window = min(int(burst_len / frac), T)
+        train_phase1_end = T - window
+    else:
+        train_phase1_end = T // 2
+    
     for s in range(T):
         nt = n_target_for_step(s, T, schedule, p, bs)
-        loss_val = train_step(sample_batch(target_pool, bg_pool, nt, bs))
+        batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, nt, bs)
+        
+        if s < train_phase1_end:
+            task_counts_train_phase1.update(sampled_tasks)
+        else:
+            task_counts_train_phase2.update(sampled_tasks)
+        
+        loss_val = train_step(batch_np, sampled_tasks)
         if s % ev == 0 or s == T - 1:
             do_eval("train", loss_val)
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(s + 1))
 
     for s in range(U):
-        loss_val = train_step(sample_batch(target_pool, bg_pool, 0, bs))
+        batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, 0, bs)
+        task_counts_undo.update(sampled_tasks)
+        
+        loss_val = train_step(batch_np, sampled_tasks)
         if s % ev == 0 or s == U - 1:
             do_eval("undo", loss_val)
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(T + s + 1))
 
     progress_file.write_text(str(T + U))
+    
+    stats_dir = Path(run_dir) / "task_distributions"
+    stats_dir.mkdir(exist_ok=True)
+    
+    def save_task_distribution_stats(phase_name, counter_data):
+        csv_path = stats_dir / f"{label}_{phase_name}.csv"
+        
+        rows = []
+        for task, count in counter_data.items():
+            task_type = task[0]
+            f3, f2, f1 = task[1], task[2], task[3]
+            
+            rows.append({
+                "schedule": schedule,
+                "seed": seed,
+                "phase": phase_name,
+                "task_type": task_type,
+                "f3": f3,
+                "f2": f2,
+                "f1": f1,
+                "composition": f"{f3}_{f2}_{f1}",
+                "count": count
+            })
+        
+        if rows:
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["schedule", "seed", "phase", "task_type", 
+                                                       "f3", "f2", "f1", "composition", "count"])
+                writer.writeheader()
+                writer.writerows(rows)
+    
+    if task_counts_train_phase1:
+        save_task_distribution_stats("train_phase1", task_counts_train_phase1)
+    if task_counts_train_phase2:
+        save_task_distribution_stats("train_phase2", task_counts_train_phase2)
+    if task_counts_undo:
+        save_task_distribution_stats("undo", task_counts_undo)
 
     undo_accs = [log["acc_B_comp"][i] for i, ph in enumerate(log["phase"]) if ph == "undo"]
     undo_steps = [log["step"][i] - T for i, ph in enumerate(log["phase"]) if ph == "undo"]
