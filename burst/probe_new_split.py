@@ -97,38 +97,29 @@ def build_probe_dataset(
     data: Depth3Data,
     doc_len: int,
     n_per_task: int = 200,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build balanced A/B probe datasets from train + heldout compositions."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build balanced A/B probe datasets from train compositions."""
     a_train = data.gen_pool(data.a_comp_train[:min(16, len(data.a_comp_train))], n_per_task)
     b_train = data.gen_pool(data.b_comp_train, n_per_task)
-    a_eval = data.gen_pool(
-        data.a_comp_heldout[:min(8, len(data.a_comp_heldout))], n_per_task
-    ) if data.a_comp_heldout else {}
-    b_eval = data.gen_pool(
-        data.b_comp_heldout[:min(6, len(data.b_comp_heldout))], n_per_task
-    ) if data.b_comp_heldout else {}
 
     def _cat(pool):
         if not pool:
             return np.zeros((0, doc_len), dtype=np.int64)
         return _pad_to_len(np.concatenate(list(pool.values())), doc_len)
 
-    return _cat(a_train), _cat(b_train), _cat(a_eval), _cat(b_eval)
+    return _cat(a_train), _cat(b_train)
 
 
 def fit_probes_at_checkpoint(
     net: nanoGPT,
     a_docs_BL: np.ndarray,
     b_docs_BL: np.ndarray,
-    a_eval_BL: np.ndarray,
-    b_eval_BL: np.ndarray,
     max_samples: int = 512,
 ) -> dict:
     """Fit logistic regression probes at every (layer, token_pos).
 
     Returns dict with:
         'train_acc_KT': (K, T) array — 5-fold CV accuracy on train compositions
-        'eval_acc_KT':  (K, T) array — accuracy on held-out compositions
     """
     np.random.seed(PROBE_SEED)
 
@@ -141,16 +132,7 @@ def fit_probes_at_checkpoint(
     X_KPTN = np.concatenate([acts_a_KPTN, acts_b_KPTN], axis=1)
     y_P = np.array([0] * Pa + [1] * Pb)
 
-    has_eval = a_eval_BL.shape[0] > 0 and b_eval_BL.shape[0] > 0
-    if has_eval:
-        acts_a_eval = collect_activations_KPTN(net, a_eval_BL, max_samples)
-        acts_b_eval = collect_activations_KPTN(net, b_eval_BL, max_samples)
-        Pa_e, Pb_e = acts_a_eval.shape[1], acts_b_eval.shape[1]
-        X_eval_KPTN = np.concatenate([acts_a_eval, acts_b_eval], axis=1)
-        y_eval = np.array([0] * Pa_e + [1] * Pb_e)
-
     train_acc_KT = np.zeros((K, T))
-    eval_acc_KT = np.zeros((K, T))
 
     for k in range(K):
         for t in range(T):
@@ -160,11 +142,7 @@ def fit_probes_at_checkpoint(
             scores = cross_val_score(clf, feats_PN, y_P, cv=5, scoring="accuracy")
             train_acc_KT[k, t] = scores.mean()
 
-            if has_eval:
-                clf.fit(feats_PN, y_P)
-                eval_acc_KT[k, t] = clf.score(X_eval_KPTN[k, :, t, :], y_eval)
-
-    return {"train_acc_KT": train_acc_KT, "eval_acc_KT": eval_acc_KT}
+    return {"train_acc_KT": train_acc_KT}
 
 
 def retrain_and_probe(
@@ -173,8 +151,6 @@ def retrain_and_probe(
     bg_pool: dict,
     a_docs_BL: np.ndarray,
     b_docs_BL: np.ndarray,
-    a_eval_BL: np.ndarray,
-    b_eval_BL: np.ndarray,
     checkpoint_steps: list[int],
     probe_max_samples: int = 512,
 ) -> dict:
@@ -210,7 +186,7 @@ def retrain_and_probe(
     if 0 in checkpoint_set:
         print(f"    Probing step 0 (init)...", flush=True)
         probe_results[0] = fit_probes_at_checkpoint(
-            net, a_docs_BL, b_docs_BL, a_eval_BL, b_eval_BL, probe_max_samples)
+            net, a_docs_BL, b_docs_BL, probe_max_samples)
         net.train()
 
     for s in range(T_train):
@@ -234,7 +210,7 @@ def retrain_and_probe(
         if global_step in checkpoint_set:
             print(f"    Probing step {global_step} (train)...", flush=True)
             probe_results[global_step] = fit_probes_at_checkpoint(
-                net, a_docs_BL, b_docs_BL, a_eval_BL, b_eval_BL, probe_max_samples)
+                net, a_docs_BL, b_docs_BL, probe_max_samples)
             net.train()
 
     for s in range(U):
@@ -257,7 +233,7 @@ def retrain_and_probe(
         if global_step in checkpoint_set:
             print(f"    Probing step {global_step} (undo)...", flush=True)
             probe_results[global_step] = fit_probes_at_checkpoint(
-                net, a_docs_BL, b_docs_BL, a_eval_BL, b_eval_BL, probe_max_samples)
+                net, a_docs_BL, b_docs_BL, probe_max_samples)
             net.train()
 
     return {"label": label, "schedule": schedule, "seed": seed, "probes": probe_results}
@@ -299,16 +275,15 @@ def main():
 
     print("Rebuilding data (same seed=999)...")
     tp, bp, _, _, cfg_out, ti = build_data(bcfg)
-    print(f"  A_comp: {ti['n_a_comp_train']}/{ti['n_a_comp_heldout']}  "
-          f"B_comp: {ti['n_b_comp_train']}/{ti['n_b_comp_heldout']}  "
+    print(f"  A_comp: {ti['n_a_comp_train']}  "
+          f"B_comp: {ti['n_b_comp_train']}  "
           f"doc_len: {ti['doc_len']}")
 
     set_seed(999)
     d = Depth3Data(bcfg["n_alphabets"], bcfg["seq_len"], N_A, NB_SEEN, 999)
     doc_len = ti["doc_len"]
-    a_docs, b_docs, a_eval, b_eval = build_probe_dataset(d, doc_len)
-    print(f"  Probe data: A_train={a_docs.shape[0]} B_train={b_docs.shape[0]} "
-          f"A_eval={a_eval.shape[0]} B_eval={b_eval.shape[0]}")
+    a_docs, b_docs = build_probe_dataset(d, doc_len)
+    print(f"  Probe data: A_train={a_docs.shape[0]} B_train={b_docs.shape[0]}")
 
     token_labels = get_token_position_labels(doc_len, bcfg["seq_len"])
     print(f"  Token positions ({len(token_labels)}): {token_labels[:6]}...{token_labels[-3:]}")
@@ -342,7 +317,7 @@ def main():
 
         print(f"[{ji+1}/{len(jobs_cfg)}] {label}")
         result = retrain_and_probe(
-            job, tp, bp, a_docs, b_docs, a_eval, b_eval,
+            job, tp, bp, a_docs, b_docs,
             checkpoint_steps, args.probe_max_samples)
 
         result["checkpoint_steps"] = checkpoint_steps
