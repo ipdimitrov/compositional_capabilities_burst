@@ -1,6 +1,6 @@
 """Plot + PDF report for depth-3 bijection burst experiment.
 
-Usage: python burst/plot_new_split.py data/burst_d3_<timestamp>
+Usage: python burst/plot.py data/burst_d3_<run_tag>
 """
 import sys, os, pickle, json, math, csv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from fpdf import FPDF
 from collections import defaultdict, Counter
-from burst._worker_new_split import n_target_for_step
+from burst._worker import n_target_for_step
 
 EVAL_KEYS = ["acc_A_comp", "acc_B_comp"]
 CURVE_STYLE = {

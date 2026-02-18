@@ -1,6 +1,6 @@
 """Worker for depth-3 pure-bijection burst experiment.
 
-Launched as a subprocess by experiment_new_split.py.
+Launched as a subprocess by experiment.py.
 Each worker trains one model on one schedule and saves results.
 """
 import sys, os, argparse, pickle, math

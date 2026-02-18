@@ -1,13 +1,13 @@
 """Plot probe heatmaps for A-vs-B representation analysis.
 
-Reads probe results from probe_new_split.py and generates:
+Reads probe results from probe.py and generates:
   1. Per-model layer×token heatmaps at key checkpoints
   2. Training dynamics curves (probe accuracy over training steps)
   3. Cross-model comparison heatmaps (e.g. end_block vs end_mixed_25b)
   4. Mean-pooled probe accuracy over time per schedule
 
 Usage:
-    python burst/plot_probes.py data/burst_d3_<timestamp>
+    python burst/plot_probes.py data/burst_d3_<run_tag>
 """
 import sys, os, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -32,7 +32,7 @@ def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
     if not probe_dir.exists():
         print(f"ERROR: No probes/ directory found in {run_dir}")
         print(f"Run the probe script first:")
-        print(f"  .venv/bin/python burst/probe_new_split.py {run_dir}")
+        print(f"  python burst/probe.py {run_dir}")
         sys.exit(1)
 
     all_path = probe_dir / "all_probes.pkl"
@@ -49,7 +49,7 @@ def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
         else:
             print(f"ERROR: No probe results found in {probe_dir}")
             print(f"Run the probe script first:")
-            print(f"  .venv/bin/python burst/probe_new_split.py {run_dir}")
+            print(f"  python burst/probe.py {run_dir}")
             sys.exit(1)
     else:
         with open(all_path, "rb") as f:
