@@ -24,7 +24,7 @@ from omegaconf import OmegaConf
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
-from burst.experiment import Depth3Data, build_data, N_A, NB_SEEN
+from burst.experiment import Depth3Data, build_data, N_A
 from burst._worker import n_target_for_step, sample_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -280,7 +280,7 @@ def main():
           f"doc_len: {ti['doc_len']}")
 
     set_seed(999)
-    d = Depth3Data(bcfg["n_alphabets"], bcfg["seq_len"], N_A, NB_SEEN, 999)
+    d = Depth3Data(bcfg["n_alphabets"], bcfg["seq_len"], N_A, 999)
     doc_len = ti["doc_len"]
     a_docs, b_docs = build_probe_dataset(d, doc_len)
     print(f"  Probe data: A_train={a_docs.shape[0]} B_train={b_docs.shape[0]}")
@@ -306,11 +306,9 @@ def main():
         label = jcfg["label"]
         seed = jcfg["seed"]
         schedule = jcfg["schedule"]
-        nb = jcfg.get("n_b_seen", NB_SEEN)
-
         job = {
-            "label": label, "schedule": schedule, "seed": seed, "n_b_seen": nb,
-            "cfg": {**bcfg, "seed": seed, "n_b_seen": nb,
+            "label": label, "schedule": schedule, "seed": seed,
+            "cfg": {**bcfg, "seed": seed,
                     "vocab_size": cfg_out["vocab_size"],
                     "context_size": cfg_out["context_size"]},
         }
