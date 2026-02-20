@@ -24,7 +24,12 @@ SCHED_COLORS = {
     "end_mixed_75b": "#FF9800", "end_mixed_50b": "#E91E63", "end_mixed_25b": "#009688",
     "ramp_up": "#795548",
 }
+SCHEDULE_ORDER = ["end_block", "end_mixed_75b", "end_mixed_50b", "end_mixed_25b", "uniform"]
 W, H = 297, 210
+
+
+def _ordered_schedules(scheds):
+    return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
 
 
 def load_results(run_dir):
@@ -137,7 +142,7 @@ def plot_per_run(result, plots_dir):
     undo_m = np.array([ph == "undo" for ph in log["phase"]])
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), gridspec_kw={"height_ratios": [1, 4, 2]})
-    fig.suptitle(f"n_B={nb}  {sched}  seed={seed}  (depth-3 bijection chain)",
+    fig.suptitle(f"{sched}  seed={seed}  (depth-3 bijection chain)",
                  fontsize=13, fontweight="bold")
 
     _schedule_bar(axes[0], T, U, sched, p, bs, seed)
@@ -177,10 +182,18 @@ def plot_per_run(result, plots_dir):
     ax.grid(True, alpha=0.2)
 
     fig.tight_layout(rect=[0, 0.02, 1, 0.97])
-    fname = f"run_nB{nb}_{sched}_s{seed}.png"
+    idx = _sched_sort_key(sched)
+    fname = f"{idx:02d}_run_{sched}_s{seed}.png"
     fig.savefig(plots_dir / fname, dpi=120, bbox_inches="tight")
     plt.close(fig)
     return fname
+
+
+def _sched_sort_key(schedule: str) -> int:
+    try:
+        return SCHEDULE_ORDER.index(schedule)
+    except ValueError:
+        return len(SCHEDULE_ORDER)
 
 
 def plot_summary_bars(results, plots_dir, cfg):
@@ -188,10 +201,11 @@ def plot_summary_bars(results, plots_dir, cfg):
     total_steps = bcfg["total_steps"]
     undo_steps = bcfg["undo_steps"]
 
-    scheds = [r["schedule"] for r in results]
-    peaks = [r.get("train_end_B_comp", 0) for r in results]
-    quarterlives = [r.get("quarter_life", undo_steps) for r in results]
-    aucs = [r.get("undo_auc", 0) for r in results]
+    ordered = sorted(results, key=lambda r: _sched_sort_key(r["schedule"]))
+    scheds = [r["schedule"] for r in ordered]
+    peaks = [r.get("train_end_B_comp", 0) for r in ordered]
+    quarterlives = [r.get("quarter_life", undo_steps) for r in ordered]
+    aucs = [r.get("undo_auc", 0) for r in ordered]
     colors = [SCHED_COLORS.get(s, "gray") for s in scheds]
     xs = np.arange(len(scheds))
 
@@ -222,6 +236,104 @@ def plot_summary_bars(results, plots_dir, cfg):
     plt.close(fig)
 
 
+def plot_auc_detail(results, plots_dir, cfg):
+    bcfg = cfg.get("base_cfg", cfg)
+    undo_steps = bcfg["undo_steps"]
+
+    sched_groups = {}
+    for r in results:
+        s = r["schedule"]
+        sched_groups.setdefault(s, []).append(r)
+    ordered = _ordered_schedules(sched_groups.keys())
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+    fig.suptitle("Undo AUC by Schedule", fontsize=14, fontweight="bold")
+
+    xs = np.arange(len(ordered))
+
+    ax = axes[0]
+    ax.set_title("Individual seed × schedule", fontsize=10, fontweight="bold")
+    for xi, sched in enumerate(ordered):
+        vals = [r.get("undo_auc", 0) for r in sched_groups[sched]]
+        c = SCHED_COLORS.get(sched, "gray")
+        jitter = np.random.default_rng(42).uniform(-0.15, 0.15, len(vals))
+        ax.scatter(np.full(len(vals), xi) + jitter, vals,
+                   color=c, edgecolor="black", lw=0.5, s=50, zorder=3)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(ordered, fontsize=9, rotation=25, ha="right")
+    ax.set_ylabel("Undo AUC")
+    ax.grid(True, alpha=0.2, axis="y")
+
+    ax = axes[1]
+    ax.set_title("Mean ± 95% CI across seeds", fontsize=10, fontweight="bold")
+    means, cis = [], []
+    for sched in ordered:
+        vals = np.array([r.get("undo_auc", 0) for r in sched_groups[sched]])
+        m = vals.mean()
+        means.append(m)
+        ci = 1.96 * vals.std() / np.sqrt(len(vals)) if len(vals) > 1 else vals.std()
+        cis.append(ci)
+    colors = [SCHED_COLORS.get(s, "gray") for s in ordered]
+    bars = ax.bar(xs, means, yerr=cis, color=colors, edgecolor="black", lw=0.5,
+                  capsize=5, error_kw={"lw": 1.5})
+    for b, m, ci in zip(bars, means, cis):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + ci + max(means) * 0.01,
+                f"{m:.1f}", ha="center", fontsize=8, fontweight="bold")
+    ax.set_xticks(xs)
+    ax.set_xticklabels(ordered, fontsize=9, rotation=25, ha="right")
+    ax.set_ylabel("Undo AUC")
+    ax.grid(True, alpha=0.2, axis="y")
+
+    fig.tight_layout()
+    fig.savefig(plots_dir / "auc_detail.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_auc_diff_pct(results, plots_dir, cfg):
+    sched_groups = {}
+    for r in results:
+        s = r["schedule"]
+        sched_groups.setdefault(s, []).append(r)
+    ordered = _ordered_schedules(sched_groups.keys())
+    n = len(ordered)
+
+    mean_aucs = {}
+    for sched in ordered:
+        mean_aucs[sched] = np.mean([r.get("undo_auc", 0) for r in sched_groups[sched]])
+
+    pct_grid = np.zeros((n, n))
+    for i, sa in enumerate(ordered):
+        for j, sb in enumerate(ordered):
+            if i == j:
+                pct_grid[i, j] = 0.0
+            else:
+                base = mean_aucs[sb]
+                pct_grid[i, j] = ((mean_aucs[sa] - base) / abs(base) * 100) if abs(base) > 1e-9 else 0.0
+
+    fig, ax = plt.subplots(figsize=(max(6, n * 1.2), max(5, n * 1.0)))
+    vmax = max(abs(pct_grid.min()), abs(pct_grid.max()), 1)
+    im = ax.imshow(pct_grid, cmap="RdBu_r", vmin=-vmax, vmax=vmax, interpolation="nearest")
+
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(ordered, rotation=30, ha="right", fontsize=10)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(ordered, fontsize=10)
+    ax.set_xlabel("Baseline schedule (denominator)", fontsize=11)
+    ax.set_ylabel("Compared schedule (numerator)", fontsize=11)
+    ax.set_title("Pairwise AUC Difference %\n(row − col) / |col| × 100", fontsize=13, fontweight="bold")
+
+    for i in range(n):
+        for j in range(n):
+            val = pct_grid[i, j]
+            color = "white" if abs(val) > vmax * 0.6 else "black"
+            ax.text(j, i, f"{val:+.1f}%", ha="center", va="center", fontsize=9, color=color)
+
+    fig.colorbar(im, ax=ax, shrink=0.8, pad=0.03, label="% difference")
+    fig.tight_layout()
+    fig.savefig(plots_dir / "auc_diff_pct.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_overlay_per_schedule(results, plots_dir):
     T_ov = results[0]["config"]["total_steps"]
     U_ov = results[0]["config"]["undo_steps"]
@@ -235,7 +347,7 @@ def plot_overlay_per_schedule(results, plots_dir):
             vals = np.array(r["log"].get(k, [0.0] * len(steps)))
             sched_data[sched][k].append((steps, vals))
 
-    for sched in sorted(sched_data.keys()):
+    for sched in _ordered_schedules(sched_data.keys()):
         fig, ax = plt.subplots(figsize=(14, 8))
         fig.suptitle(f"{sched} - All Metrics (mean ± 95% CI across seeds)",
                      fontsize=14, fontweight="bold")
@@ -278,7 +390,8 @@ def plot_overlay_per_schedule(results, plots_dir):
         ax.grid(True, alpha=0.3)
 
         fig.tight_layout()
-        fig.savefig(plots_dir / f"overlay_{sched}.png", dpi=150, bbox_inches="tight")
+        idx = _sched_sort_key(sched)
+        fig.savefig(plots_dir / f"{idx:02d}_overlay_{sched}.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -300,7 +413,7 @@ def plot_overlay_all_schedules(results, plots_dir):
         fig.suptitle(f"All Schedules - {CURVE_STYLE[k]['label']}\n(mean ± 95% CI across seeds)",
                      fontsize=16, fontweight="bold")
 
-        for sched in sorted(sched_data.keys()):
+        for sched in _ordered_schedules(sched_data.keys()):
             c = SCHED_COLORS.get(sched, "gray")
             runs = sched_data[sched][k]
 
@@ -491,6 +604,22 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "is present alongside B during the burst.")
 
     pdf.add_page()
+    pdf.stitle("AUC Detail: Individual Seeds + Mean ± CI")
+    pdf.chart(plots_dir / "auc_detail.png", w=260)
+    pdf.body(
+        "Left: each dot is one seed for a given schedule. "
+        "Right: mean undo AUC with 95% CI error bars. "
+        "Lower AUC = faster forgetting of B data during the undo phase.")
+
+    pdf.add_page()
+    pdf.stitle("Pairwise AUC Difference (%)")
+    pdf.chart(plots_dir / "auc_diff_pct.png", w=200)
+    pdf.body(
+        "Each cell shows (row_AUC - col_AUC) / |col_AUC| × 100. "
+        "Positive (red) means the row schedule has higher AUC (slower forgetting). "
+        "Negative (blue) means faster forgetting relative to the column schedule.")
+
+    pdf.add_page()
     pdf.stitle("Ranking: Fastest Forgetting First")
     rows = sorted(results, key=lambda r: r.get("quarter_life", undo_steps))
     pdf.set_font("Courier", "", 7.5); pdf.set_text_color(40, 40, 40)
@@ -530,8 +659,9 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "95% confidence intervals. Vertical dashed line marks "
         "the start of the undo phase.")
 
-    for sched in sorted(set(r["schedule"] for r in results)):
-        overlay_path = plots_dir / f"overlay_{sched}.png"
+    for sched in _ordered_schedules(set(r["schedule"] for r in results)):
+        idx = _sched_sort_key(sched)
+        overlay_path = plots_dir / f"{idx:02d}_overlay_{sched}.png"
         if overlay_path.exists():
             pdf.sub(f"Schedule: {sched}")
             pdf.chart(overlay_path, w=240)
@@ -556,7 +686,8 @@ def plot_task_distributions(run_dir):
         print("  No task_distributions folder found, skipping...")
         return []
 
-    csv_files = list(stats_dir.glob("*.csv"))
+    skip = {"all_distributions_combined.csv", "summary_statistics.csv"}
+    csv_files = [f for f in stats_dir.glob("*.csv") if f.name not in skip]
     if not csv_files:
         print("  No CSV files found in task_distributions, skipping...")
         return []
@@ -583,7 +714,7 @@ def plot_task_distributions(run_dir):
             writer.writerows(all_data)
     print(f"  Saved combined CSV: {combined_csv}")
 
-    schedules = sorted(set(row["schedule"] for row in all_data))
+    schedules = _ordered_schedules(set(row["schedule"] for row in all_data))
     phases = sorted(set(row["phase"] for row in all_data))
 
     summary_rows = []
@@ -877,6 +1008,12 @@ def main():
 
     print("Summary bars...")
     plot_summary_bars(results, plots_dir, cfg)
+
+    print("AUC detail...")
+    plot_auc_detail(results, plots_dir, cfg)
+
+    print("AUC diff %...")
+    plot_auc_diff_pct(results, plots_dir, cfg)
 
     print("Overlay per schedule...")
     plot_overlay_per_schedule(results, plots_dir)

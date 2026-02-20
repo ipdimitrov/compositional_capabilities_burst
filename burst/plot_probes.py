@@ -26,6 +26,22 @@ SCHED_COLORS = {
     "ramp_up": "#795548",
 }
 
+SHARED_TOKEN_PREFIXES = ("F2", "F1", "in", "sp0")
+
+
+def _load_steps_from_config(run_dir: Path) -> tuple[int, int] | None:
+    cfg_path = run_dir / "config.json"
+    if not cfg_path.exists():
+        return None
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    bcfg = cfg.get("base_cfg", {})
+    ts = bcfg.get("total_steps")
+    us = bcfg.get("undo_steps")
+    if ts is not None and us is not None:
+        return int(ts), int(us)
+    return None
+
 
 def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
     probe_dir = run_dir / "probes"
@@ -55,21 +71,29 @@ def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
         with open(all_path, "rb") as f:
             results = pickle.load(f)
 
+    steps_from_cfg = _load_steps_from_config(run_dir)
+
     meta_path = probe_dir / "probe_meta.json"
     if not meta_path.exists():
         print("No probe_meta.json found, reconstructing from results...")
         r0 = results[0]
+        fallback_ts = steps_from_cfg[0] if steps_from_cfg else 400
+        fallback_us = steps_from_cfg[1] if steps_from_cfg else 400
         meta = {
             "checkpoint_steps": r0.get("checkpoint_steps", sorted(r0["probes"].keys())),
             "token_labels": r0.get("token_labels", [f"t{i}" for i in range(
                 list(r0["probes"].values())[0]["train_acc_KT"].shape[1])]),
             "n_layers": r0.get("n_layers", list(r0["probes"].values())[0]["train_acc_KT"].shape[0] - 1),
-            "total_steps": r0.get("total_steps", 400),
-            "undo_steps": r0.get("undo_steps", 400),
+            "total_steps": r0.get("total_steps", fallback_ts),
+            "undo_steps": r0.get("undo_steps", fallback_us),
         }
     else:
         with open(meta_path) as f:
             meta = json.load(f)
+
+    if steps_from_cfg:
+        meta["total_steps"] = steps_from_cfg[0]
+        meta["undo_steps"] = steps_from_cfg[1]
 
     return results, meta
 
@@ -105,6 +129,14 @@ def plot_heatmap(
             val = acc_KT[k, t]
             color = "white" if val > 0.75 else "black"
             ax.text(t, k, f"{val:.2f}", ha="center", va="center", fontsize=5, color=color)
+
+    shared_cols = [t for t in range(T)
+                   if any(token_labels[t].startswith(p) for p in SHARED_TOKEN_PREFIXES)]
+    for t in shared_cols:
+        ax.axvline(t, color="orange", lw=0.5, alpha=0.4)
+    if shared_cols:
+        ax.text(shared_cols[len(shared_cols) // 2], -0.8,
+                "shared (≈chance)", ha="center", fontsize=6, color="orange", style="italic")
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label("Probe Accuracy (A vs B)", fontsize=9)
@@ -228,7 +260,7 @@ def plot_mean_dynamics_by_schedule(
                  fontsize=14, fontweight="bold")
     ax.set_title("5-fold CV (train compositions)", fontsize=11)
 
-    for sched in sorted(sched_data.keys()):
+    for sched in _ordered_schedules(sched_data.keys()):
         runs = sched_data[sched]
         all_steps = set()
         for r in runs:
@@ -294,7 +326,7 @@ def plot_layer_depth_dynamics(
 
     cmap = plt.cm.viridis(np.linspace(0.1, 0.9, K))
 
-    for ax_idx, sched in enumerate(sorted(sched_data.keys())):
+    for ax_idx, sched in enumerate(_ordered_schedules(sched_data.keys())):
         ax = axes[ax_idx]
         runs = sched_data[sched]
 
@@ -332,7 +364,18 @@ def plot_layer_depth_dynamics(
     plt.close(fig)
 
 
-SCHEDULE_ORDER = ["end_block", "end_mixed_25b", "end_mixed_50b", "end_mixed_75b", "uniform"]
+SCHEDULE_ORDER = ["end_block", "end_mixed_75b", "end_mixed_50b", "end_mixed_25b", "uniform"]
+
+
+def _ordered_schedules(scheds):
+    return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
+
+
+def _sched_sort_key(schedule: str) -> int:
+    try:
+        return SCHEDULE_ORDER.index(schedule)
+    except ValueError:
+        return len(SCHEDULE_ORDER)
 
 
 def plot_layer_schedule_heatmap(
@@ -439,13 +482,14 @@ def main():
     plots_dir = run_dir / "probes" / "plots"
     plots_dir.mkdir(exist_ok=True)
 
-    schedules = sorted(set(r["schedule"] for r in results))
+    schedules = _ordered_schedules(set(r["schedule"] for r in results))
     key_steps = [0, total_steps // 2, total_steps, total_steps + undo_steps // 2,
                  total_steps + undo_steps]
 
     print("Per-model heatmaps at key checkpoints...")
     for r in results:
         label = r["label"]
+        idx = _sched_sort_key(r["schedule"])
         probes = r["probes"]
         for step in key_steps:
             closest = min(probes.keys(), key=lambda s: abs(s - step))
@@ -456,13 +500,14 @@ def main():
             plot_heatmap(
                 acc_KT, token_labels, layer_labels,
                 f"{label} — step {closest} ({phase})\n5-fold CV probe accuracy (A vs B)",
-                plots_dir / f"heatmap_{label}_step{closest}.png")
+                plots_dir / f"{idx:02d}_heatmap_{label}_step{closest}.png")
         print(f"  {label}")
 
     print("Training dynamics per model...")
     for r in results:
+        idx = _sched_sort_key(r["schedule"])
         plot_training_dynamics(r, token_labels, layer_labels,
-                               plots_dir / f"dynamics_{r['label']}.png")
+                               plots_dir / f"{idx:02d}_dynamics_{r['label']}.png")
     print(f"  {len(results)} dynamics plots")
 
     print("Mean dynamics by schedule...")
@@ -503,6 +548,7 @@ def main():
                 comparison_dir / f"diff_{sa}_vs_{sb}_{phase_label}.png")
 
         for sched in schedules:
+            si = _sched_sort_key(sched)
             acc_train_end = _mean_acc_at_step(results, sched, total_steps, "train_acc_KT")
             acc_undo_end = _mean_acc_at_step(results, sched, total_steps + undo_steps, "train_acc_KT")
             if acc_train_end is not None and acc_undo_end is not None:
@@ -511,7 +557,7 @@ def main():
                     f"{sched} — end_train vs end_undo\n"
                     f"Δ probe accuracy (positive = more A/B distinction at end of training)",
                     "end_train", "end_undo",
-                    comparison_dir / f"diff_{sched}_train_vs_undo.png")
+                    comparison_dir / f"{si:02d}_diff_{sched}_train_vs_undo.png")
 
     print(f"  Comparisons saved to {comparison_dir}")
 
@@ -520,6 +566,7 @@ def main():
     sched_dir.mkdir(exist_ok=True)
 
     for sched in schedules:
+        si = _sched_sort_key(sched)
         for step in key_steps:
             acc = _mean_acc_at_step(results, sched, step, "train_acc_KT")
             if acc is None:
@@ -536,7 +583,7 @@ def main():
                 acc, token_labels, layer_labels,
                 f"{sched} (mean across seeds) — step {step} ({phase})\n"
                 f"5-fold CV probe accuracy (A vs B)",
-                sched_dir / f"heatmap_{sched}_step{step}.png")
+                sched_dir / f"{si:02d}_heatmap_{sched}_step{step}.png")
         print(f"  {sched}")
 
     print("Layer × Schedule heatmap...")
