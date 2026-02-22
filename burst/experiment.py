@@ -22,7 +22,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SCHEDULES = ["end_block", "uniform", # "mid_block", "ramp_up"
              "end_mixed_50b", "end_mixed_75b", "end_mixed_25b"]
 N_A, SEED_BASE = 4, 107
-N_SEEDS = 3
+N_SEEDS = 5
 
 BASE_CFG = {
     "n_alphabets": 10, "seq_len": 6,
@@ -31,8 +31,8 @@ BASE_CFG = {
     "lr": 3e-4, "weight_decay": 1e-3,
     "beta1": 0.9, "beta2": 0.95, "grad_clip": 1.0,
     "warmup_iters": 50, "min_lr": 6e-5,
-    "batch_size": 512, "total_steps": 400, "p_target": 0.10,
-    "undo_steps": 400, "eval_every": 10, "unlearn_threshold": 0.25,
+    "batch_size": 512, "total_steps": 500, "p_target": 0.10,
+    "undo_steps": 500, "eval_every": 10, "unlearn_threshold": 0.25,
     "n_docs_per_task": 500, "n_eval_per_task": 500,
 }
 
@@ -201,7 +201,7 @@ def main():
                       "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    n_workers = min(len(jobs), 15)
+    n_workers = min(len(jobs), 5)
     steps_per_job = BASE_CFG["total_steps"] + BASE_CFG["undo_steps"]
 
     print(f"\nModel: {BASE_CFG['n_layer']}L/{BASE_CFG['n_embd']}d/{BASE_CFG['n_head']}H", flush=True)
@@ -280,7 +280,7 @@ def main():
 
     for f in progress_dir.glob("*"):
         f.unlink()
-    progress_dir.rmdir()
+    if progress_dir.exists(): progress_dir.rmdir()
     for f in run_dir.glob("_job_*.pkl"):
         f.unlink()
     try:
