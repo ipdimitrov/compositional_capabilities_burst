@@ -5,13 +5,13 @@ from torch.utils.data import Dataset
 
 class BurstDataset(Dataset):
     def __init__(self, documents_BL: np.ndarray):
-        self.data = documents_BL
+        self.data = torch.from_numpy(documents_BL).long()
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx: int):
-        elem = torch.from_numpy(self.data[idx])
+        elem = self.data[idx]
         return elem[:-1], elem[1:]
 
 
