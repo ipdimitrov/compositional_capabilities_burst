@@ -1,9 +1,10 @@
 """Worker for pure-bijection burst experiment.
 
 Launched as a subprocess by experiment.py.
-Each worker trains one model on one schedule and saves results.
+Each worker trains one model on one schedule, saves checkpoints for
+post-hoc grad-sim, and writes training metrics.
 """
-import sys, os, argparse, pickle, math, json
+import sys, os, argparse, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -22,11 +23,11 @@ from burst.data import BurstDataset
 from burst.config import (
     EVAL_KEYS, MIXED_FRACTIONS, UNIFORM_SCHEDULE,
     PHASE_FOUNDATION, PHASE_BURST, PHASE_REVERSION,
-    ExperimentConfig,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GRAD_SIM_EVERY = ExperimentConfig().grad_sim_every
+CHECKPOINT_EVERY = 50
+PAIRWISE_STEP_NAMES = {"begin", "mid_burst", "end_burst", "mid_reversion", "end_reversion"}
 
 
 def n_target_for_step(step, total_steps, schedule, p, batch_size):
@@ -114,79 +115,20 @@ def eval_free_gen(net, docs_BL, prompt_len: int):
     return correct_t.item() / max(total, 1)
 
 
-def _flat_grad(net) -> torch.Tensor:
-    """Concatenate all parameter gradients into a single flat vector."""
-    grads = [p.grad.detach().view(-1) for p in net.parameters() if p.grad is not None]
-    return torch.cat(grads) if grads else torch.zeros(1, device=DEVICE)
+def checkpoint_steps(T: int, U: int) -> dict[int, str]:
+    """Return {global_step: phase} for all steps that need a checkpoint."""
+    steps = {}
+    for s in range(T):
+        if s % CHECKPOINT_EVERY == 0 or s == T - 1:
+            steps[s] = PHASE_BURST
+    for s in range(U):
+        if s % CHECKPOINT_EVERY == 0 or s == U - 1:
+            steps[T + s] = PHASE_REVERSION
 
-
-def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int = 64) -> torch.Tensor:
-    """Compute gradient vector for a sample of docs without modifying optimizer state."""
-    n = min(n_samples, docs_np.shape[0])
-    idx = np.random.choice(docs_np.shape[0], n, replace=False)
-    dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
-    inp, tgt = dat[:, :-1], dat[:, 1:]
-    # Use float32 directly to avoid scaler state entanglement
-    with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-        logits = net(inp)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
-    loss.backward()
-    return _flat_grad(net).float()
-
-
-def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL,
-                            n_samples: int = 2048) -> dict:
-    """Cosine similarity between burst-class and other-class gradient vectors."""
-    net.train()
-    net.zero_grad(set_to_none=True)
-    g_burst = _grad_vec_for_docs(net, docs_burst_BL, n_samples=n_samples)
-    net.zero_grad(set_to_none=True)
-    g_other = _grad_vec_for_docs(net, docs_other_BL, n_samples=n_samples)
-    cos_sim = F.cosine_similarity(g_burst.unsqueeze(0), g_other.unsqueeze(0)).item()
-    net.zero_grad(set_to_none=True)
-    return {"burst_vs_other": cos_sim}
-
-
-def compute_pairwise_grad_sim(net, task_docs: dict,
-                               burst_tasks: list, other_tasks: list,
-                               n_samples: int = 2048) -> dict:
-    """Pairwise cosine similarity between all task gradient vectors.
-
-    task_docs: {task_tuple: docs_np}
-    burst_tasks: list of burst task tuples (b* at pos 2)
-    other_tasks: list of other task tuples
-
-    Returns 'matrix' (list of lists), 'labels', 'n_burst', 'n_other'.
-    """
-    net.train()
-
-    b_tasks = burst_tasks[:5]
-    o_tasks = other_tasks[:5]
-    all_tasks = b_tasks + o_tasks
-    labels = [f"B{i+1}" for i in range(len(b_tasks))] + [f"O{i+1}" for i in range(len(o_tasks))]
-
-    grad_vecs = []
-    for task in all_tasks:
-        if task in task_docs and task_docs[task].shape[0] > 0:
-            net.zero_grad(set_to_none=True)
-            grad_vecs.append(_grad_vec_for_docs(net, task_docs[task], n_samples=n_samples))
-        else:
-            grad_vecs.append(None)
-
-    n = len(all_tasks)
-    matrix = np.eye(n)
-    valid = [(i, v) for i, v in enumerate(grad_vecs) if v is not None]
-    if len(valid) >= 2:
-        G = torch.stack([v for _, v in valid])
-        G_norm = F.normalize(G, dim=1)
-        sim = (G_norm @ G_norm.T).cpu().numpy()
-        for ri, (i, _) in enumerate(valid):
-            for rj, (j, _) in enumerate(valid):
-                matrix[i, j] = sim[ri, rj]
-
-    net.zero_grad(set_to_none=True)
-    return {"matrix": matrix.tolist(), "labels": labels,
-            "n_burst": len(b_tasks), "n_other": len(o_tasks)}
+    pairwise = {0: PHASE_BURST, T // 2: PHASE_BURST, T - 1: PHASE_BURST,
+                T + U // 2: PHASE_REVERSION, T + U - 1: PHASE_REVERSION}
+    steps.update(pairwise)
+    return steps
 
 
 def run(job, shared_data_path, run_dir, progress_dir):
@@ -217,19 +159,14 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p, ev = cfg["batch_size"], cfg["p_target"], cfg["eval_every"]
-    gs_bs = cfg.get("grad_sim_batch_size", 2048)
 
     log = {"step": [], "loss": [], "phase": []}
     for k in EVAL_KEYS:
         log[k] = []
 
-    # Gradient cosine similarity logs
-    grad_sim_log = {"step": [], "phase": [], "burst_vs_other": []}
-    pairwise_snapshots = []  # list of {step, phase, matrix, labels, n_burst, n_other}
-
-    # Build flat arrays for grad sim computation
-    burst_docs_all = np.concatenate(list(target_pool.values())) if target_pool else None
-    other_docs_all = np.concatenate(list(bg_pool.values())) if bg_pool else None
+    ckpt_dir = Path(run_dir) / "checkpoints" / label
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_steps = checkpoint_steps(T, U)
 
     def do_eval(phase, loss_val):
         log["step"].append(it)
@@ -237,27 +174,6 @@ def run(job, shared_data_path, run_dir, progress_dir):
         log["phase"].append(phase)
         for k in EVAL_KEYS:
             log[k].append(eval_free_gen(net, eval_docs[k.removeprefix("acc_")], prompt_len))
-        net.train()
-
-    def do_grad_sim(phase):
-        if burst_docs_all is None or other_docs_all is None:
-            return
-        sim = compute_grad_cosine_sim(net, burst_docs_all, other_docs_all,
-                                      n_samples=gs_bs)
-        grad_sim_log["step"].append(it)
-        grad_sim_log["phase"].append(phase)
-        grad_sim_log["burst_vs_other"].append(sim["burst_vs_other"])
-        net.train()
-
-    def do_pairwise_snap(phase):
-        task_docs = {**target_pool, **bg_pool}
-        burst_tasks = list(target_pool.keys())
-        other_tasks = list(bg_pool.keys())
-        snap = compute_pairwise_grad_sim(net, task_docs, burst_tasks, other_tasks,
-                                         n_samples=gs_bs)
-        snap["step"] = it
-        snap["phase"] = phase
-        pairwise_snapshots.append(snap)
         net.train()
 
     def train_step(batch_np, tasks_sampled):
@@ -296,9 +212,6 @@ def run(job, shared_data_path, run_dir, progress_dir):
     else:
         foundation_end = T // 2
 
-    # Pairwise snapshot steps: beginning, mid-burst, end-burst, mid-reversion, end-reversion
-    pairwise_steps = {0, T // 2, T - 1, T + U // 2, T + U - 1}
-
     for s in range(T):
         nt = n_target_for_step(s, T, schedule, p, bs)
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, nt, bs)
@@ -311,10 +224,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
         loss_val = train_step(batch_np, sampled_tasks)
         if s % ev == 0 or s == T - 1:
             do_eval(PHASE_BURST, loss_val)
-        if s % GRAD_SIM_EVERY == 0 or s == T - 1:
-            do_grad_sim(PHASE_BURST)
-        if s in pairwise_steps:
-            do_pairwise_snap(PHASE_BURST)
+        if s in ckpt_steps:
+            torch.save(net.state_dict(), ckpt_dir / f"step_{s}.pt")
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(s + 1))
 
@@ -326,10 +237,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
         global_s = T + s
         if s % ev == 0 or s == U - 1:
             do_eval(PHASE_REVERSION, loss_val)
-        if s % GRAD_SIM_EVERY == 0 or s == U - 1:
-            do_grad_sim(PHASE_REVERSION)
-        if global_s in pairwise_steps:
-            do_pairwise_snap(PHASE_REVERSION)
+        if global_s in ckpt_steps:
+            torch.save(net.state_dict(), ckpt_dir / f"step_{global_s}.pt")
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(T + s + 1))
 
@@ -383,7 +292,6 @@ def run(job, shared_data_path, run_dir, progress_dir):
     reversion_end_burst = reversion_accs[-1] if reversion_accs else peak_burst
     reversion_auc = float(np.trapz(reversion_accs, reversion_steps)) if len(reversion_accs) > 1 else 0.0
 
-    # t1/4: first reversion step where burst class acc drops to 25% of peak
     quarter_life = U
     half_life = U
     if peak_burst > 1e-6:
@@ -397,28 +305,12 @@ def run(job, shared_data_path, run_dir, progress_dir):
     dropoff_abs = peak_burst - reversion_end_burst
     dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > 1e-6 else 0.0
 
-    gs_dir = Path(run_dir) / "grad_cosine_sim"
-    gs_dir.mkdir(exist_ok=True)
-    gs_record = {
-        "schedule": schedule, "seed": seed, "label": label,
-        "grad_sim_batch_size": gs_bs,
-        "grad_sim_log": grad_sim_log,
-        "pairwise_snapshots": [
-            {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in s.items()}
-            for s in pairwise_snapshots
-        ],
-    }
-    with open(gs_dir / f"{label}.json", "w") as f:
-        json.dump(gs_record, f)
-
     result = {
         "schedule": schedule, "seed": seed,
         "label": label, "log": log, "config": dict(cfg),
         "peak_burst": peak_burst, "reversion_end_burst": reversion_end_burst,
         "dropoff_abs": dropoff_abs, "dropoff_pct": dropoff_pct,
         "quarter_life": quarter_life, "reversion_auc": reversion_auc,
-        "grad_sim_log": grad_sim_log,
-        "pairwise_snapshots": pairwise_snapshots,
     }
     for k in EVAL_KEYS:
         for phase in (PHASE_BURST, PHASE_REVERSION):

@@ -5,8 +5,12 @@
 
 post_process() {
     local run_dir="$1"
-    echo "=== post-processing ${run_dir} (parallel) ==="
+    echo "=== post-processing ${run_dir} ==="
 
+    echo "  Running grad-sim..."
+    "${PYTHON}" burst/grad_sim.py "${run_dir}"
+
+    echo "  Running plots & probes (parallel)..."
     "${PYTHON}" burst/plot.py "${run_dir}" &
     local pid_plot=$!
 

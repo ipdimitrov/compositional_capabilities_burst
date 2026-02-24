@@ -1,6 +1,8 @@
 """Pure-bijection burst experiment with configurable depth and burst position.
 
-Launches parallel worker processes, tracks progress, collects results.
+Launches parallel worker processes for training, tracks progress, collects
+results.  Grad-sim is computed post-hoc by burst/grad_sim.py on the saved
+checkpoints.
 
 Usage:
     python burst/experiment.py --depth 3 --burst-pos 2
@@ -11,11 +13,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
+from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
+from net.nanogpt import nanoGPT
 from burst.data import BurstDataset, pad_pools_to_same_length
 from burst.config import (
     N_A, SEED_BASE, DATA_SEED,
@@ -175,8 +180,6 @@ def main():
     parser.add_argument("--schedules", nargs="+", default=None)
     parser.add_argument("--n-seeds", type=int, default=None)
     parser.add_argument("--n-workers", type=int, default=None)
-    parser.add_argument("--grad-sim-batch-size", type=int, default=None)
-    parser.add_argument("--grad-sim-n-workers", type=int, default=None)
     args = parser.parse_args()
 
     exp = ExperimentConfig(
@@ -189,10 +192,6 @@ def main():
         exp.n_seeds = args.n_seeds
     if args.n_workers is not None:
         exp.n_workers = args.n_workers
-    if args.grad_sim_batch_size is not None:
-        exp.train.grad_sim_batch_size = args.grad_sim_batch_size
-    if args.grad_sim_n_workers is not None:
-        exp.grad_sim_n_workers = args.grad_sim_n_workers
 
     base_cfg = exp.base_cfg
 
@@ -235,14 +234,12 @@ def main():
                       "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    effective_n_workers = exp.grad_sim_n_workers if exp.grad_sim_n_workers is not None else exp.n_workers
-    n_workers = min(len(jobs), effective_n_workers)
+    n_workers = min(len(jobs), exp.n_workers)
     steps_per_job = base_cfg["total_steps"] + base_cfg["reversion_steps"]
 
     tc = exp.train
     print(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H", flush=True)
-    print(f"Jobs: {len(jobs)}, workers: {n_workers} "
-          f"(grad_sim_batch_size={tc.grad_sim_batch_size})", flush=True)
+    print(f"Jobs: {len(jobs)}, workers: {n_workers}", flush=True)
     print(f"Steps/job: {tc.total_steps} train + {tc.reversion_steps} reversion", flush=True)
     print(f"Schedules: {exp.schedules}\n", flush=True)
 
@@ -321,25 +318,10 @@ def main():
     if progress_dir.exists(): progress_dir.rmdir()
     for f in run_dir.glob("_job_*.pkl"):
         f.unlink()
-    try:
-        os.remove(data_path)
-    except OSError:
-        pass
 
     print(f"Results: {run_dir} ({len(all_results)} ok)", flush=True)
-
-    try:
-        smi = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
-            timeout=2).decode().strip().split(",")
-        used, total = float(smi[0]), float(smi[1])
-        per_job = used / max(n_workers, 1)
-        print(f"\nVRAM: ~{per_job:.0f} MB/job, ran {n_workers} parallel, "
-              f"could fit ~{int(total / per_job)} ({total/1024:.0f} GB total)", flush=True)
-    except Exception:
-        pass
-
-    print(f"\nPlot: python burst/plot.py {run_dir}", flush=True)
+    print(f"\nGrad-sim: python burst/grad_sim.py {run_dir}", flush=True)
+    print(f"Plot:     python burst/plot.py {run_dir}", flush=True)
 
 
 if __name__ == "__main__":
