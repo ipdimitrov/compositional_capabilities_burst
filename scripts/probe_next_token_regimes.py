@@ -1,4 +1,4 @@
-"""Next-token probes per layer for regime A vs regime B.
+"""Next-token probes per layer for Other-class vs Burst-class regimes.
 
 Two probe types, both operating per-position on the 6 f3-output positions:
 
@@ -28,13 +28,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 from itertools import combinations
-from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, update_cosine_warmup_lr
-from burst.experiment import Depth3Data, build_data, N_A, SCHEDULES
-from burst._worker import n_target_for_step as _n_target_for_step, sample_batch
+from burst.experiment import DepthNData, build_data
+from burst.train_utils import DEVICE, retrain_with_callbacks, build_probe_docs
+from burst.config import N_A, DATA_SEED, SCHEDULES, SCHED_COLORS, SCHEDULE_ORDER
 
 """
 Dimension key:
@@ -49,33 +48,13 @@ Dimension key:
     V: vocab_size
 """
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PROBE_SEED = 1337
 N_DIGITS = 10
 PROBE_METHODS = ["logit_lens", "learned_probe"]
 
-SCHEDULE_ALIASES = {"end_mixed_50": "end_mixed_50b"}
-
-SCHED_COLORS = {
-    "uniform": "#2196F3", "end_block": "#F44336", "mid_block": "#9C27B0",
-    "end_mixed_50b": "#FF9800", "end_mixed_50": "#FF9800",
-    "end_mixed_75b": "#E91E63", "end_mixed_25b": "#009688",
-    "ramp_up": "#795548",
-}
-
-SCHEDULE_ORDER = [
-    "end_block", "end_mixed_75b", "end_mixed_50b", "end_mixed_50",
-    "end_mixed_25b", "uniform",
-]
-
 
 def _ordered_schedules(scheds):
     return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
-
-
-def n_target_for_step(step, total_steps, schedule, p, batch_size):
-    return _n_target_for_step(
-        step, total_steps, SCHEDULE_ALIASES.get(schedule, schedule), p, batch_size)
 
 
 def get_f3_positions(seq_len: int) -> list[int]:
@@ -228,100 +207,46 @@ def learned_probe_accuracy_K(
     return acc_K
 
 
-def retrain_to_step(
+def retrain_and_probe_at_steps(
     job: dict,
     target_pool: dict,
     bg_pool: dict,
-    target_step: int,
-) -> nanoGPT:
-    seed, cfg, schedule = job["seed"], job["cfg"], job["schedule"]
-    set_seed(seed)
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
+    probe_steps: list[int],
+    other_docs_BL: np.ndarray,
+    burst_docs_BL: np.ndarray,
+    n_layers: int,
+    seq_len: int,
+    max_samples: int = 512,
+) -> dict[int, dict]:
+    """Retrain once and probe at each requested step along the way.
 
-    optim_cfg = OmegaConf.create({
-        "learning_rate": cfg["lr"], "weight_decay": cfg["weight_decay"],
-        "beta1": cfg["beta1"], "beta2": cfg["beta2"],
-        "grad_clip": cfg["grad_clip"], "decay_lr": True,
-        "warmup_iters": cfg["warmup_iters"], "min_lr": cfg["min_lr"],
-    })
-    optimizer = configure_optimizers(net, optim_cfg)
-    scaler = torch.amp.GradScaler('cuda', enabled=DEVICE == "cuda")
+    Returns {step: probe_result} where probe_result is the output of probe_all_layers.
+    """
+    checkpoint_set = set(probe_steps)
+    results_by_step: dict[int, dict] = {}
 
-    T_train, U = cfg["total_steps"], cfg["undo_steps"]
-    bs, p = cfg["batch_size"], cfg["p_target"]
+    def on_step(net, global_step, phase):
+        if global_step in checkpoint_set:
+            net.eval()
+            print(f"    Probing step {global_step} ({phase})...", flush=True)
+            results_by_step[global_step] = probe_all_layers(
+                net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples)
+            net.train()
 
-    net.train()
-    it = 0
-
-    train_steps = min(T_train, target_step)
-    for s in range(train_steps):
-        nt = n_target_for_step(s, T_train, schedule, p, bs)
-        batch_np, _ = sample_batch(target_pool, bg_pool, nt, bs)
-        dat = torch.from_numpy(batch_np).long().to(DEVICE)
-        inp, tgt = dat[:, :-1], dat[:, 1:]
-        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, T_train + U)
-        optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits = net(inp)
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
-        scaler.scale(loss).backward()
-        if cfg["grad_clip"] > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(net.parameters(), cfg["grad_clip"])
-        scaler.step(optimizer)
-        scaler.update()
-
-    undo_steps_to_run = max(0, target_step - T_train)
-    for s in range(undo_steps_to_run):
-        batch_np, _ = sample_batch(target_pool, bg_pool, 0, bs)
-        dat = torch.from_numpy(batch_np).long().to(DEVICE)
-        inp, tgt = dat[:, :-1], dat[:, 1:]
-        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, T_train + U)
-        optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits = net(inp)
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
-        scaler.scale(loss).backward()
-        if cfg["grad_clip"] > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(net.parameters(), cfg["grad_clip"])
-        scaler.step(optimizer)
-        scaler.update()
-
-    net.eval()
-    return net
+    net = retrain_with_callbacks(
+        job, target_pool, bg_pool, on_step=on_step, max_step=max(probe_steps))
+    del net
+    torch.cuda.empty_cache()
+    return results_by_step
 
 
-def build_regime_docs(
-    data: Depth3Data,
-    doc_len: int,
-    n_per_task: int = 200,
-) -> tuple[np.ndarray, np.ndarray]:
-    a_pool = data.gen_pool(data.a_comp_train[:min(16, len(data.a_comp_train))], n_per_task)
-    b_pool = data.gen_pool(data.b_comp_train, n_per_task)
-
-    def _cat(pool):
-        if not pool:
-            return np.zeros((0, doc_len), dtype=np.int64)
-        arrs = list(pool.values())
-        out = np.concatenate(arrs)
-        if out.shape[1] < doc_len:
-            pad = np.zeros((out.shape[0], doc_len - out.shape[1]), dtype=out.dtype)
-            out = np.concatenate([out, pad], axis=1)
-        return out[:, :doc_len]
-
-    return _cat(a_pool), _cat(b_pool)
+build_regime_docs = build_probe_docs
 
 
 def probe_all_layers(
     net: nanoGPT,
-    a_docs_BL: np.ndarray,
-    b_docs_BL: np.ndarray,
+    other_docs_BL: np.ndarray,
+    burst_docs_BL: np.ndarray,
     n_layers: int,
     seq_len: int,
     max_samples: int = 512,
@@ -331,9 +256,9 @@ def probe_all_layers(
     n_embd = net.config.n_embd
     K = n_layers + 1
 
-    results = {m: {"A": np.zeros(K), "B": np.zeros(K)} for m in PROBE_METHODS}
+    results = {m: {"Other": np.zeros(K), "Burst": np.zeros(K)} for m in PROBE_METHODS}
 
-    for regime, docs in [("A", a_docs_BL), ("B", b_docs_BL)]:
+    for regime, docs in [("Other", other_docs_BL), ("Burst", burst_docs_BL)]:
         layer_acts, targets_PM = collect_all_layer_acts_KBM_N(
             net, docs, f3_pos, max_samples)
 
@@ -357,13 +282,13 @@ def compute_diffs(all_results, schedules, methods):
     for method in methods:
         diffs[method] = {}
         for sched in schedules:
-            a_curves, b_curves = [], []
+            other_curves, burst_curves = [], []
             for key, val in all_results.items():
                 if key.startswith(sched + "_s") and method in val:
-                    a_curves.append(val[method]["A"])
-                    b_curves.append(val[method]["B"])
-            if a_curves and b_curves:
-                diffs[method][sched] = np.mean(a_curves, axis=0) - np.mean(b_curves, axis=0)
+                    other_curves.append(val[method]["Other"])
+                    burst_curves.append(val[method]["Burst"])
+            if other_curves and burst_curves:
+                diffs[method][sched] = np.mean(other_curves, axis=0) - np.mean(burst_curves, axis=0)
     return diffs
 
 
@@ -392,7 +317,7 @@ def plot_raw_curves(all_results, method, n_layers, output_dir):
     fig.suptitle(f"Next-Token Probe Accuracy — {method}", fontsize=14, fontweight="bold")
 
     for si, sched in enumerate(schedules_seen):
-        for ri, regime in enumerate(["A", "B"]):
+        for ri, regime in enumerate(["Other", "Burst"]):
             ax = axes[si, ri]
             curves = []
             for key, val in all_results.items():
@@ -437,8 +362,8 @@ def plot_ab_diffs(diffs, method, n_layers, output_dir):
     ax.set_xticks(x)
     ax.set_xticklabels(layer_labels, fontsize=9)
     ax.set_xlabel("Layer", fontsize=11)
-    ax.set_ylabel("Δ accuracy (A − B)", fontsize=11)
-    ax.set_title(f"A−B Next-Token Diff — {method}", fontsize=13, fontweight="bold")
+    ax.set_ylabel("Δ accuracy (Other − Burst)", fontsize=11)
+    ax.set_title(f"Other−Burst Next-Token Diff — {method}", fontsize=13, fontweight="bold")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.2)
     fig.tight_layout()
@@ -493,7 +418,7 @@ def plot_combined_curves(step_results, method, n_layers, output_dir):
                  fontsize=14, fontweight="bold")
 
     for si, sched in enumerate(schedules_seen):
-        for ri, regime in enumerate(["A", "B"]):
+        for ri, regime in enumerate(["Other", "Burst"]):
             ax = axes[si, ri]
             for ci, step in enumerate(sorted_steps):
                 curves = [v[method][regime] for k, v in step_results[step].items()
@@ -536,7 +461,7 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir):
 
     n_scheds = len(scheds)
     fig, axes = plt.subplots(1, n_scheds, figsize=(5 * n_scheds, 5), squeeze=False)
-    fig.suptitle(f"A−B Diff — {method} (all steps)",
+    fig.suptitle(f"Other−Burst Diff — {method} (all steps)",
                  fontsize=14, fontweight="bold")
 
     step_colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(sorted_steps)))
@@ -561,7 +486,7 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir):
         ax.set_xticks(x)
         ax.set_xticklabels(layer_labels, fontsize=8)
         ax.set_xlabel("Layer")
-        ax.set_ylabel("Δ accuracy (A − B)")
+        ax.set_ylabel("Δ accuracy (Other − Burst)")
         ax.set_title(sched, fontsize=10, fontweight="bold")
         ax.set_ylim(ylim)
         ax.legend(fontsize=7)
@@ -575,10 +500,10 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Next-token probes (logit lens + learned) for regime A vs B")
+        description="Next-token probes (logit lens + learned) for Other vs Burst regimes")
     parser.add_argument("run_dir", type=str)
     parser.add_argument("--probe-steps", type=int, nargs="+", default=None,
-                        help="Global steps to probe at (default: total_steps + undo_steps)")
+                        help="Global steps to probe at (default: total_steps + reversion_steps)")
     parser.add_argument("--probe-step", type=int, default=None,
                         help="Single step (legacy, use --probe-steps for multiple)")
     parser.add_argument("--probe-max-samples", type=int, default=512)
@@ -592,7 +517,7 @@ def main():
 
     bcfg = cfg["base_cfg"]
     total_steps = bcfg["total_steps"]
-    undo_steps = bcfg["undo_steps"]
+    reversion_steps = bcfg["reversion_steps"]
     seq_len = bcfg["seq_len"]
     n_layers = bcfg["n_layer"]
 
@@ -601,7 +526,7 @@ def main():
     elif args.probe_step is not None:
         probe_steps = [args.probe_step]
     else:
-        probe_steps = [total_steps + undo_steps]
+        probe_steps = [total_steps + reversion_steps]
 
     base_output_dir = (Path(args.output_dir) if args.output_dir
                        else run_dir / "next_token_regime_probes")
@@ -616,15 +541,18 @@ def main():
     f3_pos = get_f3_positions(seq_len)
     print(f"F3 model-input positions: {f3_pos}")
 
-    print("\nRebuilding data (same seed=999)...")
-    tp, bp, _, _, cfg_out, ti = build_data(bcfg)
+    depth = cfg.get("depth", cfg.get("task_info", {}).get("depth", 3))
+    burst_pos = cfg.get("burst_pos", cfg.get("task_info", {}).get("burst_pos", depth))
+
+    print(f"\nRebuilding data (seed={DATA_SEED})...")
+    tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos)
     doc_len = ti["doc_len"]
     print(f"  doc_len={doc_len}  seq_len={seq_len}")
 
-    set_seed(999)
-    d = Depth3Data(bcfg["n_alphabets"], seq_len, N_A, 999)
-    a_docs, b_docs = build_regime_docs(d, doc_len)
-    print(f"  A docs: {a_docs.shape}  B docs: {b_docs.shape}")
+    set_seed(DATA_SEED)
+    d = DepthNData(bcfg["n_alphabets"], seq_len, N_A, depth, burst_pos, DATA_SEED)
+    other_docs, burst_docs = build_regime_docs(d, doc_len)
+    print(f"  Other docs: {other_docs.shape}  Burst docs: {burst_docs.shape}")
 
     jobs_cfg = cfg["jobs"]
     if args.seed_override is not None:
@@ -635,44 +563,39 @@ def main():
     print(f"Jobs: {len(jobs_cfg)}")
     print(f"Layers: {n_layers + 1} (emb + {n_layers} blocks)")
     n_probes = len(PROBE_METHODS) * len(jobs_cfg) * (n_layers + 1) * 2 * len(probe_steps)
-    print(f"Total probe evaluations: {n_probes}\n")
+    n_retrains = len(jobs_cfg)
+    print(f"Total probe evaluations: {n_probes}")
+    print(f"Retraining runs: {n_retrains} (single pass per job, probing at {len(probe_steps)} steps)\n")
 
-    all_step_results = {}
+    all_step_results: dict[int, dict] = {step: {} for step in probe_steps}
+
+    for ji, jcfg in enumerate(jobs_cfg):
+        label = jcfg["label"]
+        seed = jcfg["seed"]
+        schedule = jcfg["schedule"]
+
+        job = {
+            "label": label, "schedule": schedule, "seed": seed,
+            "cfg": {**bcfg, "seed": seed,
+                    "vocab_size": cfg_out["vocab_size"],
+                    "context_size": cfg_out["context_size"]},
+        }
+
+        print(f"\n[{ji+1}/{len(jobs_cfg)}] {label} — training once, probing at steps {probe_steps}",
+              flush=True)
+        step_results = retrain_and_probe_at_steps(
+            job, tp, bp, probe_steps,
+            other_docs, burst_docs, n_layers, seq_len, args.probe_max_samples)
+
+        for step, result in step_results.items():
+            all_step_results[step][label] = result
+
     all_step_diffs = {}
-
     for probe_step in probe_steps:
         step_dir = base_output_dir / f"step_{probe_step}"
         step_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n{'='*60}")
-        print(f"  PROBE STEP {probe_step}")
-        print(f"{'='*60}\n")
-
-        all_results = {}
-
-        for ji, jcfg in enumerate(jobs_cfg):
-            label = jcfg["label"]
-            seed = jcfg["seed"]
-            schedule = jcfg["schedule"]
-
-            job = {
-                "label": label, "schedule": schedule, "seed": seed,
-                "cfg": {**bcfg, "seed": seed,
-                        "vocab_size": cfg_out["vocab_size"],
-                        "context_size": cfg_out["context_size"]},
-            }
-
-            print(f"[{ji+1}/{len(jobs_cfg)}] {label} — retraining to step {probe_step}...",
-                  flush=True)
-            net = retrain_to_step(job, tp, bp, probe_step)
-
-            print(f"  Probing...", flush=True)
-            result = probe_all_layers(
-                net, a_docs, b_docs, n_layers, seq_len, args.probe_max_samples)
-            all_results[label] = result
-
-            del net
-            torch.cuda.empty_cache()
+        all_results = all_step_results[probe_step]
 
         print(f"\nComputing diffs for step {probe_step}...", flush=True)
         diffs = compute_diffs(all_results, schedules_to_run, PROBE_METHODS)
@@ -698,7 +621,6 @@ def main():
             plot_ab_diffs(diffs, method, n_layers, step_dir)
             plot_diff_in_diffs(did, method, n_layers, step_dir)
 
-        all_step_results[probe_step] = all_results
         all_step_diffs[probe_step] = diffs
 
     if len(probe_steps) > 1:

@@ -126,9 +126,9 @@ class TestScheduleSampler:
                                      schedule="multi_burst", p=0.2, K=5)
         assert batch.shape[0] == 8
 
-    def test_undo_no_target(self, sampler):
+    def test_reversion_no_target(self, sampler):
         batch = sampler.sample_batch(step=0, total_steps=100,
-                                     schedule="undo", p=0.0)
+                                     schedule="reversion", p=0.0)
         assert batch.shape[0] == 8
 
 
@@ -155,8 +155,8 @@ class TestStaggeredSampler:
             batch = sampler.sample_batch(step, phase="train")
             assert batch.shape[0] == 8
 
-        undo_batch = sampler.sample_batch(0, phase="undo")
-        assert undo_batch.shape[0] == 8
+        reversion_batch = sampler.sample_batch(0, phase="reversion")
+        assert reversion_batch.shape[0] == 8
 
 
 class TestModel:

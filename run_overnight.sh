@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Priority runs: depth-3 pos-2, depth-4 pos-2, depth-5 pos-2
+# All remaining position/depth variants (run overnight)
+# Excludes 2/3, 2/4, 2/5 which are in run.sh
 set -euo pipefail
 
 PYTHON="${PYTHON:-.venv/bin/python}"
@@ -17,11 +18,17 @@ run_experiment() {
     post_process "${run_dir}"
 }
 
-# depth=3 burst at position 2  (2/3)
-run_experiment 3 2
+# depth=3: positions 1/3 and 3/3
+run_experiment 3 1
+run_experiment 3 3
 
-# depth=4 burst at position 2  (2/4)
-run_experiment 4 2
+# depth=4: positions 1/4, 3/4, 4/4
+run_experiment 4 1
+run_experiment 4 3
+run_experiment 4 4
 
-# depth=5 burst at position 2  (2/5)
-run_experiment 5 2
+# depth=5: positions 1/5, 3/5, 4/5, 5/5
+run_experiment 5 1
+run_experiment 5 3
+run_experiment 5 4
+run_experiment 5 5

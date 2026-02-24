@@ -1,4 +1,4 @@
-"""Plot + PDF report for depth-3 bijection burst experiment.
+"""Plot + PDF report for burst experiment.
 
 Usage: python burst/plot.py data/burst_d3_<run_tag>
 """
@@ -13,32 +13,14 @@ from pathlib import Path
 from fpdf import FPDF
 from collections import defaultdict, Counter
 from burst._worker import n_target_for_step
+from burst.train_utils import load_results, compute_lr_schedule
+from burst.config import (
+    EVAL_KEYS, CURVE_STYLE, SCHED_COLORS, SCHEDULE_ORDER,
+    PHASE_FOUNDATION, PHASE_BURST, PHASE_REVERSION,
+    ordered_schedules, sched_sort_key,
+)
 
-EVAL_KEYS = ["acc_A_comp", "acc_B_comp"]
-CURVE_STYLE = {
-    "acc_A_comp": {"color": "#2196F3", "ls": "-", "label": "A comp"},
-    "acc_B_comp": {"color": "#E91E63", "ls": "-", "label": "B comp"},
-}
-SCHED_COLORS = {
-    "uniform": "#2196F3", "end_block": "#F44336", "mid_block": "#9C27B0",
-    "end_mixed_75b": "#FF9800", "end_mixed_50b": "#E91E63", "end_mixed_25b": "#009688",
-    "ramp_up": "#795548",
-}
-SCHEDULE_ORDER = ["end_block", "end_mixed_75b", "end_mixed_50b", "end_mixed_25b", "uniform"]
 W, H = 297, 210
-
-
-def _ordered_schedules(scheds):
-    return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
-
-
-def load_results(run_dir):
-    run_dir = Path(run_dir)
-    with open(run_dir / "all_results.pkl", "rb") as f:
-        results = pickle.load(f)
-    with open(run_dir / "config.json") as f:
-        cfg = json.load(f)
-    return results, cfg
 
 
 def _bar_label(ax, x, text):
@@ -56,13 +38,13 @@ def _schedule_bar(ax, T, U, sched, p, bs, seed):
     ax.imshow(fracs.reshape(1, -1), aspect="auto", cmap="Blues",
               extent=[0, total, 0, 1], vmin=0, vmax=1)
     ax.set_yticks([])
-    ax.set_ylabel("B frac", fontsize=7)
+    ax.set_ylabel("Burst frac", fontsize=7)
     ax.set_xlim(0, total)
     ax.axvline(T, color="black", lw=2)
 
-    if sched == "uniform":
-        _bar_label(ax, T / 2, f"A: ~{(1-p)*100:.0f}% | B: ~{p*100:.0f}% (random)")
-        _bar_label(ax, T + U / 2, "A: 100% | B: 0%")
+    if sched == "burst_10":
+        _bar_label(ax, T / 2, f"Other: ~{(1-p)*100:.0f}% | Burst: ~{p*100:.0f}% (random)")
+        _bar_label(ax, T + U / 2, "Other: 100% | Burst: 0%")
         return
 
     if sched == "ramp_up":
@@ -70,9 +52,9 @@ def _schedule_bar(ax, T, U, sched, p, bs, seed):
         ramp_len = min(int(2 * burst_len / 0.20), T)
         ramp_start = T - ramp_len
         if ramp_start > 0:
-            _bar_label(ax, ramp_start / 2, "A: 100% | B: 0%")
-        _bar_label(ax, (ramp_start + T) / 2, "B: 0% -> 20% (ramp)")
-        _bar_label(ax, T + U / 2, "A: 100% | B: 0%")
+            _bar_label(ax, ramp_start / 2, "Other: 100% | Burst: 0%")
+        _bar_label(ax, (ramp_start + T) / 2, "Burst: 0% -> 20% (ramp)")
+        _bar_label(ax, T + U / 2, "Other: 100% | Burst: 0%")
         return
 
     regions, cur_val, start = [], fracs[0], 0
@@ -93,28 +75,14 @@ def _schedule_bar(ax, T, U, sched, p, bs, seed):
         if (e - s) < total * 0.03:
             continue
         b_pct = v * 100
-        txt = f"A: {100-b_pct:.0f}% | B: 0%" if b_pct < 0.5 else f"A: {100-b_pct:.0f}% | B: {b_pct:.0f}%"
+        txt = (f"Other: {100-b_pct:.0f}% | Burst: 0%" if b_pct < 0.5
+               else f"Other: {100-b_pct:.0f}% | Burst: {b_pct:.0f}%")
         _bar_label(ax, (s + e) / 2, txt)
-
-
-def compute_lr_schedule(cfg):
-    T, U = cfg["total_steps"], cfg["undo_steps"]
-    total = T + U
-    lr_max, lr_min, warmup = cfg["lr"], cfg["min_lr"], cfg["warmup_iters"]
-    steps = np.arange(1, total + 1)
-    lrs = np.zeros(total)
-    for i, s in enumerate(steps):
-        if s < warmup:
-            lrs[i] = lr_max * s / warmup
-        else:
-            decay = (s - warmup) / (total - warmup)
-            lrs[i] = lr_min + 0.5 * (1.0 + math.cos(math.pi * decay)) * (lr_max - lr_min)
-    return steps, lrs
 
 
 def plot_lr_schedule(cfg, plots_dir):
     steps, lrs = compute_lr_schedule(cfg)
-    T, U = cfg["total_steps"], cfg["undo_steps"]
+    T, U = cfg["total_steps"], cfg["reversion_steps"]
     fig, ax = plt.subplots(figsize=(14, 4))
     ax.plot(steps, lrs, color="#1565C0", lw=2)
     ax.axvline(T, color="black", lw=2, ls="--")
@@ -123,8 +91,8 @@ def plot_lr_schedule(cfg, plots_dir):
     ax.set_xlabel("Global Step")
     ax.set_ylabel("Learning Rate")
     ax.set_title("Learning Rate Schedule (cosine decay with warmup)", fontsize=12, fontweight="bold")
-    ax.text(T * 0.5, ax.get_ylim()[1] * 0.95, "TRAIN", ha="center", fontsize=9, color="gray")
-    ax.text(T + U * 0.5, ax.get_ylim()[1] * 0.95, "UNDO", ha="center", fontsize=9, color="gray")
+    ax.text(T * 0.5, ax.get_ylim()[1] * 0.95, "FOUNDATION + BURST", ha="center", fontsize=9, color="gray")
+    ax.text(T + U * 0.5, ax.get_ylim()[1] * 0.95, "REVERSION", ha="center", fontsize=9, color="gray")
     ax.grid(True, alpha=0.2)
     fig.tight_layout()
     fig.savefig(plots_dir / "lr_schedule.png", dpi=150, bbox_inches="tight")
@@ -135,18 +103,18 @@ def plot_per_run(result, plots_dir):
     log, sched, seed, cfg = result["log"], result["schedule"], result["seed"], result["config"]
     steps = np.array(log["step"])
     loss = np.array(log["loss"])
-    T, U = cfg["total_steps"], cfg["undo_steps"]
+    T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p = cfg["batch_size"], cfg["p_target"]
 
-    train_m = np.array([ph == "train" for ph in log["phase"]])
-    undo_m = np.array([ph == "undo" for ph in log["phase"]])
+    train_m = np.array([ph == "burst" for ph in log["phase"]])
+    reversion_m = np.array([ph == "reversion" for ph in log["phase"]])
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), gridspec_kw={"height_ratios": [1, 4, 2]})
     fig.suptitle(f"{sched}  seed={seed}  (depth-3 bijection chain)",
                  fontsize=13, fontweight="bold")
 
     _schedule_bar(axes[0], T, U, sched, p, bs, seed)
-    axes[0].set_title("Schedule (B fraction per step)", fontsize=9)
+    axes[0].set_title("Schedule (Burst fraction per step)", fontsize=9)
 
     ax = axes[1]
     for k, sty in CURVE_STYLE.items():
@@ -159,7 +127,7 @@ def plot_per_run(result, plots_dir):
     ax.legend(fontsize=5, loc="lower left", ncol=2)
     ax.grid(True, alpha=0.2)
 
-    peak = result.get("train_end_B_comp", 0)
+    peak = result["peak_burst"]
     ql = result.get("quarter_life", U)
     ql_str = f"{ql:.0f}" if ql < U else f">{U}"
     drop = result.get("dropoff_abs", 0)
@@ -181,47 +149,49 @@ def plot_per_run(result, plots_dir):
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.2)
 
+    for ax_i, label_i in [(axes[1], "FOUNDATION+BURST"), (axes[1], "REVERSION"),
+                           (axes[2], "FOUNDATION+BURST"), (axes[2], "REVERSION")]:
+        pass
+    axes[1].text(T * 0.5, -0.04, "FOUNDATION+BURST", ha="center", fontsize=7,
+                 color="gray", transform=axes[1].get_xaxis_transform())
+    axes[1].text(T + U * 0.5, -0.04, "REVERSION", ha="center", fontsize=7,
+                 color="gray", transform=axes[1].get_xaxis_transform())
+
     fig.tight_layout(rect=[0, 0.02, 1, 0.97])
-    idx = _sched_sort_key(sched)
+    idx = sched_sort_key(sched)
     fname = f"{idx:02d}_run_{sched}_s{seed}.png"
     fig.savefig(plots_dir / fname, dpi=120, bbox_inches="tight")
     plt.close(fig)
     return fname
 
 
-def _sched_sort_key(schedule: str) -> int:
-    try:
-        return SCHEDULE_ORDER.index(schedule)
-    except ValueError:
-        return len(SCHEDULE_ORDER)
-
-
 def plot_summary_bars(results, plots_dir, cfg):
     bcfg = cfg.get("base_cfg", cfg)
     total_steps = bcfg["total_steps"]
-    undo_steps = bcfg["undo_steps"]
+    reversion_steps = bcfg["reversion_steps"]
 
-    ordered = sorted(results, key=lambda r: _sched_sort_key(r["schedule"]))
+    ordered = sorted(results, key=lambda r: sched_sort_key(r["schedule"]))
     scheds = [r["schedule"] for r in ordered]
-    peaks = [r.get("train_end_B_comp", 0) for r in ordered]
-    quarterlives = [r.get("quarter_life", undo_steps) for r in ordered]
-    aucs = [r.get("undo_auc", 0) for r in ordered]
+    peaks = [r["peak_burst"] for r in ordered]
+    quarterlives = [r.get("quarter_life", reversion_steps) for r in ordered]
+    aucs = [r["reversion_auc"] for r in ordered]
     colors = [SCHED_COLORS.get(s, "gray") for s in scheds]
     xs = np.arange(len(scheds))
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-    fig.suptitle("Peak B Accuracy + Quarter-life + AUC by Schedule", fontsize=14, fontweight="bold")
+    fig.suptitle("Peak Burst Class Accuracy + Quarter-life + AUC by Schedule",
+                 fontsize=14, fontweight="bold")
 
-    titles = [f"Peak B Accuracy at step {total_steps}",
+    titles = [f"Peak Burst Class Accuracy at step {total_steps}",
               "Quarter-life t1/4 (lower = faster forgetting)",
-              "Undo AUC (lower = faster forgetting)"]
-    ylabels = ["Peak B comp accuracy", "Quarter-life (undo steps)", "Undo AUC"]
+              "Reversion AUC (lower = faster forgetting)"]
+    ylabels = ["Peak Burst Class accuracy", "Quarter-life (reversion steps)", "Reversion AUC"]
     data = [peaks, quarterlives, aucs]
 
     for ax, vals, title, ylabel in zip(axes, data, titles, ylabels):
         bars = ax.bar(xs, vals, color=colors, edgecolor="black", lw=0.5)
         for b, v in zip(bars, vals):
-            lbl = f"{v:.3f}" if max(vals) <= 1.5 else (f"{v:.0f}" if v < undo_steps else f">{undo_steps}")
+            lbl = f"{v:.3f}" if max(vals) <= 1.5 else (f"{v:.0f}" if v < reversion_steps else f">{reversion_steps}")
             ax.text(b.get_x() + b.get_width() / 2, b.get_height() + max(vals) * 0.01,
                     lbl, ha="center", fontsize=7, fontweight="bold")
         ax.set_ylabel(ylabel)
@@ -230,7 +200,7 @@ def plot_summary_bars(results, plots_dir, cfg):
         ax.set_xticklabels(scheds, fontsize=8, rotation=25, ha="right")
         ax.grid(True, alpha=0.2, axis="y")
 
-    axes[1].axhline(undo_steps, color="gray", ls=":", alpha=0.5)
+    axes[1].axhline(reversion_steps, color="gray", ls=":", alpha=0.5)
     fig.tight_layout()
     fig.savefig(plots_dir / "summary_bars.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -238,37 +208,37 @@ def plot_summary_bars(results, plots_dir, cfg):
 
 def plot_auc_detail(results, plots_dir, cfg):
     bcfg = cfg.get("base_cfg", cfg)
-    undo_steps = bcfg["undo_steps"]
+    reversion_steps = bcfg["reversion_steps"]
 
     sched_groups = {}
     for r in results:
         s = r["schedule"]
         sched_groups.setdefault(s, []).append(r)
-    ordered = _ordered_schedules(sched_groups.keys())
+    ordered = ordered_schedules(sched_groups.keys())
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 6))
-    fig.suptitle("Undo AUC by Schedule", fontsize=14, fontweight="bold")
+    fig.suptitle("Reversion AUC by Schedule", fontsize=14, fontweight="bold")
 
     xs = np.arange(len(ordered))
 
     ax = axes[0]
     ax.set_title("Individual seed × schedule", fontsize=10, fontweight="bold")
     for xi, sched in enumerate(ordered):
-        vals = [r.get("undo_auc", 0) for r in sched_groups[sched]]
+        vals = [r["reversion_auc"] for r in sched_groups[sched]]
         c = SCHED_COLORS.get(sched, "gray")
         jitter = np.random.default_rng(42).uniform(-0.15, 0.15, len(vals))
         ax.scatter(np.full(len(vals), xi) + jitter, vals,
                    color=c, edgecolor="black", lw=0.5, s=50, zorder=3)
     ax.set_xticks(xs)
     ax.set_xticklabels(ordered, fontsize=9, rotation=25, ha="right")
-    ax.set_ylabel("Undo AUC")
+    ax.set_ylabel("Reversion AUC")
     ax.grid(True, alpha=0.2, axis="y")
 
     ax = axes[1]
     ax.set_title("Mean ± 95% CI across seeds", fontsize=10, fontweight="bold")
     means, cis = [], []
     for sched in ordered:
-        vals = np.array([r.get("undo_auc", 0) for r in sched_groups[sched]])
+        vals = np.array([r["reversion_auc"] for r in sched_groups[sched]])
         m = vals.mean()
         means.append(m)
         ci = 1.96 * vals.std() / np.sqrt(len(vals)) if len(vals) > 1 else vals.std()
@@ -281,7 +251,7 @@ def plot_auc_detail(results, plots_dir, cfg):
                 f"{m:.1f}", ha="center", fontsize=8, fontweight="bold")
     ax.set_xticks(xs)
     ax.set_xticklabels(ordered, fontsize=9, rotation=25, ha="right")
-    ax.set_ylabel("Undo AUC")
+    ax.set_ylabel("Reversion AUC")
     ax.grid(True, alpha=0.2, axis="y")
 
     fig.tight_layout()
@@ -294,12 +264,12 @@ def plot_auc_diff_pct(results, plots_dir, cfg):
     for r in results:
         s = r["schedule"]
         sched_groups.setdefault(s, []).append(r)
-    ordered = _ordered_schedules(sched_groups.keys())
+    ordered = ordered_schedules(sched_groups.keys())
     n = len(ordered)
 
     mean_aucs = {}
     for sched in ordered:
-        mean_aucs[sched] = np.mean([r.get("undo_auc", 0) for r in sched_groups[sched]])
+        mean_aucs[sched] = np.mean([r["reversion_auc"] for r in sched_groups[sched]])
 
     pct_grid = np.zeros((n, n))
     for i, sa in enumerate(ordered):
@@ -320,7 +290,8 @@ def plot_auc_diff_pct(results, plots_dir, cfg):
     ax.set_yticklabels(ordered, fontsize=10)
     ax.set_xlabel("Baseline schedule (denominator)", fontsize=11)
     ax.set_ylabel("Compared schedule (numerator)", fontsize=11)
-    ax.set_title("Pairwise AUC Difference %\n(row − col) / |col| × 100", fontsize=13, fontweight="bold")
+    ax.set_title("Pairwise Reversion AUC Difference %\n(row − col) / |col| × 100",
+                 fontsize=13, fontweight="bold")
 
     for i in range(n):
         for j in range(n):
@@ -336,7 +307,7 @@ def plot_auc_diff_pct(results, plots_dir, cfg):
 
 def plot_overlay_per_schedule(results, plots_dir):
     T_ov = results[0]["config"]["total_steps"]
-    U_ov = results[0]["config"]["undo_steps"]
+    U_ov = results[0]["config"]["reversion_steps"]
     total_steps = T_ov + U_ov
 
     sched_data = defaultdict(lambda: defaultdict(list))
@@ -347,7 +318,7 @@ def plot_overlay_per_schedule(results, plots_dir):
             vals = np.array(r["log"].get(k, [0.0] * len(steps)))
             sched_data[sched][k].append((steps, vals))
 
-    for sched in _ordered_schedules(sched_data.keys()):
+    for sched in ordered_schedules(sched_data.keys()):
         fig, ax = plt.subplots(figsize=(14, 8))
         fig.suptitle(f"{sched} - All Metrics (mean ± 95% CI across seeds)",
                      fontsize=14, fontweight="bold")
@@ -377,9 +348,9 @@ def plot_overlay_per_schedule(results, plots_dir):
                            color=sty["color"], alpha=0.25)
 
         ax.axvline(T_ov, color="gray", ls="--", alpha=0.6, lw=2)
-        ax.text(T_ov * 0.5, 0.05, "TRAIN", ha="center", fontsize=11,
+        ax.text(T_ov * 0.5, 0.05, "FOUNDATION+BURST", ha="center", fontsize=11,
                color="gray", fontweight="bold")
-        ax.text(T_ov + U_ov * 0.5, 0.05, "UNDO", ha="center", fontsize=11,
+        ax.text(T_ov + U_ov * 0.5, 0.05, "REVERSION", ha="center", fontsize=11,
                color="gray", fontweight="bold")
 
         ax.set_xlim(0, total_steps)
@@ -390,14 +361,14 @@ def plot_overlay_per_schedule(results, plots_dir):
         ax.grid(True, alpha=0.3)
 
         fig.tight_layout()
-        idx = _sched_sort_key(sched)
+        idx = sched_sort_key(sched)
         fig.savefig(plots_dir / f"{idx:02d}_overlay_{sched}.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
 
 
 def plot_overlay_all_schedules(results, plots_dir):
     T_ov = results[0]["config"]["total_steps"]
-    U_ov = results[0]["config"]["undo_steps"]
+    U_ov = results[0]["config"]["reversion_steps"]
     total_steps = T_ov + U_ov
 
     sched_data = defaultdict(lambda: defaultdict(list))
@@ -413,7 +384,7 @@ def plot_overlay_all_schedules(results, plots_dir):
         fig.suptitle(f"All Schedules - {CURVE_STYLE[k]['label']}\n(mean ± 95% CI across seeds)",
                      fontsize=16, fontweight="bold")
 
-        for sched in _ordered_schedules(sched_data.keys()):
+        for sched in ordered_schedules(sched_data.keys()):
             c = SCHED_COLORS.get(sched, "gray")
             runs = sched_data[sched][k]
 
@@ -437,9 +408,9 @@ def plot_overlay_all_schedules(results, plots_dir):
                            color=c, alpha=0.2)
 
         ax.axvline(T_ov, color="gray", ls="--", alpha=0.6, lw=2)
-        ax.text(T_ov * 0.5, 0.05, "TRAIN", ha="center", fontsize=12,
+        ax.text(T_ov * 0.5, 0.05, "FOUNDATION+BURST", ha="center", fontsize=12,
                color="gray", fontweight="bold")
-        ax.text(T_ov + U_ov * 0.5, 0.05, "UNDO", ha="center", fontsize=12,
+        ax.text(T_ov + U_ov * 0.5, 0.05, "REVERSION", ha="center", fontsize=12,
                color="gray", fontweight="bold")
 
         ax.set_xlim(0, total_steps)
@@ -497,9 +468,11 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     n_embd = bcfg['n_embd']
     n_head = bcfg['n_head']
     total_steps = bcfg['total_steps']
-    undo_steps = bcfg['undo_steps']
+    reversion_steps = bcfg['reversion_steps']
     batch_size = bcfg['batch_size']
     p_target = bcfg['p_target']
+    depth = cfg.get("depth", cfg.get("task_info", {}).get("depth", 3))
+    burst_pos = cfg.get("burst_pos", cfg.get("task_info", {}).get("burst_pos", depth))
 
     pdf = ReportPDF(orientation="L", format="A4")
     pdf.alias_nb_pages()
@@ -507,16 +480,16 @@ def make_report(run_dir, results, cfg, per_run_fnames):
 
     pdf.add_page(); pdf.ln(25)
     pdf.set_font("Helvetica", "B", 26); pdf.set_text_color(0, 80, 140)
-    pdf.multi_cell(0, 11, "Depth-3 Bijection Composition\nBurst & Forgetting Experiment", align="C")
+    pdf.multi_cell(0, 11, f"Depth-{depth} Bijection Composition\nBurst & Forgetting Experiment", align="C")
     pdf.ln(6)
     pdf.set_font("Helvetica", "", 12); pdf.set_text_color(80, 80, 80)
-    pdf.cell(0, 7, "Free Generation (model produces its own outputs, no hints)",
+    pdf.cell(0, 7, f"Burst at position {burst_pos}  |  Free Generation (model produces its own outputs)",
              align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     pdf.set_font("Courier", "", 8); pdf.set_text_color(120, 120, 120)
     pdf.cell(0, 5,
              f"{n_layer}-layer Transformer ({n_embd}-dim, {n_head} heads)  |  "
-             f"{total_steps} train + {undo_steps} undo steps  |  batch {batch_size}  |  {len(results)} runs",
+             f"{total_steps} foundation+burst + {reversion_steps} reversion  |  batch {batch_size}  |  {len(results)} runs",
              align="C", new_x="LMARGIN", new_y="NEXT")
 
     pdf.add_page()
@@ -535,51 +508,44 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "The model must learn to compose multiple bijections together to produce "
         "the correct output sequence.")
 
-    pdf.sub("Training Data (A = background knowledge)")
-    n_a_comps_BSN = n_a ** 3
+    pdf.sub("Training Data (Other Classes = background knowledge)")
+    depth = cfg.get("depth", 3)
+    burst_pos = cfg.get("burst_pos", depth)
+    n_a_comps = n_a ** depth
     pdf.body(
-        f"{n_a} bijection functions. The model trains on all {n_a}×{n_a}×{n_a} = {n_a_comps_BSN} three-function "
-        f"chains (100% used for training).")
+        f"{n_a} bijection functions. The model trains on all {n_a}^{depth} = {n_a_comps} "
+        f"depth-{depth} chains (100% used for training).")
 
-    pdf.sub("Burst Data (B = the new thing to learn)")
-    n_b_pairs = n_a * n_a
+    pdf.sub("Burst Data (Burst Class = the new thing to learn)")
+    n_burst = n_a ** (depth - 1)
     pdf.body(
-        f"One brand-new function (b*) placed at position 3. "
-        f"All {n_b_pairs} possible pairs for positions 1-2 are used during the burst.")
+        f"One brand-new function (b*) placed at position {burst_pos}. "
+        f"All {n_burst} possible combinations for the other positions are used during the burst.")
 
     pdf.sub("The Experiment")
     pdf.body(
-        f"Phase 1 (Training, {total_steps} steps): A data + B data mixed per schedule. "
-        f"All schedules see the same total B data. "
-        f"Phase 2 (Undo, {undo_steps} steps): B removed, A only. We measure forgetting speed.")
+        f"Foundation+Burst ({total_steps} steps): Other classes + Burst class mixed per schedule. "
+        f"All schedules see the same total burst class data. "
+        f"Reversion ({reversion_steps} steps): Burst class removed, other classes only. "
+        f"We measure how quickly the burst class is forgotten.")
 
     pdf.sub("Metrics")
-    pdf.bul("A comp: compositional accuracy on known functions")
-    pdf.bul("B comp: accuracy on b* chains (acquisition + retention)")
-    pdf.bul("Peak B: b* accuracy at end of training")
-    pdf.bul(f"Quarter-life: undo steps until B drops to 25% of peak (capped at {undo_steps})")
-    pdf.bul("Undo AUC: area under B curve during undo (lower = faster forgetting)")
+    pdf.bul("Other Classes: compositional accuracy on known functions")
+    pdf.bul("Burst Class: accuracy on b* chains (acquisition + retention)")
+    pdf.bul("Peak Burst: b* accuracy at end of training")
+    pdf.bul(f"Quarter-life: reversion steps until Burst Class drops to 25% of peak (capped at {reversion_steps})")
+    pdf.bul("Reversion AUC: area under Burst Class curve during reversion (lower = faster forgetting)")
 
     burst_len = max(int(p_target * total_steps), 1)
     p_pct = int(p_target * 100)
 
     pdf.sub("The Schedules")
-    pdf.bul(f"end_block: 100% B block at the end ({burst_len} steps)")
-    pdf.bul(f"uniform: ~{p_pct}% B randomly throughout training")
-    pdf.bul(f"mid_block: 100% B block in the middle ({burst_len} steps)")
-
-    end_mixed_50_win = min(int(burst_len / 0.50), total_steps)
-    pdf.bul(f"end_mixed_50b: 50% B at the end ({end_mixed_50_win} steps)")
-
-    end_mixed_75b_win = min(int(burst_len / 0.75), total_steps)
-    pdf.bul(f"end_mixed_75b: 75% B at the end ({end_mixed_75b_win} steps)")
-
-    end_mixed_25b_win = min(int(burst_len / 0.25), total_steps)
-    pdf.bul(f"end_mixed_25b: 25% B at the end ({end_mixed_25b_win} steps)")
-
-    ramp_max_frac = 0.20
-    ramp_len = min(int(2 * burst_len / ramp_max_frac), total_steps)
-    pdf.bul(f"ramp_up: B ramps from 0% to {int(ramp_max_frac*100)}% at the end ({ramp_len} steps)")
+    pdf.bul(f"burst_100: 100% Burst Class block at the end ({burst_len} steps)")
+    for pct, frac in [(98, 0.98), (95, 0.95), (90, 0.90), (85, 0.85),
+                      (75, 0.75), (50, 0.50), (25, 0.25)]:
+        win = min(int(burst_len / frac), total_steps)
+        pdf.bul(f"burst_{pct}: {pct}% Burst Class at the end ({win} steps)")
+    pdf.bul(f"burst_10: ~{p_pct}% Burst Class randomly throughout (uniform control)")
 
     pdf.add_page()
     pdf.stitle("Learning Rate Schedule")
@@ -587,32 +553,32 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     warmup_iters = bcfg['warmup_iters']
     lr_max = bcfg['lr']
     lr_min = bcfg['min_lr']
-    total_train_undo = total_steps + undo_steps
+    total_train_reversion = total_steps + reversion_steps
     pdf.body(
         f"Cosine decay with linear warmup. Ramps up during the first "
         f"{warmup_iters} steps, then decays from {lr_max} to "
-        f"{lr_min} over {total_train_undo} steps. The undo phase continues the same "
-        f"schedule -- the model keeps learning on A data at a low rate.")
+        f"{lr_min} over {total_train_reversion} steps. The reversion phase continues the same "
+        f"schedule -- the model keeps learning on other classes data at a low rate.")
 
     pdf.add_page()
     pdf.stitle("Summary: Forgetting Speed by Schedule")
     pdf.chart(plots_dir / "summary_bars.png", w=260)
     pdf.body(
-        "Left: Peak B accuracy. Center: Quarter-life (lower = faster forgetting). "
-        "Right: Undo AUC (secondary). Schedules that deliver B near the end "
-        "achieve high acquisition. Mixed schedules retain B longer because A "
-        "is present alongside B during the burst.")
+        "Left: Peak Burst Class accuracy. Center: Quarter-life (lower = faster forgetting). "
+        "Right: Reversion AUC (secondary). Schedules that deliver burst class near the end "
+        "achieve high acquisition. Mixed schedules retain the burst class longer because "
+        "other classes are present alongside the burst class during the burst window.")
 
     pdf.add_page()
     pdf.stitle("AUC Detail: Individual Seeds + Mean ± CI")
     pdf.chart(plots_dir / "auc_detail.png", w=260)
     pdf.body(
         "Left: each dot is one seed for a given schedule. "
-        "Right: mean undo AUC with 95% CI error bars. "
-        "Lower AUC = faster forgetting of B data during the undo phase.")
+        "Right: mean reversion AUC with 95% CI error bars. "
+        "Lower AUC = faster forgetting of burst class during the reversion phase.")
 
     pdf.add_page()
-    pdf.stitle("Pairwise AUC Difference (%)")
+    pdf.stitle("Pairwise Reversion AUC Difference (%)")
     pdf.chart(plots_dir / "auc_diff_pct.png", w=200)
     pdf.body(
         "Each cell shows (row_AUC - col_AUC) / |col_AUC| × 100. "
@@ -621,18 +587,20 @@ def make_report(run_dir, results, cfg, per_run_fnames):
 
     pdf.add_page()
     pdf.stitle("Ranking: Fastest Forgetting First")
-    rows = sorted(results, key=lambda r: r.get("quarter_life", undo_steps))
+    rows = sorted(results, key=lambda r: r.get("quarter_life", reversion_steps))
     pdf.set_font("Courier", "", 7.5); pdf.set_text_color(40, 40, 40)
     pdf.cell(0, 4,
-             f"  {'Rank':<5}{'Schedule':<16}{'Peak B':>8}{'t1/4':>8}{'AUC':>7}",
+             f"  {'Rank':<5}{'Schedule':<16}{'Peak Burst':>10}{'t1/4':>8}{'Rev AUC':>9}",
              new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 4, "  " + "-" * 44, new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 4, "  " + "-" * 48, new_x="LMARGIN", new_y="NEXT")
     for i, r in enumerate(rows):
-        ql = r.get("quarter_life", undo_steps)
-        ql_str = f"{ql:.0f}" if ql < undo_steps else f">{undo_steps}"
+        ql = r.get("quarter_life", reversion_steps)
+        ql_str = f"{ql:.0f}" if ql < reversion_steps else f">{reversion_steps}"
+        peak = r["peak_burst"]
+        auc = r["reversion_auc"]
         pdf.cell(0, 4,
-                 f"  {i+1:<5}{r['schedule']:<16}{r.get('train_end_B_comp',0):>8.3f}"
-                 f"{ql_str:>8}{r.get('undo_auc',0):>7.0f}",
+                 f"  {i+1:<5}{r['schedule']:<16}{peak:>10.3f}"
+                 f"{ql_str:>8}{auc:>9.0f}",
                  new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
@@ -642,7 +610,7 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "Each page shows one accuracy metric with all schedules overlaid. "
         "Lines show mean accuracy across seeds, with shaded regions showing "
         "95% confidence intervals. Vertical dashed line marks "
-        "the start of the undo phase.")
+        "the start of the reversion phase.")
 
     for k in EVAL_KEYS:
         overlay_all_path = plots_dir / f"overlay_all_{k}.png"
@@ -657,10 +625,10 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "Each chart shows all metrics for one schedule. "
         "Lines show mean accuracy across seeds, with shaded regions showing "
         "95% confidence intervals. Vertical dashed line marks "
-        "the start of the undo phase.")
+        "the start of the reversion phase.")
 
-    for sched in _ordered_schedules(set(r["schedule"] for r in results)):
-        idx = _sched_sort_key(sched)
+    for sched in ordered_schedules(set(r["schedule"] for r in results)):
+        idx = sched_sort_key(sched)
         overlay_path = plots_dir / f"{idx:02d}_overlay_{sched}.png"
         if overlay_path.exists():
             pdf.sub(f"Schedule: {sched}")
@@ -669,8 +637,8 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     pdf.add_page()
     pdf.stitle("Per-Run Details")
     pdf.body(
-        "Each plot: (top) schedule bar with A/B percentages, "
-        "(middle) 5 accuracy curves with metrics, (bottom) training loss.")
+        "Each plot: (top) schedule bar with Other/Burst percentages, "
+        "(middle) accuracy curves with metrics, (bottom) training loss.")
     for fname in sorted(per_run_fnames):
         pdf.chart(plots_dir / fname, w=240)
 
@@ -698,9 +666,9 @@ def plot_task_distributions(run_dir):
             reader = csv.DictReader(f)
             for row in reader:
                 row["count"] = int(row["count"])
-                row["f1"] = int(row["f1"])
-                row["f2"] = int(row["f2"])
-                row["f3"] = int(row["f3"])
+                for col in list(row.keys()):
+                    if col.startswith("f") and col[1:].isdigit():
+                        row[col] = int(row[col])
                 all_data.append(row)
 
     if not all_data:
@@ -714,7 +682,7 @@ def plot_task_distributions(run_dir):
             writer.writerows(all_data)
     print(f"  Saved combined CSV: {combined_csv}")
 
-    schedules = _ordered_schedules(set(row["schedule"] for row in all_data))
+    schedules = ordered_schedules(set(row["schedule"] for row in all_data))
     phases = sorted(set(row["phase"] for row in all_data))
 
     summary_rows = []
@@ -727,35 +695,36 @@ def plot_task_distributions(run_dir):
 
             type_counts = {}
             compositions = set()
-            f3_vals = set()
-            f2_vals = set()
-            f1_vals = set()
+            fn_cols = sorted([c for c in filtered[0].keys()
+                              if c.startswith("f") and c[1:].isdigit()],
+                             key=lambda c: int(c[1:]), reverse=True)
+            fn_val_sets = {col: set() for col in fn_cols}
 
             for row in filtered:
                 tt = row["task_type"]
                 type_counts[tt] = type_counts.get(tt, 0) + row["count"]
                 compositions.add(row["composition"])
-                f3_vals.add(row["f3"])
-                f2_vals.add(row["f2"])
-                f1_vals.add(row["f1"])
+                for col in fn_cols:
+                    if col in row:
+                        fn_val_sets[col].add(row[col])
 
             total = sum(type_counts.values())
-            a_count = type_counts.get("a3", 0)
-            b_count = type_counts.get("b3", 0)
+            other_count = type_counts.get("other", 0)
+            burst_count = type_counts.get("burst", 0)
 
-            summary_rows.append({
+            row_out = {
                 "schedule": schedule,
                 "phase": phase,
                 "total_samples": total,
-                "a_samples": a_count,
-                "b_samples": b_count,
-                "a_fraction": a_count / total if total > 0 else 0,
-                "b_fraction": b_count / total if total > 0 else 0,
+                "other_samples": other_count,
+                "burst_samples": burst_count,
+                "other_fraction": other_count / total if total > 0 else 0,
+                "burst_fraction": burst_count / total if total > 0 else 0,
                 "unique_compositions": len(compositions),
-                "unique_f3": len(f3_vals),
-                "unique_f2": len(f2_vals),
-                "unique_f1": len(f1_vals),
-            })
+            }
+            for col in fn_cols:
+                row_out[f"unique_{col}"] = len(fn_val_sets[col])
+            summary_rows.append(row_out)
 
     summary_csv = stats_dir / "summary_statistics.csv"
     with open(summary_csv, "w", newline="") as f:
@@ -786,7 +755,12 @@ def plot_task_distributions(run_dir):
                 if not phase_data:
                     continue
 
-                fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+                fn_cols = sorted([c for c in phase_data[0].keys()
+                                  if c.startswith("f") and c[1:].isdigit()],
+                                 key=lambda c: int(c[1:]), reverse=True)
+                n_fn = len(fn_cols)
+                n_rows = 1 + max(1, (n_fn + 2) // 3)
+                fig, axes = plt.subplots(n_rows, 3, figsize=(15, 5 * n_rows))
                 fig.suptitle(f"{label} - {phase}", fontsize=16, fontweight="bold")
 
                 type_counts = {}
@@ -795,74 +769,68 @@ def plot_task_distributions(run_dir):
                     type_counts[tt] = type_counts.get(tt, 0) + row["count"]
 
                 types = sorted(type_counts.keys())
-                colors = ["#2196F3" if t == "a3" else "#E91E63" for t in types]
+                colors = ["#2196F3" if t == "other" else "#E91E63" for t in types]
                 axes[0, 0].bar(types, [type_counts[t] for t in types], color=colors)
-                axes[0, 0].set_title("A vs B Tasks")
+                axes[0, 0].set_title("Other Classes vs Burst Class")
                 axes[0, 0].set_xlabel("Task Type")
                 axes[0, 0].set_ylabel("Count")
                 for i, t in enumerate(types):
                     axes[0, 0].text(i, type_counts[t], str(type_counts[t]),
                                    ha="center", va="bottom")
 
-                f3_counts = {}
-                for row in phase_data:
-                    f3_counts[row["f3"]] = f3_counts.get(row["f3"], 0) + row["count"]
-                f3_sorted = sorted(f3_counts.items())
-                axes[0, 1].bar([str(f) for f, _ in f3_sorted],
-                              [c for _, c in f3_sorted], color="#4CAF50")
-                axes[0, 1].set_title("Distribution by F3 (position 3)")
-                axes[0, 1].set_xlabel("Function ID")
-                axes[0, 1].set_ylabel("Count")
-                axes[0, 1].tick_params(axis='x', rotation=45)
+                fn_colors = ["#4CAF50", "#FF9800", "#9C27B0", "#00BCD4", "#795548"]
+                for fi, col in enumerate(fn_cols):
+                    ax_r, ax_c = divmod(fi + 1, 3)
+                    if ax_r >= n_rows:
+                        break
+                    ax = axes[ax_r, ax_c]
+                    counts = {}
+                    for row in phase_data:
+                        if col in row:
+                            counts[row[col]] = counts.get(row[col], 0) + row["count"]
+                    sorted_items = sorted(counts.items())
+                    ax.bar([str(f) for f, _ in sorted_items],
+                           [c for _, c in sorted_items],
+                           color=fn_colors[fi % len(fn_colors)])
+                    pos_num = col[1:]
+                    ax.set_title(f"Distribution by {col.upper()} (position {pos_num})")
+                    ax.set_xlabel("Function ID")
+                    ax.set_ylabel("Count")
+                    ax.tick_params(axis='x', rotation=45)
 
-                f2_counts = {}
-                for row in phase_data:
-                    f2_counts[row["f2"]] = f2_counts.get(row["f2"], 0) + row["count"]
-                f2_sorted = sorted(f2_counts.items())
-                axes[0, 2].bar([str(f) for f, _ in f2_sorted],
-                              [c for _, c in f2_sorted], color="#FF9800")
-                axes[0, 2].set_title("Distribution by F2 (position 2)")
-                axes[0, 2].set_xlabel("Function ID")
-                axes[0, 2].set_ylabel("Count")
-                axes[0, 2].tick_params(axis='x', rotation=45)
-
-                f1_counts = {}
-                for row in phase_data:
-                    f1_counts[row["f1"]] = f1_counts.get(row["f1"], 0) + row["count"]
-                f1_sorted = sorted(f1_counts.items())
-                axes[1, 0].bar([str(f) for f, _ in f1_sorted],
-                              [c for _, c in f1_sorted], color="#9C27B0")
-                axes[1, 0].set_title("Distribution by F1 (position 1)")
-                axes[1, 0].set_xlabel("Function ID")
-                axes[1, 0].set_ylabel("Count")
-                axes[1, 0].tick_params(axis='x', rotation=45)
-
+                comp_ax = axes[-1, 1] if n_rows > 1 else axes[0, 1]
                 comp_counts = {}
                 for row in phase_data:
                     comp_counts[row["composition"]] = comp_counts.get(row["composition"], 0) + row["count"]
                 top_comps = sorted(comp_counts.items(), key=lambda x: x[1], reverse=True)[:20]
-                axes[1, 1].barh(range(len(top_comps)), [c for _, c in top_comps], color="#00BCD4")
-                axes[1, 1].set_yticks(range(len(top_comps)))
-                axes[1, 1].set_yticklabels([comp for comp, _ in top_comps], fontsize=8)
-                axes[1, 1].set_title("Top 20 Compositions")
-                axes[1, 1].set_xlabel("Count")
-                axes[1, 1].invert_yaxis()
+                comp_ax.barh(range(len(top_comps)), [c for _, c in top_comps], color="#00BCD4")
+                comp_ax.set_yticks(range(len(top_comps)))
+                comp_ax.set_yticklabels([comp for comp, _ in top_comps], fontsize=8)
+                comp_ax.set_title("Top 20 Compositions")
+                comp_ax.set_xlabel("Count")
+                comp_ax.invert_yaxis()
 
+                combo_ax = axes[-1, 2] if n_rows > 1 else axes[0, 2]
                 combo_counts = {}
                 for row in phase_data:
-                    combo = f"({row['f3']},{row['f2']},{row['f1']})"
-                    key = (row["task_type"], combo)
+                    fn_str = ",".join(str(row.get(c, "?")) for c in fn_cols)
+                    key = (row["task_type"], f"({fn_str})")
                     combo_counts[key] = combo_counts.get(key, 0) + row["count"]
                 top_combos = sorted(combo_counts.items(), key=lambda x: x[1], reverse=True)[:15]
 
                 labels = [f"{tt}: {combo}" for (tt, combo), _ in top_combos]
-                colors = ["#2196F3" if tt == "a3" else "#E91E63" for (tt, _), _ in top_combos]
-                axes[1, 2].barh(range(len(top_combos)), [c for _, c in top_combos], color=colors)
-                axes[1, 2].set_yticks(range(len(top_combos)))
-                axes[1, 2].set_yticklabels(labels, fontsize=7)
-                axes[1, 2].set_title("Top 15 Type+Function Combos")
-                axes[1, 2].set_xlabel("Count")
-                axes[1, 2].invert_yaxis()
+                colors = ["#2196F3" if tt == "other" else "#E91E63" for (tt, _), _ in top_combos]
+                combo_ax.barh(range(len(top_combos)), [c for _, c in top_combos], color=colors)
+                combo_ax.set_yticks(range(len(top_combos)))
+                combo_ax.set_yticklabels(labels, fontsize=7)
+                combo_ax.set_title("Top 15 Type+Function Combos")
+                combo_ax.set_xlabel("Count")
+                combo_ax.invert_yaxis()
+
+                for ri in range(n_rows):
+                    for ci in range(3):
+                        if not axes[ri, ci].has_data():
+                            axes[ri, ci].set_visible(False)
 
                 plt.tight_layout()
                 fname = charts_dir / f"{label}_{phase}_distribution.png"
@@ -877,28 +845,33 @@ def plot_task_distributions(run_dir):
             if not sched_phase_data:
                 continue
 
-            comp_stats = defaultdict(lambda: {"counts": [], "task_type": None, "f3": None, "f2": None, "f1": None})
+            fn_cols = sorted([c for c in sched_phase_data[0].keys()
+                              if c.startswith("f") and c[1:].isdigit()],
+                             key=lambda c: int(c[1:]), reverse=True)
+
+            comp_stats = defaultdict(lambda: {"counts": [], "meta": {}})
             for row in sched_phase_data:
-                key = (row["task_type"], row["f3"], row["f2"], row["f1"], row["composition"])
+                fn_vals = tuple(row.get(c, 0) for c in fn_cols)
+                key = (row["task_type"], fn_vals, row["composition"])
                 comp_stats[key]["counts"].append(row["count"])
-                comp_stats[key]["task_type"] = row["task_type"]
-                comp_stats[key]["f3"] = row["f3"]
-                comp_stats[key]["f2"] = row["f2"]
-                comp_stats[key]["f1"] = row["f1"]
-                comp_stats[key]["composition"] = row["composition"]
+                comp_stats[key]["meta"] = {
+                    "task_type": row["task_type"],
+                    "composition": row["composition"],
+                    **{c: row.get(c, 0) for c in fn_cols},
+                }
 
             comp_summary = []
             for key, data in comp_stats.items():
                 counts = data["counts"]
-                comp_summary.append({
-                    "task_type": data["task_type"],
-                    "f3": data["f3"],
-                    "f2": data["f2"],
-                    "f1": data["f1"],
-                    "composition": data["composition"],
+                entry = {
+                    "task_type": data["meta"]["task_type"],
+                    "composition": data["meta"]["composition"],
                     "mean": np.mean(counts),
                     "std": np.std(counts) if len(counts) > 1 else 0,
-                })
+                }
+                for c in fn_cols:
+                    entry[c] = data["meta"][c]
+                comp_summary.append(entry)
 
             fig, axes = plt.subplots(2, 2, figsize=(12, 10))
             fig.suptitle(f"{schedule} - {phase} (averaged across seeds)", fontsize=14, fontweight="bold")
@@ -908,36 +881,33 @@ def plot_task_distributions(run_dir):
                 tt = item["task_type"]
                 type_means[tt] = type_means.get(tt, 0) + item["mean"]
             types = sorted(type_means.keys())
-            colors = ["#2196F3" if t == "a3" else "#E91E63" for t in types]
+            colors = ["#2196F3" if t == "other" else "#E91E63" for t in types]
             axes[0, 0].bar(types, [type_means[t] for t in types], color=colors)
-            axes[0, 0].set_title("A vs B Tasks (mean)")
+            axes[0, 0].set_title("Other Classes vs Burst Class (mean)")
             axes[0, 0].set_xlabel("Task Type")
             axes[0, 0].set_ylabel("Mean Count")
             for i, t in enumerate(types):
                 axes[0, 0].text(i, type_means[t], f"{type_means[t]:.0f}", ha="center", va="bottom")
 
-            f1_means = {}
-            f2_means = {}
-            f3_means = {}
+            fn_means = {c: {} for c in fn_cols}
             for item in comp_summary:
-                f1_means[item["f1"]] = f1_means.get(item["f1"], 0) + item["mean"]
-                f2_means[item["f2"]] = f2_means.get(item["f2"], 0) + item["mean"]
-                f3_means[item["f3"]] = f3_means.get(item["f3"], 0) + item["mean"]
+                for c in fn_cols:
+                    fn_means[c][item[c]] = fn_means[c].get(item[c], 0) + item["mean"]
 
-            all_funcs = sorted(set(list(f1_means.keys()) + list(f2_means.keys()) + list(f3_means.keys())))
+            all_funcs = sorted(set(v for fm in fn_means.values() for v in fm.keys()))
             x_pos = np.arange(len(all_funcs))
-            width = 0.25
+            width = 0.8 / max(len(fn_cols), 1)
+            fn_colors = ["#4CAF50", "#FF9800", "#9C27B0", "#00BCD4", "#795548"]
 
-            axes[0, 1].bar(x_pos, [f3_means.get(f, 0) for f in all_funcs], width,
-                          label="F3", alpha=0.8, color="#4CAF50")
-            axes[0, 1].bar(x_pos + width, [f2_means.get(f, 0) for f in all_funcs], width,
-                          label="F2", alpha=0.8, color="#FF9800")
-            axes[0, 1].bar(x_pos + 2*width, [f1_means.get(f, 0) for f in all_funcs], width,
-                          label="F1", alpha=0.8, color="#9C27B0")
+            for fi, col in enumerate(fn_cols):
+                axes[0, 1].bar(x_pos + fi * width,
+                              [fn_means[col].get(f, 0) for f in all_funcs], width,
+                              label=col.upper(), alpha=0.8,
+                              color=fn_colors[fi % len(fn_colors)])
             axes[0, 1].set_title("Function Usage by Position")
             axes[0, 1].set_xlabel("Function ID")
             axes[0, 1].set_ylabel("Mean Count")
-            axes[0, 1].set_xticks(x_pos + width)
+            axes[0, 1].set_xticks(x_pos + width * len(fn_cols) / 2)
             axes[0, 1].set_xticklabels([str(f) for f in all_funcs], rotation=45)
             axes[0, 1].legend()
 
@@ -952,26 +922,27 @@ def plot_task_distributions(run_dir):
             axes[1, 0].set_xlabel("Mean Count")
             axes[1, 0].invert_yaxis()
 
-            type_f3_means = {}
+            outermost = fn_cols[0] if fn_cols else "f1"
+            type_outer_means = {}
             for item in comp_summary:
-                key = (item["task_type"], item["f3"])
-                type_f3_means[key] = type_f3_means.get(key, 0) + item["mean"]
+                key = (item["task_type"], item.get(outermost, 0))
+                type_outer_means[key] = type_outer_means.get(key, 0) + item["mean"]
 
-            task_types = sorted(set(tt for tt, _ in type_f3_means.keys()))
-            f3_vals = sorted(set(f3 for _, f3 in type_f3_means.keys()))
+            task_types = sorted(set(tt for tt, _ in type_outer_means.keys()))
+            outer_vals = sorted(set(fv for _, fv in type_outer_means.keys()))
 
-            x_pos = np.arange(len(f3_vals))
+            x_pos = np.arange(len(outer_vals))
             width = 0.35
             for i, tt in enumerate(task_types):
-                vals = [type_f3_means.get((tt, f3), 0) for f3 in f3_vals]
+                vals = [type_outer_means.get((tt, fv), 0) for fv in outer_vals]
                 axes[1, 1].bar(x_pos + i*width, vals, width,
                               label=f"Type {tt}", alpha=0.8,
-                              color="#2196F3" if tt == "a3" else "#E91E63")
-            axes[1, 1].set_title("Task Type × F3 Distribution")
-            axes[1, 1].set_xlabel("F3 Function ID")
+                              color="#2196F3" if tt == "other" else "#E91E63")
+            axes[1, 1].set_title(f"Task Type × {outermost.upper()} Distribution")
+            axes[1, 1].set_xlabel(f"{outermost.upper()} Function ID")
             axes[1, 1].set_ylabel("Mean Count")
             axes[1, 1].set_xticks(x_pos + width/2)
-            axes[1, 1].set_xticklabels([str(f) for f in f3_vals], rotation=45)
+            axes[1, 1].set_xticklabels([str(f) for f in outer_vals], rotation=45)
             axes[1, 1].legend()
 
             plt.tight_layout()

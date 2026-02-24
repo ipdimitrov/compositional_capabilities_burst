@@ -71,13 +71,20 @@ def build(rd, res, cfg, cp):
     bcfg = cfg.get("base_cfg", cfg)
     n_a = cfg.get("n_a", 4)
     ti = cfg.get("task_info", {})
-    T, U = bcfg["total_steps"], bcfg["undo_steps"]
+    depth = cfg.get("depth", ti.get("depth", 3))
+    burst_pos = cfg.get("burst_pos", ti.get("burst_pos", depth))
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
     nl, ne, nh = bcfg["n_layer"], bcfg["n_embd"], bcfg["n_head"]
     bs, p = bcfg["batch_size"], bcfg["p_target"]
     ns = cfg.get("n_seeds", 5)
     gr = _group(res)
     sc = _ordered(gr.keys())
     bl = max(int(p * T), 1)
+
+    auc_key = "reversion_auc"
+    peak_key = "peak_burst"
+    other_log_key = "acc_other"
+
     pdf = PDF(orientation="L", format="A4")
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=12)
@@ -86,103 +93,123 @@ def build(rd, res, cfg, cp):
     pdf.multi_cell(0, 13, "Compositional Learning & Forgetting\nin Transformers", align="C")
     pdf.ln(4)
     pdf.set_font("Helvetica", "", 14); pdf.set_text_color(80, 80, 80)
-    pdf.cell(0, 8, "Depth-3 Bijection Burst Experiment", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, f"Depth-{depth} Bijection Burst Experiment (burst at position {burst_pos})",
+             align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(8)
     pdf.set_font("Courier", "", 9); pdf.set_text_color(120, 120, 120)
-    pdf.cell(0, 5, f"{nl}L/{ne}d/{nh}H | {T} train + {U} undo | batch {bs} | {len(sc)}sched x {ns}seeds = {len(res)} runs", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, f"{nl}L/{ne}d/{nh}H | {T} foundation+burst + {U} reversion | batch {bs} | {len(sc)} schedules x {ns} seeds = {len(res)} runs",
+             align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 5, "Free generation evaluation", align="C", new_x="LMARGIN", new_y="NEXT")
+
     pdf.add_page(); pdf.st("Research Question")
     pdf.bt("How does the training schedule for introducing novel compositional knowledge affect a Transformer's ability to (a) acquire that knowledge and (b) retain it when the novel data is removed?")
-    pdf.bt("Does interleaving background (A) data with novel (B) data during the burst produce more robust representations than presenting B in isolation?")
+    pdf.bt("Does interleaving other classes with the burst class during the burst window produce more robust representations than presenting the burst class in isolation?")
     pdf.sh("Why This Matters")
     pdf.bt("Understanding how neural networks acquire and forget compositional skills is fundamental to continual learning, curriculum design, and knowledge editing.")
+
     pdf.add_page(); pdf.st("Experimental Setup")
-    pdf.sh("Task: Depth-3 Bijection Composition")
-    pdf.bt(f"Model applies chains of 3 bijection functions to 6 digits. Format: S [F3 F2 F1] [input] [after F1] [after F2] [after F3]. Eval: free generation.")
+    pdf.sh(f"Task: Depth-{depth} Bijection Composition (burst at position {burst_pos})")
+    pdf.bt(f"Model applies chains of {depth} bijection functions to 6 digits. Eval: free generation.")
     pdf.sh("Data Split")
-    pdf.bu(f"{n_a} bijections x 3 positions = {n_a**3} A compositions", "Background (A): ")
-    pdf.bu(f"1 new bijection b* at pos 3, all {n_a**2} pairs for pos 1-2", "Novel (B): ")
+    pdf.bu(f"{n_a} bijections x {depth} positions = {n_a**depth} other-class compositions", "Other Classes: ")
+    pdf.bu(f"1 new bijection b* at pos {burst_pos}, all {n_a**(depth-1)} combos for other positions", "Burst Class: ")
     pdf.sh("Model & Training")
     pdf.bu(f"{nl}L Transformer, {ne}d, {nh}H, SwiGLU, no dropout")
     pdf.bu(f"AdamW lr={bcfg['lr']}, cosine decay, batch {bs}, bfloat16")
+
     pdf.add_page(); pdf.st("Training Protocol")
-    pdf.sh(f"Phase 1: Training (0-{T-1})")
-    pdf.bt(f"A+B mixed per schedule. ~{int(p*100)}% B exposure.")
-    pdf.sh(f"Phase 2: Undo ({T}-{T+U-1})")
-    pdf.bt("B removed. A only. LR continues decaying.")
+    pdf.sh(f"Foundation + Burst (0-{T-1})")
+    pdf.bt(f"Other classes + Burst class mixed per schedule. ~{int(p*100)}% burst class exposure.")
+    pdf.sh(f"Reversion ({T}-{T+U-1})")
+    pdf.bt("Burst class removed. Other classes only. LR continues decaying.")
     pdf.sh("Evaluation"); pdf.bu("Every 10 steps, free generation, last 6 tokens")
+
     pdf.add_page(); pdf.st("LR Schedule"); pdf.ch(cp["lr"], w=260)
-    pdf.add_page(); pdf.st("The 5 Training Schedules"); pdf.ch(cp["schedule_bars"], w=260)
-    pdf.bu(f"Pure B for last {bl} steps", "end_block: ")
-    pdf.bu(f"75%B+25%A for last {min(int(bl/0.75),T)} steps", "end_mixed_75b: ")
-    pdf.bu(f"50%B+50%A for last {min(int(bl/0.50),T)} steps", "end_mixed_50b: ")
-    pdf.bu(f"25%B+75%A for last {min(int(bl/0.25),T)} steps", "end_mixed_25b: ")
-    pdf.bu(f"~{int(p*100)}%B randomly throughout", "uniform: ")
+    pdf.add_page(); pdf.st(f"The {len(sc)} Training Schedules"); pdf.ch(cp["schedule_bars"], w=260)
+    pdf.bu(f"Pure burst class for last {bl} steps", "burst_100: ")
+    for pct, frac in [(98, 0.98), (95, 0.95), (90, 0.90), (85, 0.85),
+                      (75, 0.75), (50, 0.50), (25, 0.25)]:
+        if f"burst_{pct}" in sc:
+            win = min(int(bl / frac), T)
+            pdf.bu(f"{pct}% burst class + {100-pct}% other classes for last {win} steps",
+                   f"burst_{pct}: ")
+    if "burst_10" in sc:
+        pdf.bu(f"~{int(p*100)}% burst class randomly throughout (uniform control)", "burst_10: ")
+
     pdf.add_page(); pdf.st("Metrics")
-    pdf.bu("B accuracy at step 500", "Peak B: ")
-    pdf.bu(f"Undo steps to 25% of peak (cap {U})", "Quarter-life: ")
-    pdf.bu("Area under B curve during undo", "Undo AUC: ")
+    pdf.bu("Burst class accuracy at end of training", "Peak Burst: ")
+    pdf.bu(f"Reversion steps to 25% of peak (cap {U})", "Quarter-life: ")
+    pdf.bu("Area under burst class curve during reversion", "Reversion AUC: ")
+
     pdf.add_page(); pdf.st("Hypotheses")
-    pdf.hbox(1, "All schedules achieve peak B ~ 1.0")
-    pdf.bt("Sufficient capacity for 16 compositions.")
-    pdf.hbox(2, "Uniform = most forgetting-resistant")
-    pdf.bt("Distributed B integrates with A knowledge.")
-    pdf.hbox(3, "End block = fastest forgetting")
-    pdf.bt("Isolated B creates fragile representations.")
-    pdf.hbox(4, "Mixed schedules ordered by A content")
-    pdf.bt("More A-mixing = more robust B.")
-    pdf.hbox(5, "A preserved regardless of schedule")
-    pdf.bt("A is majority of training.")
-    pv = {s: np.mean([r.get("train_end_B_comp", 0) for r in gr[s]]) for s in sc}
-    av = {s: np.mean([r.get("undo_auc", 0) for r in gr[s]]) for s in sc}
+    pdf.hbox(1, "All schedules achieve peak burst class ~ 1.0")
+    pdf.bt(f"Sufficient capacity for {n_a**(depth-1)} compositions.")
+    pdf.hbox(2, "burst_10 (uniform) = most forgetting-resistant")
+    pdf.bt("Distributed burst class integrates with other classes knowledge.")
+    pdf.hbox(3, "burst_100 = fastest forgetting")
+    pdf.bt("Isolated burst class creates fragile representations.")
+    pdf.hbox(4, "Mixed schedules ordered by other-classes content")
+    pdf.bt("More other-classes mixing = more robust burst class.")
+    pdf.hbox(5, "Other classes preserved regardless of schedule")
+    pdf.bt("Other classes are majority of training.")
+
+    pv = {s: np.mean([r.get(peak_key, 0) for r in gr[s]]) for s in sc}
+    av = {s: np.mean([r.get(auc_key, 0) for r in gr[s]]) for s in sc}
     qv = {s: np.mean([r.get("quarter_life", U) for r in gr[s]]) for s in sc}
-    ae = {s: np.mean([r["log"]["acc_A_comp"][-1] for r in gr[s]]) for s in sc}
-    pdf.add_page(); pdf.st("Result 1: Peak B Accuracy"); pdf.ch(cp["peak_bars"], w=240)
-    pdf.hbox(1, "All schedules achieve peak B ~ 1.0")
+    ae = {s: np.mean([r["log"][other_log_key][-1] for r in gr[s]]) for s in sc}
+
+    pdf.add_page(); pdf.st("Result 1: Peak Burst Class Accuracy"); pdf.ch(cp["peak_bars"], w=240)
+    pdf.hbox(1, "All schedules achieve peak burst class ~ 1.0")
     if all(m >= 0.998 for m in pv.values()):
         pdf.vbox("SUPPORTED", (0, 128, 0), f"All >= 0.998. Range: {min(pv.values()):.3f}-{max(pv.values()):.3f}.")
     else:
         pdf.vbox("PARTIAL", (255, 152, 0), f"Range: {min(pv.values()):.3f}-{max(pv.values()):.3f}.")
-    pdf.add_page(); pdf.st("Result 2: B Accuracy Over Time"); pdf.ch(cp["overlay_b"], w=260)
-    pdf.bt("All reach ~100% by step 500. Forgetting speed varies dramatically.")
-    pdf.add_page(); pdf.st("Result 3: Forgetting Dynamics"); pdf.ch(cp["undo_zoom"], w=260)
-    pdf.bt("Clear ordering: uniform > 25%B > 50%B > 75%B > end_block.")
-    pdf.add_page(); pdf.st("Result 4: Undo AUC"); pdf.ch(cp["auc_bars"], w=240)
-    pdf.hbox(2, "Uniform = most forgetting-resistant")
+
+    pdf.add_page(); pdf.st("Result 2: Burst Class Accuracy Over Time"); pdf.ch(cp["overlay_burst"], w=260)
+    pdf.bt(f"All reach ~100% by step {T}. Forgetting speed varies dramatically.")
+
+    pdf.add_page(); pdf.st("Result 3: Forgetting Dynamics"); pdf.ch(cp["reversion_zoom"], w=260)
+    order_str = " > ".join(SCHED_SHORT.get(s, s) for s in sorted(av, key=av.get, reverse=True))
+    pdf.bt(f"Ordering by retention: {order_str}")
+
+    pdf.add_page(); pdf.st("Result 4: Reversion AUC"); pdf.ch(cp["auc_bars"], w=240)
+    pdf.hbox(2, "burst_10 (uniform) = most forgetting-resistant")
     best = max(av, key=av.get)
-    if best == "uniform":
-        pdf.vbox("SUPPORTED", (0, 128, 0), f"Uniform highest AUC ({av['uniform']:.0f}).")
+    if best == "burst_10":
+        pdf.vbox("SUPPORTED", (0, 128, 0), f"burst_10 highest AUC ({av['burst_10']:.0f}).")
     else:
-        pdf.vbox("NOT SUPPORTED", (211, 47, 47), f"{best} higher ({av[best]:.0f} vs {av['uniform']:.0f}).")
+        b10_auc = av.get("burst_10", 0)
+        pdf.vbox("NOT SUPPORTED", (211, 47, 47), f"{best} higher ({av[best]:.0f} vs burst_10 {b10_auc:.0f}).")
+
     pdf.add_page(); pdf.st("Result 5: Quarter-life"); pdf.ch(cp["ql_bars"], w=240)
-    pdf.hbox(3, "End block = fastest forgetting")
+    pdf.hbox(3, "burst_100 = fastest forgetting")
     low = min(qv, key=qv.get)
-    if low == "end_block":
-        pdf.vbox("SUPPORTED", (0, 128, 0), f"Lowest quarter-life ({qv['end_block']:.0f}). High variance.")
+    if low == "burst_100":
+        pdf.vbox("SUPPORTED", (0, 128, 0), f"Lowest quarter-life ({qv['burst_100']:.0f}). High variance.")
     else:
         pdf.vbox("NOT SUPPORTED", (211, 47, 47), f"{low} lower ({qv[low]:.0f}).")
+
     pdf.add_page(); pdf.st("Result 6: Schedule Ordering"); pdf.ch(cp["auc_diff"], w=200)
-    pdf.hbox(4, "Mixed schedules ordered by A content")
+    pdf.hbox(4, "Mixed schedules ordered by other-classes content")
     order = sorted(av, key=av.get, reverse=True)
-    exp = ["uniform", "end_mixed_25b", "end_mixed_50b", "end_mixed_75b", "end_block"]
-    if order == exp:
-        pdf.vbox("SUPPORTED", (0, 128, 0), " > ".join(SCHED_SHORT[s] for s in order))
-    else:
-        pdf.vbox("PARTIAL", (255, 152, 0), f"Got: {' > '.join(SCHED_SHORT[s] for s in order)}")
-    pdf.add_page(); pdf.st("Result 7: A Preservation"); pdf.ch(cp["overlay_a"], w=260)
-    pdf.hbox(5, "A preserved regardless of schedule")
+    pdf.vbox("OBSERVED", (0, 100, 180), f"Got: {' > '.join(SCHED_SHORT.get(s, s) for s in order)}")
+
+    pdf.add_page(); pdf.st("Result 7: Other Classes Preservation"); pdf.ch(cp["overlay_other"], w=260)
+    pdf.hbox(5, "Other classes preserved regardless of schedule")
     if all(m >= 0.95 for m in ae.values()):
-        pdf.vbox("SUPPORTED", (0, 128, 0), "All A >= 0.95 at end.")
+        pdf.vbox("SUPPORTED", (0, 128, 0), "All other classes >= 0.95 at end.")
     else:
         pdf.vbox("PARTIAL", (255, 152, 0), f"Min: {min(ae.values()):.3f}")
+
     pdf.add_page(); pdf.st("Summary Statistics"); pdf.ch(cp["summary_table"], w=270)
     pdf.add_page(); pdf.st("Per-Schedule Detail")
     for path in cp["per_sched"]:
         pdf.ch(path, w=240)
+
     pd_ = rd / "next_token_regime_probes"
     if pd_.exists():
         pdf.add_page(); pdf.st("Next-Token Probes")
-        pdf.bt("Logit lens + learned linear probe at f3-output positions, A vs B.")
+        pdf.bt("Logit lens + learned linear probe at burst-position outputs, Other vs Burst.")
         for sd in sorted(pd_.glob("step_*")):
             step = sd.name.replace("step_", "")
             for m in ["logit_lens", "learned_probe"]:
@@ -197,30 +224,91 @@ def build(rd, res, cfg, cp):
                     fp = cb / f"combined_{k}_{m}.png"
                     if fp.exists():
                         pdf.add_page(); pdf.st(f"Evolution: {k} {m}"); pdf.ch(fp, w=260)
+
+    if cp.get("grad_cosine_overlay") or cp.get("grad_cosine_bars"):
+        pdf.add_page(); pdf.st("Gradient Cosine Similarity: Burst vs Other Classes")
+        pdf.sh("How It Works (Autoregressive Regime)")
+        pdf.bt(
+            "The model is trained autoregressively: given a sequence "
+            "[S F3 F2 F1 ' ' input ' ' out1 ' ' out2 ' ' out3], the loss is standard "
+            "next-token cross-entropy over all positions. At evaluation time, the model "
+            "generates its own outputs token-by-token (free generation) from a prompt "
+            "containing only the function slots and input — it never sees the ground-truth "
+            "intermediate or final outputs during inference."
+        )
+        pdf.bt(
+            "To compute gradient similarity, we sample 64 documents from each class "
+            "(burst and other), compute the next-token prediction loss on the full sequence "
+            "for each class separately, backpropagate to obtain a gradient vector (the "
+            "concatenation of all parameter gradients), and measure cosine similarity "
+            "between the two gradient vectors. Because the loss is autoregressive over "
+            "the entire sequence — including the intermediate composition outputs — the "
+            "gradient captures how each class shapes the model's predictions at every "
+            "position in the chain, not just the final output."
+        )
+        pdf.sh("Interpretation")
+        grad_sim_every = cfg.get("grad_sim_every", 50)
+        pdf.bt(
+            f"Computed every {grad_sim_every} steps throughout training. "
+            "High similarity means the burst class is pulling the model in the same direction "
+            "as the other classes — suggesting integrated, durable representations. "
+            "Low or negative similarity indicates conflicting gradient directions, "
+            "which predicts faster forgetting during reversion."
+        )
+        if cp.get("grad_cosine_overlay"):
+            pdf.ch(cp["grad_cosine_overlay"], w=260)
+        if cp.get("grad_cosine_bars"):
+            pdf.ch(cp["grad_cosine_bars"], w=240)
+
+    if cp.get("pairwise_evolution"):
+        pdf.add_page(); pdf.st("Pairwise Gradient Similarity: Burst Tasks vs Other Tasks")
+        pdf.bt(
+            "For the burst-at-position-2 setting, we track three pairwise cosine similarity "
+            "quantities across training: (1) burst–burst (within burst-class tasks), "
+            "(2) other–other (within other-class tasks), and (3) burst–other (cross-group). "
+            "When burst–other similarity rises, the model is learning the burst class in a "
+            "way that aligns with its existing knowledge of other classes."
+        )
+        pdf.ch(cp["pairwise_evolution"], w=260)
+
+    if cp.get("pairwise_heatmaps"):
+        pdf.add_page(); pdf.st("Pairwise Gradient Cosine Heatmaps (Snapshots)")
+        pdf.bt(
+            "Each heatmap shows the full pairwise gradient cosine similarity matrix at a "
+            "specific training step. Rows/columns B1-B5 are burst-class task gradient vectors; "
+            "O1-O5 are other-class task gradient vectors. The black lines separate the two groups. "
+            "Averaged over all seeds and schedules."
+        )
+        for p_ in (cp["pairwise_heatmaps"] or []):
+            pdf.ch(p_, w=220)
+
     pdf.add_page(); pdf.st("Conclusions")
-    pdf.bu("All schedules acquire B (peak ~ 1.0).", "Acquisition: ")
-    pdf.bu("Uniform is most forgetting-resistant.", "Retention: ")
-    pdf.bu("More A during burst = slower forgetting.", "A-mixing: ")
-    pdf.bu("End block: fastest forgetting, high variance.", "Variance: ")
-    pdf.bu("A robust across all schedules.", "Background: ")
+    pdf.bu("All schedules acquire burst class (peak ~ 1.0).", "Acquisition: ")
+    pdf.bu("burst_10 (uniform) is most forgetting-resistant.", "Retention: ")
+    pdf.bu("More other classes during burst = slower forgetting.", "Mixing: ")
+    pdf.bu("burst_100: fastest forgetting, high variance.", "Variance: ")
+    pdf.bu("Other classes robust across all schedules.", "Background: ")
     pdf.sh("Interpretation")
-    pdf.bt("Interleaving background with novel data creates integrated, durable representations. Isolated bursts create fragile shortcuts. Many small exposures > concentrated bursts.")
+    pdf.bt("Interleaving other classes with novel burst class creates integrated, durable representations. Isolated bursts create fragile shortcuts. Many small exposures > concentrated bursts.")
+
     pdf.add_page(); pdf.st("Follow-up Ideas")
     pdf.bu("Deeper compositions (depth 4, 5)", "Depth: ")
     pdf.bu("Multiple novel functions", "Capacity: ")
     pdf.bu("Different model sizes", "Architecture: ")
-    pdf.bu("Longer undo phases", "Duration: ")
-    pdf.bu("Activation patching for B localization", "Mechanistic: ")
-    pdf.bu("Can B be recovered after forgetting?", "Recovery: ")
+    pdf.bu("Longer reversion phases", "Duration: ")
+    pdf.bu("Activation patching for burst class localization", "Mechanistic: ")
+    pdf.bu("Can burst class be recovered after forgetting?", "Recovery: ")
     pdf.sh("Open Questions")
-    pdf.bu("Why high variance in end_block?")
-    pdf.bu("Critical A-mixing threshold?")
+    pdf.bu("Why high variance in burst_100?")
+    pdf.bu("Critical other-classes mixing threshold?")
     pdf.bu("LR-forgetting interaction?")
+
     pdf.add_page(); pdf.st("Appendix")
-    pdf.bt(f"Token: S [F3 F2 F1] [input] [F1(x)] [F2(F1(x))] [F3(F2(F1(x)))]. Doc={ti.get('doc_len',32)}, prompt={ti.get('prompt_len',12)}")
-    pdf.bt(f"Bijections: permutations of 0-9. [0]=id, [1-{n_a}]=A, [{n_a+1}]=b*. Seed=999.")
+    pdf.bt(f"Depth={depth}, burst_pos={burst_pos}. Doc={ti.get('doc_len',32)}, prompt={ti.get('prompt_len',12)}")
+    pdf.bt(f"Bijections: permutations of 0-9. [0]=id, [1-{n_a}]=other, [{n_a+1}]=b*. Data seed={cfg.get('seed_base', 999)}.")
     pdf.bt(f"Seeds: {cfg.get('seed_base',107)}-{cfg.get('seed_base',107)+ns-1}.")
-    out = rd / "presentation" / "burst_d3_presentation.pdf"
+
+    out = rd / "presentation" / "burst_presentation.pdf"
     pdf.output(str(out))
     return out
 
