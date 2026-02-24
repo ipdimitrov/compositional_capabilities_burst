@@ -1,12 +1,12 @@
-"""Depth-3 pure-bijection burst experiment.
+"""Pure-bijection burst experiment with configurable depth and burst position.
 
-Composition: F_i(3) . F_j(2) . F_k(1)(x)   (bijections only)
-A data: N_A bijections at each of 3 positions -> N_A^3 compositions
-B data: 1 new bijection b* at position 3 -> b* . F_j . F_k
+Launches parallel worker processes, tracks progress, collects results.
 
-7 schedules x 1 seed = 7 parallel jobs
+Usage:
+    python burst/experiment.py --depth 3 --burst-pos 2
+    python burst/experiment.py --depth 5 --burst-pos 3 --schedules burst_100 burst_50 burst_10
 """
-import sys, os, time, pickle, json, subprocess, argparse
+import sys, os, time, pickle, json, subprocess, argparse, itertools
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -17,24 +17,13 @@ from tqdm import tqdm
 
 from synthetic.init import set_seed
 from burst.data import BurstDataset, pad_pools_to_same_length
+from burst.config import (
+    N_A, SEED_BASE, DATA_SEED,
+    CLASS_OTHER, CLASS_BURST,
+    ExperimentConfig,
+)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SCHEDULES = ["end_block", "uniform", # "mid_block", "ramp_up"
-             "end_mixed_50b", "end_mixed_75b", "end_mixed_25b"]
-N_A, SEED_BASE = 4, 107
-N_SEEDS = 5
-
-BASE_CFG = {
-    "n_alphabets": 10, "seq_len": 6,
-    "n_layer": 6, "n_embd": 120, "n_head": 4,
-    "vocab_size": 128, "context_size": 80,
-    "lr": 3e-4, "weight_decay": 1e-3,
-    "beta1": 0.9, "beta2": 0.95, "grad_clip": 1.0,
-    "warmup_iters": 50, "min_lr": 6e-5,
-    "batch_size": 512, "total_steps": 500, "p_target": 0.10,
-    "undo_steps": 500, "eval_every": 10, "unlearn_threshold": 0.25,
-    "n_docs_per_task": 500, "n_eval_per_task": 500,
-}
 
 
 class NpEncoder(json.JSONEncoder):
@@ -47,17 +36,26 @@ class NpEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-class Depth3Data:
-    """Pure-bijection depth-3 composition data generator.
+class DepthNData:
+    """Pure-bijection depth-N composition data generator.
 
-    bijections[0] = identity. bijections[1..N_A] = A functions.
-    bijections[N_A+1] = b* (novel function for B data).
+    bijections[0] = identity. bijections[1..N_A] = other-class functions.
+    bijections[N_A+1] = b* (novel burst function).
 
-    Token format: S [F3 F2 F1] ' ' [input] ' ' [after F1] ' ' [after F2] ' ' [after F3]
+    burst_pos (1-indexed): which position in the chain gets b*.
+
+    Token format (depth=3):
+      S [FN ... F1] ' ' [input] ' ' [after F1] ' ' ... ' ' [after FN]
     """
 
-    def __init__(self, n_alph: int, seq_len: int, n_a: int, seed: int):
-        self.n_alph, self.seq_len, self.n_a = n_alph, seq_len, n_a
+    def __init__(self, n_alph: int, seq_len: int, n_a: int, depth: int,
+                 burst_pos: int, seed: int):
+        assert 1 <= burst_pos <= depth, "burst_pos must be in [1, depth]"
+        self.n_alph = n_alph
+        self.seq_len = seq_len
+        self.n_a = n_a
+        self.depth = depth
+        self.burst_pos = burst_pos
         rng = np.random.RandomState(seed)
 
         self.bijections = [np.arange(n_alph)]
@@ -87,24 +85,34 @@ class Depth3Data:
 
     def _build_splits(self, rng):
         na, b_star = self.n_a, self.n_a + 1
-        r = range(1, na + 1)
+        r = list(range(1, na + 1))
+        D, bp = self.depth, self.burst_pos
 
-        self.a_comp_train = [("a3", fi, fj, fk) for fi in r for fj in r for fk in r]
-        rng.shuffle(self.a_comp_train)
+        other_combos = list(itertools.product(r, repeat=D))
+        rng.shuffle(other_combos)
+        self.other_train = [(CLASS_OTHER,) + combo for combo in other_combos]
 
-        self.b_comp_train = [("b3", b_star, fj, fk) for fj in r for fk in r]
+        remaining_combos = list(itertools.product(r, repeat=D - 1))
+        burst_tasks = []
+        for combo in remaining_combos:
+            fns = list(combo)
+            fns.insert(D - bp, b_star)
+            burst_tasks.append((CLASS_BURST,) + tuple(fns))
+        self.burst_train = burst_tasks
 
     def _make_doc(self, task: tuple) -> np.ndarray:
+        fns = task[1:]
         inp = np.random.choice(self.n_alph, size=self.seq_len, replace=True)
         sp = np.array([self.token_idx[' ']])
-        f3, f2, f1 = task[1], task[2], task[3]
+
         cur = inp.copy()
         outs = []
-        for fn_idx in (f1, f2, f3):
+        for fn_idx in reversed(fns):
             cur = self.bijections[fn_idx][cur]
             outs.append(cur.copy())
+
         doc = [np.array([self.token_idx['S']]),
-               np.array([self.fn_tok[f3], self.fn_tok[f2], self.fn_tok[f1]]),
+               np.array([self.fn_tok[f] for f in fns]),
                sp, inp]
         for o in outs:
             doc.extend([sp, o])
@@ -114,17 +122,17 @@ class Depth3Data:
         return {t: np.array([self._make_doc(t) for _ in range(n)]) for t in tasks}
 
 
-def build_data(cfg: dict):
-    set_seed(999)
-    d = Depth3Data(cfg["n_alphabets"], cfg["seq_len"], N_A, 999)
+def build_data(cfg: dict, depth: int, burst_pos: int):
+    set_seed(DATA_SEED)
+    d = DepthNData(cfg["n_alphabets"], cfg["seq_len"], N_A, depth, burst_pos, DATA_SEED)
     nd, ne = cfg["n_docs_per_task"], cfg["n_eval_per_task"]
 
-    bg_pool = d.gen_pool(d.a_comp_train, nd)
-    target_pool = d.gen_pool(d.b_comp_train, nd)
+    bg_pool = d.gen_pool(d.other_train, nd)
+    target_pool = d.gen_pool(d.burst_train, nd)
 
     eval_pools = {
-        "A_comp": d.gen_pool(d.a_comp_train[:min(8, len(d.a_comp_train))], ne),
-        "B_comp": d.gen_pool(d.b_comp_train, ne),
+        CLASS_OTHER: d.gen_pool(d.other_train[:min(8, len(d.other_train))], ne),
+        CLASS_BURST: d.gen_pool(d.burst_train, ne),
     }
 
     all_pools = [bg_pool, target_pool] + list(eval_pools.values())
@@ -140,7 +148,7 @@ def build_data(cfg: dict):
 
     eval_docs = {k: _cat(v) for k, v in eval_pools.items()}
 
-    ref = eval_docs["A_comp"] if eval_docs["A_comp"].shape[0] > 1 else eval_docs["B_comp"]
+    ref = eval_docs[CLASS_OTHER] if eval_docs[CLASS_OTHER].shape[0] > 1 else eval_docs[CLASS_BURST]
     sp_positions = np.where(ref[0] == d.token_idx[' '])[0]
     prompt_len = int(sp_positions[0]) + 1 + d.seq_len + 1
 
@@ -150,8 +158,10 @@ def build_data(cfg: dict):
 
     task_info = {
         "n_a": N_A,
-        "n_a_comp_train": len(d.a_comp_train),
-        "n_b_comp_train": len(d.b_comp_train),
+        "depth": depth,
+        "burst_pos": burst_pos,
+        "n_other_train": len(d.other_train),
+        "n_burst_train": len(d.burst_train),
         "doc_len": int(ref.shape[1]), "prompt_len": prompt_len,
     }
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
@@ -159,13 +169,29 @@ def build_data(cfg: dict):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run-tag", default=None,
-                        help="Folder name suffix: data/burst_d3_<run_tag>. "
-                             "Defaults to current timestamp.")
+    parser.add_argument("--run-tag", default=None)
+    parser.add_argument("--depth", type=int, default=3)
+    parser.add_argument("--burst-pos", type=int, default=3)
+    parser.add_argument("--schedules", nargs="+", default=None)
+    parser.add_argument("--n-seeds", type=int, default=None)
+    parser.add_argument("--n-workers", type=int, default=None)
     args = parser.parse_args()
 
+    exp = ExperimentConfig(
+        depth=args.depth,
+        burst_pos=args.burst_pos,
+    )
+    if args.schedules:
+        exp.schedules = args.schedules
+    if args.n_seeds is not None:
+        exp.n_seeds = args.n_seeds
+    if args.n_workers is not None:
+        exp.n_workers = args.n_workers
+
+    base_cfg = exp.base_cfg
+
     tag = args.run_tag or datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = Path("data") / f"burst_d3_{tag}"
+    run_dir = Path("data") / f"burst_d{exp.depth}_pos{exp.burst_pos}_{tag}"
     run_dir.mkdir(parents=True, exist_ok=True)
     progress_dir = run_dir / "_progress"
     progress_dir.mkdir(exist_ok=True)
@@ -174,10 +200,10 @@ def main():
     if DEVICE == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
 
-    print(f"\nBuilding data (pure bijections, all B pairs)...", flush=True)
-    tp, bp, ed, pl, cfg_out, ti = build_data(BASE_CFG)
-    print(f"  A_comp: {ti['n_a_comp_train']}  "
-          f"B_comp: {ti['n_b_comp_train']}  "
+    print(f"\nBuilding data (depth={exp.depth}, burst_pos={exp.burst_pos})...", flush=True)
+    tp, bp, ed, pl, cfg_out, ti = build_data(base_cfg, exp.depth, exp.burst_pos)
+    print(f"  Other classes: {ti['n_other_train']}  "
+          f"Burst class: {ti['n_burst_train']}  "
           f"doc_len: {ti['doc_len']}  prompt: {ti['prompt_len']}", flush=True)
 
     data_path = str(run_dir / "_data.pkl")
@@ -185,29 +211,32 @@ def main():
         pickle.dump((tp, bp, ed, pl, None), f)
 
     jobs = []
-    for sched in SCHEDULES:
-        for seed_idx in range(N_SEEDS):
+    for sched in exp.schedules:
+        for seed_idx in range(exp.n_seeds):
             seed = SEED_BASE + seed_idx
-            cfg = {**BASE_CFG, "seed": seed,
-                   "vocab_size": cfg_out["vocab_size"], "context_size": cfg_out["context_size"]}
+            cfg = {**base_cfg, "seed": seed,
+                   "vocab_size": cfg_out["vocab_size"],
+                   "context_size": cfg_out["context_size"]}
             label = f"{sched}_s{seed}"
             jobs.append({"schedule": sched, "seed": seed, "cfg": cfg, "label": label})
 
     with open(run_dir / "config.json", "w") as f:
         json.dump({
-            "base_cfg": BASE_CFG, "n_a": N_A, "seed_base": SEED_BASE,
-            "n_seeds": N_SEEDS, "schedules": SCHEDULES, "n_jobs": len(jobs), "task_info": ti,
+            "base_cfg": base_cfg, "n_a": N_A, "seed_base": SEED_BASE,
+            "n_seeds": exp.n_seeds, "schedules": exp.schedules, "n_jobs": len(jobs),
+            "task_info": ti, "depth": exp.depth, "burst_pos": exp.burst_pos,
             "jobs": [{"label": j["label"], "schedule": j["schedule"],
                       "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    n_workers = min(len(jobs), 5)
-    steps_per_job = BASE_CFG["total_steps"] + BASE_CFG["undo_steps"]
+    n_workers = min(len(jobs), exp.n_workers)
+    steps_per_job = base_cfg["total_steps"] + base_cfg["reversion_steps"]
 
-    print(f"\nModel: {BASE_CFG['n_layer']}L/{BASE_CFG['n_embd']}d/{BASE_CFG['n_head']}H", flush=True)
+    tc = exp.train
+    print(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H", flush=True)
     print(f"Jobs: {len(jobs)}, workers: {n_workers}", flush=True)
-    print(f"Steps/job: {BASE_CFG['total_steps']} train + {BASE_CFG['undo_steps']} undo", flush=True)
-    print(f"Schedules: {SCHEDULES}\n", flush=True)
+    print(f"Steps/job: {tc.total_steps} train + {tc.reversion_steps} reversion", flush=True)
+    print(f"Schedules: {exp.schedules}\n", flush=True)
 
     worker_script = str(Path(__file__).parent / "_worker.py")
     t0 = time.time()
@@ -234,10 +263,11 @@ def main():
 
     while n_done < len(jobs):
         time.sleep(2)
-        cur_steps = sum(
-            int(pf.read_text().strip())
-            for pf in progress_dir.glob("*.txt")
-            if pf.read_text().strip().isdigit())
+        cur_steps = 0
+        for pf in progress_dir.glob("*.txt"):
+            txt = pf.read_text().strip()
+            if txt.isdigit():
+                cur_steps += int(txt)
         if cur_steps > prev_steps:
             pbar.update(cur_steps - prev_steps)
             prev_steps = cur_steps
@@ -251,8 +281,8 @@ def main():
                     r = pickle.load(f)
                 ql = r.get('quarter_life', '?')
                 tqdm.write(f"  [{n_done}/{len(jobs)}] {label:30s} "
-                           f"peak={r['train_end_B_comp']:.3f} "
-                           f"t1/4={ql} auc={r['undo_auc']:.0f} ({time.time()-t0:.0f}s)")
+                           f"peak={r['peak_burst']:.3f} "
+                           f"t1/4={ql} auc={r['reversion_auc']:.0f} ({time.time()-t0:.0f}s)")
             else:
                 se = proc.stderr.read().decode() if proc.stderr else ""
                 tqdm.write(f"  FAIL [{n_done}/{len(jobs)}]: {label} (exit {proc.returncode})")

@@ -1,4 +1,4 @@
-"""Plot probe heatmaps for A-vs-B representation analysis.
+"""Plot probe heatmaps for Other-vs-Burst representation analysis.
 
 Reads probe results from probe.py and generates:
   1. Per-model layer×token heatmaps at key checkpoints
@@ -19,12 +19,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from pathlib import Path
 from itertools import combinations
-
-SCHED_COLORS = {
-    "uniform": "#2196F3", "end_block": "#F44336", "mid_block": "#9C27B0",
-    "end_mixed_50b": "#FF9800", "end_mixed_75b": "#E91E63", "end_mixed_25b": "#009688",
-    "ramp_up": "#795548",
-}
+from burst.config import SCHED_COLORS, SCHEDULE_ORDER, ordered_schedules, sched_sort_key
 
 SHARED_TOKEN_PREFIXES = ("F2", "F1", "in", "sp0")
 
@@ -37,7 +32,7 @@ def _load_steps_from_config(run_dir: Path) -> tuple[int, int] | None:
         cfg = json.load(f)
     bcfg = cfg.get("base_cfg", {})
     ts = bcfg.get("total_steps")
-    us = bcfg.get("undo_steps")
+    us = bcfg.get("reversion_steps")
     if ts is not None and us is not None:
         return int(ts), int(us)
     return None
@@ -85,7 +80,7 @@ def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
                 list(r0["probes"].values())[0]["train_acc_KT"].shape[1])]),
             "n_layers": r0.get("n_layers", list(r0["probes"].values())[0]["train_acc_KT"].shape[0] - 1),
             "total_steps": r0.get("total_steps", fallback_ts),
-            "undo_steps": r0.get("undo_steps", fallback_us),
+            "reversion_steps": r0.get("reversion_steps", fallback_us),
         }
     else:
         with open(meta_path) as f:
@@ -93,7 +88,7 @@ def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
 
     if steps_from_cfg:
         meta["total_steps"] = steps_from_cfg[0]
-        meta["undo_steps"] = steps_from_cfg[1]
+        meta["reversion_steps"] = steps_from_cfg[1]
 
     return results, meta
 
@@ -139,7 +134,7 @@ def plot_heatmap(
                 "shared (≈chance)", ha="center", fontsize=6, color="orange", style="italic")
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-    cbar.set_label("Probe Accuracy (A vs B)", fontsize=9)
+    cbar.set_label("Probe Accuracy (Other vs Burst)", fontsize=9)
 
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -147,16 +142,16 @@ def plot_heatmap(
 
 
 def plot_diff_heatmap(
-    acc_a_KT: np.ndarray,
-    acc_b_KT: np.ndarray,
+    acc_other_KT: np.ndarray,
+    acc_burst_KT: np.ndarray,
     token_labels: list[str],
     layer_labels: list[str],
     title: str,
-    label_a: str,
-    label_b: str,
+    label_other: str,
+    label_burst: str,
     save_path: Path,
 ):
-    diff_KT = acc_a_KT - acc_b_KT
+    diff_KT = acc_other_KT - acc_burst_KT
     K, T = diff_KT.shape
     vmax = max(abs(diff_KT.min()), abs(diff_KT.max()), 0.1)
 
@@ -179,7 +174,7 @@ def plot_diff_heatmap(
             ax.text(t, k, f"{val:+.2f}", ha="center", va="center", fontsize=5, color=color)
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-    cbar.set_label(f"Δ accuracy ({label_a} − {label_b})", fontsize=9)
+    cbar.set_label(f"Δ accuracy ({label_other} − {label_burst})", fontsize=9)
 
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -212,7 +207,7 @@ def plot_training_dynamics(
     if len(interesting_layers) == 1:
         axes = [axes]
 
-    fig.suptitle(f"Training Dynamics — {result['label']}\nProbe accuracy (A vs B) over training",
+    fig.suptitle(f"Training Dynamics — {result['label']}\nProbe accuracy (Other vs Burst) over training",
                  fontsize=13, fontweight="bold")
 
     for ax_idx, layer_k in enumerate(interesting_layers):
@@ -260,7 +255,7 @@ def plot_mean_dynamics_by_schedule(
                  fontsize=14, fontweight="bold")
     ax.set_title("5-fold CV (train compositions)", fontsize=11)
 
-    for sched in _ordered_schedules(sched_data.keys()):
+    for sched in ordered_schedules(sched_data.keys()):
         runs = sched_data[sched]
         all_steps = set()
         for r in runs:
@@ -326,7 +321,7 @@ def plot_layer_depth_dynamics(
 
     cmap = plt.cm.viridis(np.linspace(0.1, 0.9, K))
 
-    for ax_idx, sched in enumerate(_ordered_schedules(sched_data.keys())):
+    for ax_idx, sched in enumerate(ordered_schedules(sched_data.keys())):
         ax = axes[ax_idx]
         runs = sched_data[sched]
 
@@ -363,19 +358,6 @@ def plot_layer_depth_dynamics(
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-
-SCHEDULE_ORDER = ["end_block", "end_mixed_75b", "end_mixed_50b", "end_mixed_25b", "uniform"]
-
-
-def _ordered_schedules(scheds):
-    return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
-
-
-def _sched_sort_key(schedule: str) -> int:
-    try:
-        return SCHEDULE_ORDER.index(schedule)
-    except ValueError:
-        return len(SCHEDULE_ORDER)
 
 
 def plot_layer_schedule_heatmap(
@@ -476,36 +458,36 @@ def main():
     token_labels = meta["token_labels"]
     n_layers = meta["n_layers"]
     total_steps = meta["total_steps"]
-    undo_steps = meta["undo_steps"]
+    reversion_steps = meta["reversion_steps"]
     layer_labels = _layer_labels(n_layers)
 
     plots_dir = run_dir / "probes" / "plots"
     plots_dir.mkdir(exist_ok=True)
 
-    schedules = _ordered_schedules(set(r["schedule"] for r in results))
-    key_steps = [0, total_steps // 2, total_steps, total_steps + undo_steps // 2,
-                 total_steps + undo_steps]
+    schedules = ordered_schedules(set(r["schedule"] for r in results))
+    key_steps = [0, total_steps // 2, total_steps, total_steps + reversion_steps // 2,
+                 total_steps + reversion_steps]
 
     print("Per-model heatmaps at key checkpoints...")
     for r in results:
         label = r["label"]
-        idx = _sched_sort_key(r["schedule"])
+        idx = sched_sort_key(r["schedule"])
         probes = r["probes"]
         for step in key_steps:
             closest = min(probes.keys(), key=lambda s: abs(s - step))
             if abs(closest - step) > 30:
                 continue
-            phase = "train" if closest <= total_steps else "undo"
+            phase = "train" if closest <= total_steps else "reversion"
             acc_KT = probes[closest]["train_acc_KT"]
             plot_heatmap(
                 acc_KT, token_labels, layer_labels,
-                f"{label} — step {closest} ({phase})\n5-fold CV probe accuracy (A vs B)",
+                f"{label} — step {closest} ({phase})\n5-fold CV probe accuracy (Other vs Burst)",
                 plots_dir / f"{idx:02d}_heatmap_{label}_step{closest}.png")
         print(f"  {label}")
 
     print("Training dynamics per model...")
     for r in results:
-        idx = _sched_sort_key(r["schedule"])
+        idx = sched_sort_key(r["schedule"])
         plot_training_dynamics(r, token_labels, layer_labels,
                                plots_dir / f"{idx:02d}_dynamics_{r['label']}.png")
     print(f"  {len(results)} dynamics plots")
@@ -520,44 +502,44 @@ def main():
     comparison_dir = plots_dir / "comparisons"
     comparison_dir.mkdir(exist_ok=True)
 
-    for step in [total_steps, total_steps + undo_steps]:
-        phase_label = "end_train" if step == total_steps else "end_undo"
+    for step in [total_steps, total_steps + reversion_steps]:
+        phase_label = "end_train" if step == total_steps else "end_reversion"
 
-        for sa, sb in combinations(schedules, 2):
-            acc_a = _mean_acc_at_step(results, sa, step, "train_acc_KT")
-            acc_b = _mean_acc_at_step(results, sb, step, "train_acc_KT")
-            if acc_a is None or acc_b is None:
-                closest_a = min(
-                    [s for r in results if r["schedule"] == sa for s in r["probes"].keys()],
+        for s1, s2 in combinations(schedules, 2):
+            acc_s1 = _mean_acc_at_step(results, s1, step, "train_acc_KT")
+            acc_s2 = _mean_acc_at_step(results, s2, step, "train_acc_KT")
+            if acc_s1 is None or acc_s2 is None:
+                closest_s1 = min(
+                    [s for r in results if r["schedule"] == s1 for s in r["probes"].keys()],
                     key=lambda s: abs(s - step), default=None)
-                closest_b = min(
-                    [s for r in results if r["schedule"] == sb for s in r["probes"].keys()],
+                closest_s2 = min(
+                    [s for r in results if r["schedule"] == s2 for s in r["probes"].keys()],
                     key=lambda s: abs(s - step), default=None)
-                if closest_a is not None and abs(closest_a - step) <= 30:
-                    acc_a = _mean_acc_at_step(results, sa, closest_a, "train_acc_KT")
-                if closest_b is not None and abs(closest_b - step) <= 30:
-                    acc_b = _mean_acc_at_step(results, sb, closest_b, "train_acc_KT")
-            if acc_a is None or acc_b is None:
+                if closest_s1 is not None and abs(closest_s1 - step) <= 30:
+                    acc_s1 = _mean_acc_at_step(results, s1, closest_s1, "train_acc_KT")
+                if closest_s2 is not None and abs(closest_s2 - step) <= 30:
+                    acc_s2 = _mean_acc_at_step(results, s2, closest_s2, "train_acc_KT")
+            if acc_s1 is None or acc_s2 is None:
                 continue
 
             plot_diff_heatmap(
-                acc_a, acc_b, token_labels, layer_labels,
-                f"{sa} vs {sb} — step {step} ({phase_label})\n"
-                f"Δ probe accuracy (positive = {sa} higher)",
-                sa, sb,
-                comparison_dir / f"diff_{sa}_vs_{sb}_{phase_label}.png")
+                acc_s1, acc_s2, token_labels, layer_labels,
+                f"{s1} vs {s2} — step {step} ({phase_label})\n"
+                f"Δ probe accuracy (positive = {s1} higher)",
+                s1, s2,
+                comparison_dir / f"diff_{s1}_vs_{s2}_{phase_label}.png")
 
         for sched in schedules:
-            si = _sched_sort_key(sched)
+            si = sched_sort_key(sched)
             acc_train_end = _mean_acc_at_step(results, sched, total_steps, "train_acc_KT")
-            acc_undo_end = _mean_acc_at_step(results, sched, total_steps + undo_steps, "train_acc_KT")
-            if acc_train_end is not None and acc_undo_end is not None:
+            acc_reversion_end = _mean_acc_at_step(results, sched, total_steps + reversion_steps, "train_acc_KT")
+            if acc_train_end is not None and acc_reversion_end is not None:
                 plot_diff_heatmap(
-                    acc_train_end, acc_undo_end, token_labels, layer_labels,
-                    f"{sched} — end_train vs end_undo\n"
-                    f"Δ probe accuracy (positive = more A/B distinction at end of training)",
-                    "end_train", "end_undo",
-                    comparison_dir / f"{si:02d}_diff_{sched}_train_vs_undo.png")
+                    acc_train_end, acc_reversion_end, token_labels, layer_labels,
+                    f"{sched} — end_train vs end_reversion\n"
+                    f"Δ probe accuracy (positive = more Other/Burst distinction at end of training)",
+                    "end_train", "end_reversion",
+                    comparison_dir / f"{si:02d}_diff_{sched}_train_vs_reversion.png")
 
     print(f"  Comparisons saved to {comparison_dir}")
 
@@ -566,7 +548,7 @@ def main():
     sched_dir.mkdir(exist_ok=True)
 
     for sched in schedules:
-        si = _sched_sort_key(sched)
+        si = sched_sort_key(sched)
         for step in key_steps:
             acc = _mean_acc_at_step(results, sched, step, "train_acc_KT")
             if acc is None:
@@ -578,16 +560,16 @@ def main():
                     step = closest
             if acc is None:
                 continue
-            phase = "train" if step <= total_steps else "undo"
+            phase = "train" if step <= total_steps else "reversion"
             plot_heatmap(
                 acc, token_labels, layer_labels,
                 f"{sched} (mean across seeds) — step {step} ({phase})\n"
-                f"5-fold CV probe accuracy (A vs B)",
+                f"5-fold CV probe accuracy (Other vs Burst)",
                 sched_dir / f"{si:02d}_heatmap_{sched}_step{step}.png")
         print(f"  {sched}")
 
     print("Layer × Schedule heatmap...")
-    final_step = total_steps + undo_steps
+    final_step = total_steps + reversion_steps
     plot_layer_schedule_heatmap(
         results, final_step,
         plots_dir / f"layer_schedule_heatmap_step{final_step}.png")

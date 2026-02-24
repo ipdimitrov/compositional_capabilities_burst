@@ -1,9 +1,9 @@
-"""Linear probes for A-vs-B representation analysis.
+"""Linear probes for Other-vs-Burst representation analysis.
 
 Retrains models from experiment.py using saved config.json,
 collects residual-stream activations at (layer, token_position) pairs
 across training checkpoints, and fits logistic regression probes to
-classify A-data vs B-data representations.
+classify Other-class vs Burst-class representations.
 
 Usage:
     python burst/probe.py data/burst_d3_<run_tag>
@@ -19,15 +19,15 @@ import torch.nn.functional as F
 from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import cross_val_score
-from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, update_cosine_warmup_lr
-from burst.experiment import Depth3Data, build_data, N_A
-from burst._worker import n_target_for_step, sample_batch
+from burst.experiment import DepthNData, build_data
+from burst.train_utils import (
+    DEVICE, retrain_with_callbacks, build_probe_docs,
+)
+from burst.config import N_A, DATA_SEED
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PROBE_SEED = 1337
 
 """
@@ -84,36 +84,13 @@ def collect_activations_KPTN(
     return np.stack(layer_acts, axis=0)
 
 
-def _pad_to_len(arr: np.ndarray, target_len: int) -> np.ndarray:
-    if arr.shape[0] == 0:
-        return arr
-    if arr.shape[1] >= target_len:
-        return arr[:, :target_len]
-    pad_w = target_len - arr.shape[1]
-    return np.concatenate([arr, np.zeros((arr.shape[0], pad_w), dtype=arr.dtype)], axis=1)
-
-
-def build_probe_dataset(
-    data: Depth3Data,
-    doc_len: int,
-    n_per_task: int = 200,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build balanced A/B probe datasets from train compositions."""
-    a_train = data.gen_pool(data.a_comp_train[:min(16, len(data.a_comp_train))], n_per_task)
-    b_train = data.gen_pool(data.b_comp_train, n_per_task)
-
-    def _cat(pool):
-        if not pool:
-            return np.zeros((0, doc_len), dtype=np.int64)
-        return _pad_to_len(np.concatenate(list(pool.values())), doc_len)
-
-    return _cat(a_train), _cat(b_train)
+build_probe_dataset = build_probe_docs
 
 
 def fit_probes_at_checkpoint(
     net: nanoGPT,
-    a_docs_BL: np.ndarray,
-    b_docs_BL: np.ndarray,
+    other_docs_BL: np.ndarray,
+    burst_docs_BL: np.ndarray,
     max_samples: int = 512,
 ) -> dict:
     """Fit logistic regression probes at every (layer, token_pos).
@@ -123,13 +100,13 @@ def fit_probes_at_checkpoint(
     """
     np.random.seed(PROBE_SEED)
 
-    acts_a_KPTN = collect_activations_KPTN(net, a_docs_BL, max_samples)
-    acts_b_KPTN = collect_activations_KPTN(net, b_docs_BL, max_samples)
+    acts_other_KPTN = collect_activations_KPTN(net, other_docs_BL, max_samples)
+    acts_burst_KPTN = collect_activations_KPTN(net, burst_docs_BL, max_samples)
 
-    K, Pa, T, N = acts_a_KPTN.shape
-    Pb = acts_b_KPTN.shape[1]
+    K, Pa, T, N = acts_other_KPTN.shape
+    Pb = acts_burst_KPTN.shape[1]
 
-    X_KPTN = np.concatenate([acts_a_KPTN, acts_b_KPTN], axis=1)
+    X_KPTN = np.concatenate([acts_other_KPTN, acts_burst_KPTN], axis=1)
     y_P = np.array([0] * Pa + [1] * Pb)
 
     train_acc_KT = np.zeros((K, T))
@@ -149,107 +126,41 @@ def retrain_and_probe(
     job: dict,
     target_pool: dict,
     bg_pool: dict,
-    a_docs_BL: np.ndarray,
-    b_docs_BL: np.ndarray,
+    other_docs_BL: np.ndarray,
+    burst_docs_BL: np.ndarray,
     checkpoint_steps: list[int],
     probe_max_samples: int = 512,
 ) -> dict:
     """Retrain a single model identically and collect probe results at each checkpoint."""
-    label, schedule, seed, cfg = job["label"], job["schedule"], job["seed"], job["cfg"]
-
-    set_seed(seed)
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
-
-    optim_cfg = OmegaConf.create({
-        "learning_rate": cfg["lr"], "weight_decay": cfg["weight_decay"],
-        "beta1": cfg["beta1"], "beta2": cfg["beta2"],
-        "grad_clip": cfg["grad_clip"], "decay_lr": True,
-        "warmup_iters": cfg["warmup_iters"], "min_lr": cfg["min_lr"],
-    })
-    optimizer = configure_optimizers(net, optim_cfg)
-    scaler = torch.amp.GradScaler('cuda', enabled=DEVICE == "cuda")
-
-    T_train, U = cfg["total_steps"], cfg["undo_steps"]
-    bs, p = cfg["batch_size"], cfg["p_target"]
-
     checkpoint_set = set(checkpoint_steps)
     probe_results = {}
 
-    net.train()
-    it = 0
-
-    if 0 in checkpoint_set:
-        print(f"    Probing step 0 (init)...", flush=True)
-        probe_results[0] = fit_probes_at_checkpoint(
-            net, a_docs_BL, b_docs_BL, probe_max_samples)
-        net.train()
-
-    for s in range(T_train):
-        nt = n_target_for_step(s, T_train, schedule, p, bs)
-        batch_np, _ = sample_batch(target_pool, bg_pool, nt, bs)
-        dat = torch.from_numpy(batch_np).long().to(DEVICE)
-        inp, tgt = dat[:, :-1], dat[:, 1:]
-        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, T_train + U)
-        optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits = net(inp)
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
-        scaler.scale(loss).backward()
-        if cfg["grad_clip"] > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(net.parameters(), cfg["grad_clip"])
-        scaler.step(optimizer)
-        scaler.update()
-
-        global_step = s + 1
+    def on_step(net, global_step, phase):
         if global_step in checkpoint_set:
-            print(f"    Probing step {global_step} (train)...", flush=True)
+            print(f"    Probing step {global_step} ({phase})...", flush=True)
             probe_results[global_step] = fit_probes_at_checkpoint(
-                net, a_docs_BL, b_docs_BL, probe_max_samples)
+                net, other_docs_BL, burst_docs_BL, probe_max_samples)
             net.train()
 
-    for s in range(U):
-        batch_np, _ = sample_batch(target_pool, bg_pool, 0, bs)
-        dat = torch.from_numpy(batch_np).long().to(DEVICE)
-        inp, tgt = dat[:, :-1], dat[:, 1:]
-        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, T_train + U)
-        optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits = net(inp)
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
-        scaler.scale(loss).backward()
-        if cfg["grad_clip"] > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(net.parameters(), cfg["grad_clip"])
-        scaler.step(optimizer)
-        scaler.update()
+    retrain_with_callbacks(job, target_pool, bg_pool, on_step=on_step)
 
-        global_step = T_train + s + 1
-        if global_step in checkpoint_set:
-            print(f"    Probing step {global_step} (undo)...", flush=True)
-            probe_results[global_step] = fit_probes_at_checkpoint(
-                net, a_docs_BL, b_docs_BL, probe_max_samples)
-            net.train()
-
-    return {"label": label, "schedule": schedule, "seed": seed, "probes": probe_results}
+    return {
+        "label": job["label"], "schedule": job["schedule"],
+        "seed": job["seed"], "probes": probe_results,
+    }
 
 
-def _default_checkpoint_steps(total_steps: int, undo_steps: int, every: int) -> list[int]:
-    steps = set([0, total_steps, total_steps + undo_steps])
+def _default_checkpoint_steps(total_steps: int, reversion_steps: int, every: int) -> list[int]:
+    steps = set([0, total_steps, total_steps + reversion_steps])
     s = every
-    while s <= total_steps + undo_steps:
+    while s <= total_steps + reversion_steps:
         steps.add(s)
         s += every
     return sorted(steps)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Linear probes for A-vs-B representation analysis")
+    parser = argparse.ArgumentParser(description="Linear probes for Other-vs-Burst representation analysis")
     parser.add_argument("run_dir", type=str, help="Path to experiment run directory")
     parser.add_argument("--jobs", nargs="*", default=None,
                         help="Subset of job labels to probe (default: all)")
@@ -267,23 +178,26 @@ def main():
 
     bcfg = cfg["base_cfg"]
     total_steps = bcfg["total_steps"]
-    undo_steps = bcfg["undo_steps"]
+    reversion_steps = bcfg["reversion_steps"]
 
-    checkpoint_steps = _default_checkpoint_steps(total_steps, undo_steps, args.checkpoint_every)
+    checkpoint_steps = _default_checkpoint_steps(total_steps, reversion_steps, args.checkpoint_every)
     print(f"Checkpoint steps ({len(checkpoint_steps)}): "
           f"{checkpoint_steps[:8]}...{checkpoint_steps[-3:]}")
 
-    print("Rebuilding data (same seed=999)...")
-    tp, bp, _, _, cfg_out, ti = build_data(bcfg)
-    print(f"  A_comp: {ti['n_a_comp_train']}  "
-          f"B_comp: {ti['n_b_comp_train']}  "
+    depth = cfg.get("depth", cfg.get("task_info", {}).get("depth", 3))
+    burst_pos = cfg.get("burst_pos", cfg.get("task_info", {}).get("burst_pos", depth))
+
+    print(f"Rebuilding data (seed={DATA_SEED})...")
+    tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos)
+    print(f"  Other tasks: {ti['n_other_train']}  "
+          f"Burst tasks: {ti['n_burst_train']}  "
           f"doc_len: {ti['doc_len']}")
 
-    set_seed(999)
-    d = Depth3Data(bcfg["n_alphabets"], bcfg["seq_len"], N_A, 999)
+    set_seed(DATA_SEED)
+    d = DepthNData(bcfg["n_alphabets"], bcfg["seq_len"], N_A, depth, burst_pos, DATA_SEED)
     doc_len = ti["doc_len"]
-    a_docs, b_docs = build_probe_dataset(d, doc_len)
-    print(f"  Probe data: A_train={a_docs.shape[0]} B_train={b_docs.shape[0]}")
+    other_docs, burst_docs = build_probe_dataset(d, doc_len)
+    print(f"  Probe data: Other={other_docs.shape[0]} Burst={burst_docs.shape[0]}")
 
     token_labels = get_token_position_labels(doc_len, bcfg["seq_len"])
     print(f"  Token positions ({len(token_labels)}): {token_labels[:6]}...{token_labels[-3:]}")
@@ -315,14 +229,14 @@ def main():
 
         print(f"[{ji+1}/{len(jobs_cfg)}] {label}")
         result = retrain_and_probe(
-            job, tp, bp, a_docs, b_docs,
+            job, tp, bp, other_docs, burst_docs,
             checkpoint_steps, args.probe_max_samples)
 
         result["checkpoint_steps"] = checkpoint_steps
         result["token_labels"] = token_labels
         result["n_layers"] = bcfg["n_layer"]
         result["total_steps"] = total_steps
-        result["undo_steps"] = undo_steps
+        result["reversion_steps"] = reversion_steps
 
         with open(probe_dir / f"{label}_probe.pkl", "wb") as f:
             pickle.dump(result, f)
@@ -338,7 +252,7 @@ def main():
         "token_labels": token_labels,
         "n_layers": bcfg["n_layer"],
         "total_steps": total_steps,
-        "undo_steps": undo_steps,
+        "reversion_steps": reversion_steps,
         "probe_max_samples": args.probe_max_samples,
         "probe_seed": PROBE_SEED,
         "jobs": [j["label"] for j in jobs_cfg],

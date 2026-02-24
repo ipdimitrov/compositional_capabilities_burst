@@ -1,4 +1,4 @@
-"""Worker for depth-3 pure-bijection burst experiment.
+"""Worker for pure-bijection burst experiment.
 
 Launched as a subprocess by experiment.py.
 Each worker trains one model on one schedule and saves results.
@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import torch
 import torch.nn.functional as F
-from collections import OrderedDict, Counter
+from collections import Counter
 from pathlib import Path
 from omegaconf import OmegaConf
 import csv
@@ -18,25 +18,24 @@ from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
 from burst.data import BurstDataset
+from burst.config import (
+    EVAL_KEYS, MIXED_FRACTIONS, UNIFORM_SCHEDULE,
+    PHASE_FOUNDATION, PHASE_BURST, PHASE_REVERSION,
+    ExperimentConfig,
+)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-EVAL_KEYS = ["acc_A_comp", "acc_B_comp"]
-
-MIXED_SCHEDULES = {
-    "end_mixed_50b":  0.50,
-    "end_mixed_75b": 0.75,
-    "end_mixed_25b": 0.25,
-}
+GRAD_SIM_EVERY = ExperimentConfig().grad_sim_every
 
 
 def n_target_for_step(step, total_steps, schedule, p, batch_size):
     T = total_steps
     burst_len = max(int(p * T), 1)
 
-    if schedule == "uniform":
+    if schedule == UNIFORM_SCHEDULE:
         return int(np.random.binomial(batch_size, p))
 
-    if schedule == "end_block":
+    if schedule == "burst_100":
         return batch_size if step >= T - burst_len else 0
 
     if schedule == "mid_block":
@@ -44,8 +43,8 @@ def n_target_for_step(step, total_steps, schedule, p, batch_size):
         half = burst_len // 2
         return batch_size if mid - half <= step < mid + (burst_len - half) else 0
 
-    if schedule in MIXED_SCHEDULES:
-        frac = MIXED_SCHEDULES[schedule]
+    if schedule in MIXED_FRACTIONS:
+        frac = MIXED_FRACTIONS[schedule]
         window = min(int(burst_len / frac), T)
         return int(round(batch_size * frac)) if step >= T - window else 0
 
@@ -57,7 +56,7 @@ def n_target_for_step(step, total_steps, schedule, p, batch_size):
             return int(round(batch_size * progress * max_frac))
         return 0
 
-    if schedule == "undo":
+    if schedule == "reversion_only":
         return 0
 
     raise ValueError(f"Unknown schedule: {schedule}")
@@ -116,6 +115,81 @@ def eval_free_gen(net, docs_BL, prompt_len: int):
     return correct / max(total, 1)
 
 
+def _flat_grad(net) -> torch.Tensor:
+    """Concatenate all parameter gradients into a single flat vector."""
+    parts = []
+    for p in net.parameters():
+        if p.grad is not None:
+            parts.append(p.grad.detach().view(-1))
+    return torch.cat(parts) if parts else torch.zeros(1, device=DEVICE)
+
+
+def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int = 64) -> torch.Tensor:
+    """Compute gradient vector for a sample of docs without modifying optimizer state."""
+    n = min(n_samples, docs_np.shape[0])
+    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    dat = torch.from_numpy(docs_np[idx]).long().to(DEVICE)
+    inp, tgt = dat[:, :-1], dat[:, 1:]
+    # Use float32 directly to avoid scaler state entanglement
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        logits = net(inp)
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+    loss.backward()
+    return _flat_grad(net).float()
+
+
+def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL) -> dict:
+    """Cosine similarity between burst-class and other-class gradient vectors."""
+    net.train()
+    net.zero_grad(set_to_none=True)
+    g_burst = _grad_vec_for_docs(net, docs_burst_BL, n_samples=64)
+    net.zero_grad(set_to_none=True)
+    g_other = _grad_vec_for_docs(net, docs_other_BL, n_samples=64)
+    cos_sim = F.cosine_similarity(g_burst.unsqueeze(0), g_other.unsqueeze(0)).item()
+    net.zero_grad(set_to_none=True)
+    return {"burst_vs_other": cos_sim}
+
+
+def compute_pairwise_grad_sim(net, task_docs: dict,
+                               burst_tasks: list, other_tasks: list) -> dict:
+    """Pairwise cosine similarity between all task gradient vectors.
+
+    task_docs: {task_tuple: docs_np}
+    burst_tasks: list of burst task tuples (b* at pos 2)
+    other_tasks: list of other task tuples
+
+    Returns 'matrix' (list of lists), 'labels', 'n_burst', 'n_other'.
+    """
+    net.train()
+
+    b_tasks = burst_tasks[:5]
+    o_tasks = other_tasks[:5]
+    all_tasks = b_tasks + o_tasks
+    labels = [f"B{i+1}" for i in range(len(b_tasks))] + [f"O{i+1}" for i in range(len(o_tasks))]
+
+    grad_vecs = []
+    for task in all_tasks:
+        if task in task_docs and task_docs[task].shape[0] > 0:
+            net.zero_grad(set_to_none=True)
+            grad_vecs.append(_grad_vec_for_docs(net, task_docs[task], n_samples=32))
+        else:
+            grad_vecs.append(None)
+
+    n = len(all_tasks)
+    matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                matrix[i, j] = 1.0
+            elif grad_vecs[i] is not None and grad_vecs[j] is not None:
+                matrix[i, j] = F.cosine_similarity(
+                    grad_vecs[i].unsqueeze(0), grad_vecs[j].unsqueeze(0)).item()
+
+    net.zero_grad(set_to_none=True)
+    return {"matrix": matrix.tolist(), "labels": labels,
+            "n_burst": len(b_tasks), "n_other": len(o_tasks)}
+
+
 def run(job, shared_data_path, run_dir, progress_dir):
     label, schedule, seed, cfg = job["label"], job["schedule"], job["seed"], job["cfg"]
 
@@ -142,19 +216,46 @@ def run(job, shared_data_path, run_dir, progress_dir):
     optimizer = configure_optimizers(net, optim_cfg)
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE == "cuda")
 
-    T, U = cfg["total_steps"], cfg["undo_steps"]
+    T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p, ev = cfg["batch_size"], cfg["p_target"], cfg["eval_every"]
 
     log = {"step": [], "loss": [], "phase": []}
     for k in EVAL_KEYS:
         log[k] = []
 
+    # Gradient cosine similarity logs
+    grad_sim_log = {"step": [], "phase": [], "burst_vs_other": []}
+    pairwise_snapshots = []  # list of {step, phase, matrix, labels, n_burst, n_other}
+
+    # Build flat arrays for grad sim computation
+    burst_docs_all = np.concatenate(list(target_pool.values())) if target_pool else None
+    other_docs_all = np.concatenate(list(bg_pool.values())) if bg_pool else None
+
     def do_eval(phase, loss_val):
         log["step"].append(it)
         log["loss"].append(loss_val)
         log["phase"].append(phase)
         for k in EVAL_KEYS:
-            log[k].append(eval_free_gen(net, eval_docs[k.replace("acc_", "")], prompt_len))
+            log[k].append(eval_free_gen(net, eval_docs[k.removeprefix("acc_")], prompt_len))
+        net.train()
+
+    def do_grad_sim(phase):
+        if burst_docs_all is None or other_docs_all is None:
+            return
+        sim = compute_grad_cosine_sim(net, burst_docs_all, other_docs_all)
+        grad_sim_log["step"].append(it)
+        grad_sim_log["phase"].append(phase)
+        grad_sim_log["burst_vs_other"].append(sim["burst_vs_other"])
+        net.train()
+
+    def do_pairwise_snap(phase):
+        task_docs = {**target_pool, **bg_pool}
+        burst_tasks = list(target_pool.keys())
+        other_tasks = list(bg_pool.keys())
+        snap = compute_pairwise_grad_sim(net, task_docs, burst_tasks, other_tasks)
+        snap["step"] = it
+        snap["phase"] = phase
+        pairwise_snapshots.append(snap)
         net.train()
 
     def train_step(batch_np, tasks_sampled):
@@ -177,44 +278,56 @@ def run(job, shared_data_path, run_dir, progress_dir):
     net.train()
     it = 0
 
-    task_counts_train_phase1 = Counter()
-    task_counts_train_phase2 = Counter()
-    task_counts_undo = Counter()
+    task_counts_foundation = Counter()
+    task_counts_burst = Counter()
+    task_counts_reversion = Counter()
 
     burst_len = max(int(p * T), 1)
-    if schedule == "uniform":
-        train_phase1_end = T
-    elif schedule == "end_block":
-        train_phase1_end = T - burst_len
-    elif schedule in MIXED_SCHEDULES:
-        frac = MIXED_SCHEDULES[schedule]
+    if schedule == UNIFORM_SCHEDULE:
+        foundation_end = T
+    elif schedule == "burst_100":
+        foundation_end = T - burst_len
+    elif schedule in MIXED_FRACTIONS:
+        frac = MIXED_FRACTIONS[schedule]
         window = min(int(burst_len / frac), T)
-        train_phase1_end = T - window
+        foundation_end = T - window
     else:
-        train_phase1_end = T // 2
+        foundation_end = T // 2
+
+    # Pairwise snapshot steps: beginning, mid-burst, end-burst, mid-reversion, end-reversion
+    pairwise_steps = {0, T // 2, T - 1, T + U // 2, T + U - 1}
 
     for s in range(T):
         nt = n_target_for_step(s, T, schedule, p, bs)
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, nt, bs)
 
-        if s < train_phase1_end:
-            task_counts_train_phase1.update(sampled_tasks)
+        if s < foundation_end:
+            task_counts_foundation.update(sampled_tasks)
         else:
-            task_counts_train_phase2.update(sampled_tasks)
+            task_counts_burst.update(sampled_tasks)
 
         loss_val = train_step(batch_np, sampled_tasks)
         if s % ev == 0 or s == T - 1:
-            do_eval("train", loss_val)
+            do_eval(PHASE_BURST, loss_val)
+        if s % GRAD_SIM_EVERY == 0 or s == T - 1:
+            do_grad_sim(PHASE_BURST)
+        if s in pairwise_steps:
+            do_pairwise_snap(PHASE_BURST)
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(s + 1))
 
     for s in range(U):
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, 0, bs)
-        task_counts_undo.update(sampled_tasks)
+        task_counts_reversion.update(sampled_tasks)
 
         loss_val = train_step(batch_np, sampled_tasks)
+        global_s = T + s
         if s % ev == 0 or s == U - 1:
-            do_eval("undo", loss_val)
+            do_eval(PHASE_REVERSION, loss_val)
+        if s % GRAD_SIM_EVERY == 0 or s == U - 1:
+            do_grad_sim(PHASE_REVERSION)
+        if global_s in pairwise_steps:
+            do_pairwise_snap(PHASE_REVERSION)
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(T + s + 1))
 
@@ -229,61 +342,70 @@ def run(job, shared_data_path, run_dir, progress_dir):
         rows = []
         for task, count in counter_data.items():
             task_type = task[0]
-            f3, f2, f1 = task[1], task[2], task[3]
+            fn_vals = task[1:]
 
-            rows.append({
+            row = {
                 "schedule": schedule,
                 "seed": seed,
                 "phase": phase_name,
                 "task_type": task_type,
-                "f3": f3,
-                "f2": f2,
-                "f1": f1,
-                "composition": f"{f3}_{f2}_{f1}",
-                "count": count
-            })
+                "composition": "_".join(str(f) for f in fn_vals),
+                "count": count,
+            }
+            for i, fv in enumerate(fn_vals):
+                row[f"f{len(fn_vals) - i}"] = fv
+
+            rows.append(row)
 
         if rows:
+            fieldnames = ["schedule", "seed", "phase", "task_type", "composition", "count"]
+            depth = len(task[1:]) if counter_data else 3
+            fieldnames += [f"f{d}" for d in range(depth, 0, -1)]
             with open(csv_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["schedule", "seed", "phase", "task_type",
-                                                       "f3", "f2", "f1", "composition", "count"])
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
                 writer.writeheader()
                 writer.writerows(rows)
 
-    if task_counts_train_phase1:
-        save_task_distribution_stats("train_phase1", task_counts_train_phase1)
-    if task_counts_train_phase2:
-        save_task_distribution_stats("train_phase2", task_counts_train_phase2)
-    if task_counts_undo:
-        save_task_distribution_stats("undo", task_counts_undo)
+    if task_counts_foundation:
+        save_task_distribution_stats(PHASE_FOUNDATION, task_counts_foundation)
+    if task_counts_burst:
+        save_task_distribution_stats(PHASE_BURST, task_counts_burst)
+    if task_counts_reversion:
+        save_task_distribution_stats(PHASE_REVERSION, task_counts_reversion)
 
-    undo_accs = [log["acc_B_comp"][i] for i, ph in enumerate(log["phase"]) if ph == "undo"]
-    undo_steps = [log["step"][i] - T for i, ph in enumerate(log["phase"]) if ph == "undo"]
-    train_accs = [log["acc_B_comp"][i] for i, ph in enumerate(log["phase"]) if ph == "train"]
+    reversion_accs = [log["acc_burst"][i] for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
+    reversion_steps = [log["step"][i] - T for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
+    burst_accs = [log["acc_burst"][i] for i, ph in enumerate(log["phase"]) if ph == PHASE_BURST]
 
-    peak_B = train_accs[-1] if train_accs else 0
-    undo_end_B = undo_accs[-1] if undo_accs else peak_B
-    undo_auc = float(np.trapz(undo_accs, undo_steps)) if len(undo_accs) > 1 else 0.0
+    peak_burst = max(burst_accs) if burst_accs else 0
+    reversion_end_burst = reversion_accs[-1] if reversion_accs else peak_burst
+    reversion_auc = float(np.trapz(reversion_accs, reversion_steps)) if len(reversion_accs) > 1 else 0.0
 
+    # t1/4: first reversion step where burst class acc drops to 25% of peak
     quarter_life = U
-    if peak_B > 1e-6:
-        for acc_val, us in zip(undo_accs, undo_steps):
-            if acc_val <= peak_B * 0.25:
+    half_life = U
+    if peak_burst > 1e-6:
+        for acc_val, us in zip(reversion_accs, reversion_steps):
+            if half_life == U and acc_val <= peak_burst * 0.5:
+                half_life = us
+            if acc_val <= peak_burst * 0.25:
                 quarter_life = us
                 break
 
-    dropoff_abs = peak_B - undo_end_B
-    dropoff_pct = (dropoff_abs / peak_B * 100) if peak_B > 1e-6 else 0.0
+    dropoff_abs = peak_burst - reversion_end_burst
+    dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > 1e-6 else 0.0
 
     result = {
         "schedule": schedule, "seed": seed,
         "label": label, "log": log, "config": dict(cfg),
-        "train_end_B_comp": peak_B, "undo_end_B_comp": undo_end_B,
+        "peak_burst": peak_burst, "reversion_end_burst": reversion_end_burst,
         "dropoff_abs": dropoff_abs, "dropoff_pct": dropoff_pct,
-        "quarter_life": quarter_life, "undo_auc": undo_auc,
+        "quarter_life": quarter_life, "reversion_auc": reversion_auc,
+        "grad_sim_log": grad_sim_log,
+        "pairwise_snapshots": pairwise_snapshots,
     }
     for k in EVAL_KEYS:
-        for phase in ("train", "undo"):
+        for phase in (PHASE_BURST, PHASE_REVERSION):
             vals = [log[k][i] for i, ph in enumerate(log["phase"]) if ph == phase]
             result[f"{phase}_end_{k}"] = vals[-1] if vals else 0
 
