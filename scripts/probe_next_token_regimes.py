@@ -293,9 +293,12 @@ def probe_all_layers(
 
 
 def compute_diffs(all_results, schedules, methods):
+    """Returns {method: {sched: mean_diff_K}} and {method: {sched: per_seed_diffs_SK}}."""
     diffs = {}
+    diffs_per_seed = {}
     for method in methods:
         diffs[method] = {}
+        diffs_per_seed[method] = {}
         for sched in schedules:
             other_curves, burst_curves = [], []
             for key, val in all_results.items():
@@ -303,8 +306,10 @@ def compute_diffs(all_results, schedules, methods):
                     other_curves.append(val[method]["Other"])
                     burst_curves.append(val[method]["Burst"])
             if other_curves and burst_curves:
-                diffs[method][sched] = np.mean(other_curves, axis=0) - np.mean(burst_curves, axis=0)
-    return diffs
+                per_seed = np.array(other_curves) - np.array(burst_curves)
+                diffs_per_seed[method][sched] = per_seed
+                diffs[method][sched] = per_seed.mean(axis=0)
+    return diffs, diffs_per_seed
 
 
 def compute_diff_in_diffs(diffs, methods):
@@ -340,17 +345,19 @@ def plot_raw_curves(all_results, method, n_layers, output_dir):
                     curves.append(val[method][regime])
 
             if curves:
-                mean_c = np.mean(curves, axis=0)
+                arr = np.array(curves)
+                mean_c = np.mean(arr, axis=0)
+                n_s = len(arr)
+                ci = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(arr, axis=0)
                 ax.plot(x, mean_c, "o-", color=SCHED_COLORS.get(sched, "gray"), lw=2)
-                if len(curves) > 1:
-                    std_c = np.std(curves, axis=0)
-                    ax.fill_between(x, mean_c - std_c, mean_c + std_c,
-                                    color=SCHED_COLORS.get(sched, "gray"), alpha=0.2)
+                ax.fill_between(x, mean_c - ci, mean_c + ci,
+                                color=SCHED_COLORS.get(sched, "gray"), alpha=0.2)
 
             ax.set_xticks(x)
             ax.set_xticklabels(layer_labels, fontsize=8)
             ax.set_ylim(0, 1.05)
-            ax.set_title(f"{sched} — regime {regime}", fontsize=10)
+            n_s = len(curves) if curves else 0
+            ax.set_title(f"{sched} — {regime} (n={n_s})", fontsize=10)
             ax.set_ylabel("Accuracy")
             ax.grid(True, alpha=0.2)
 
@@ -361,7 +368,7 @@ def plot_raw_curves(all_results, method, n_layers, output_dir):
     plt.close(fig)
 
 
-def plot_ab_diffs(diffs, method, n_layers, output_dir):
+def plot_ab_diffs(diffs, method, n_layers, output_dir, diffs_per_seed=None):
     K = n_layers + 1
     layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
     x = np.arange(K)
@@ -370,15 +377,23 @@ def plot_ab_diffs(diffs, method, n_layers, output_dir):
     for sched in SCHEDULE_ORDER:
         if sched not in diffs[method]:
             continue
-        ax.plot(x, diffs[method][sched], "o-",
-                color=SCHED_COLORS.get(sched, "gray"), lw=2, label=sched)
+        c = SCHED_COLORS.get(sched, "gray")
+        ax.plot(x, diffs[method][sched], "o-", color=c, lw=2, label=sched)
+        if diffs_per_seed and sched in diffs_per_seed[method]:
+            arr = diffs_per_seed[method][sched]
+            n_s = len(arr)
+            if n_s > 1:
+                ci = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s)
+                ax.fill_between(x, diffs[method][sched] - ci,
+                                diffs[method][sched] + ci, color=c, alpha=0.15)
 
     ax.axhline(0, color="gray", ls="--", alpha=0.5)
     ax.set_xticks(x)
     ax.set_xticklabels(layer_labels, fontsize=9)
     ax.set_xlabel("Layer", fontsize=11)
     ax.set_ylabel("Δ accuracy (Other − Burst)", fontsize=11)
-    ax.set_title(f"Other−Burst Next-Token Diff — {method}", fontsize=13, fontweight="bold")
+    ax.set_title(f"Other−Burst Next-Token Diff — {method}\n(mean +/- 95% CI)",
+                 fontsize=13, fontweight="bold")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.2)
     fig.tight_layout()
@@ -439,13 +454,14 @@ def plot_combined_curves(step_results, method, n_layers, output_dir):
                 curves = [v[method][regime] for k, v in step_results[step].items()
                           if k.startswith(sched + "_s") and method in v]
                 if curves:
-                    mean_c = np.mean(curves, axis=0)
+                    arr = np.array(curves)
+                    mean_c = np.mean(arr, axis=0)
+                    n_s = len(arr)
+                    ci_band = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(arr, axis=0)
                     ax.plot(x, mean_c, "o-", color=step_colors[ci], lw=2,
                             label=f"step {step}")
-                    if len(curves) > 1:
-                        std_c = np.std(curves, axis=0)
-                        ax.fill_between(x, mean_c - std_c, mean_c + std_c,
-                                        color=step_colors[ci], alpha=0.15)
+                    ax.fill_between(x, mean_c - ci_band, mean_c + ci_band,
+                                    color=step_colors[ci], alpha=0.15)
             ax.set_xticks(x)
             ax.set_xticklabels(layer_labels, fontsize=8)
             ax.set_ylim(0, 1.05)
@@ -463,7 +479,7 @@ def plot_combined_curves(step_results, method, n_layers, output_dir):
     plt.close(fig)
 
 
-def plot_combined_diffs(step_diffs, method, n_layers, output_dir):
+def plot_combined_diffs(step_diffs, method, n_layers, output_dir, step_diffs_per_seed=None):
     K = n_layers + 1
     layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
     x = np.arange(K)
@@ -476,7 +492,7 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir):
 
     n_scheds = len(scheds)
     fig, axes = plt.subplots(1, n_scheds, figsize=(5 * n_scheds, 5), squeeze=False)
-    fig.suptitle(f"Other−Burst Diff — {method} (all steps)",
+    fig.suptitle(f"Other−Burst Diff — {method} (all steps, mean +/- 95% CI)",
                  fontsize=14, fontweight="bold")
 
     step_colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(sorted_steps)))
@@ -495,8 +511,17 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir):
         ax = axes[0, si]
         for ci, step in enumerate(sorted_steps):
             if sched in step_diffs[step][method]:
-                ax.plot(x, step_diffs[step][method][sched], "o-",
-                        color=step_colors[ci], lw=2, label=f"step {step}")
+                mean_d = step_diffs[step][method][sched]
+                c = step_colors[ci]
+                ax.plot(x, mean_d, "o-", color=c, lw=2, label=f"step {step}")
+                if (step_diffs_per_seed and step in step_diffs_per_seed
+                        and sched in step_diffs_per_seed[step][method]):
+                    arr = step_diffs_per_seed[step][method][sched]
+                    n_s = len(arr)
+                    if n_s > 1:
+                        ci_band = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s)
+                        ax.fill_between(x, mean_d - ci_band, mean_d + ci_band,
+                                        color=c, alpha=0.12)
         ax.axhline(0, color="gray", ls="--", alpha=0.5)
         ax.set_xticks(x)
         ax.set_xticklabels(layer_labels, fontsize=8)
@@ -652,6 +677,7 @@ def main():
     )
 
     all_step_diffs = {}
+    all_step_diffs_per_seed = {}
     for probe_step in probe_steps:
         step_dir = base_output_dir / f"step_{probe_step}"
         step_dir.mkdir(parents=True, exist_ok=True)
@@ -659,7 +685,7 @@ def main():
         all_results = all_step_results[probe_step]
 
         print(f"\nComputing diffs for step {probe_step}...", flush=True)
-        diffs = compute_diffs(all_results, schedules_to_run, PROBE_METHODS)
+        diffs, diffs_ps = compute_diffs(all_results, schedules_to_run, PROBE_METHODS)
         did = compute_diff_in_diffs(diffs, PROBE_METHODS)
 
         save_data = {
@@ -679,10 +705,11 @@ def main():
         for method in PROBE_METHODS:
             print(f"  {method}...")
             plot_raw_curves(all_results, method, n_layers, step_dir)
-            plot_ab_diffs(diffs, method, n_layers, step_dir)
+            plot_ab_diffs(diffs, method, n_layers, step_dir, diffs_per_seed=diffs_ps)
             plot_diff_in_diffs(did, method, n_layers, step_dir)
 
         all_step_diffs[probe_step] = diffs
+        all_step_diffs_per_seed[probe_step] = diffs_ps
 
     if len(probe_steps) > 1:
         print(f"\nPlotting combined charts across all steps...", flush=True)
@@ -692,7 +719,8 @@ def main():
         for method in PROBE_METHODS:
             print(f"  {method}...")
             plot_combined_curves(all_step_results, method, n_layers, combined_dir)
-            plot_combined_diffs(all_step_diffs, method, n_layers, combined_dir)
+            plot_combined_diffs(all_step_diffs, method, n_layers, combined_dir,
+                                step_diffs_per_seed=all_step_diffs_per_seed)
 
     print(f"\nAll done. Results in {base_output_dir}")
 

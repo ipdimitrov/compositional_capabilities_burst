@@ -112,6 +112,7 @@ class TrainConfig:
     min_lr: float = 6e-5
 
     batch_size: int = 128
+    grad_sim_batch_size: int = 2048
     total_steps: int = 500
     p_target: float = 0.10
     reversion_steps: int = 500
@@ -134,6 +135,7 @@ class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     n_seeds: int = 4
     n_workers: int = 38
+    grad_sim_n_workers: int | None = None
     grad_sim_every: int = 50
     depth: int = 3
     burst_pos: int = 3

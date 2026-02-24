@@ -21,8 +21,6 @@ from pathlib import Path
 from itertools import combinations
 from burst.config import SCHED_COLORS, SCHEDULE_ORDER, ordered_schedules, sched_sort_key
 
-SHARED_TOKEN_PREFIXES = ("F2", "F1", "in", "sp0")
-
 
 def _load_steps_from_config(run_dir: Path) -> tuple[int, int] | None:
     cfg_path = run_dir / "config.json"
@@ -124,14 +122,6 @@ def plot_heatmap(
             val = acc_KT[k, t]
             color = "white" if val > 0.75 else "black"
             ax.text(t, k, f"{val:.2f}", ha="center", va="center", fontsize=5, color=color)
-
-    shared_cols = [t for t in range(T)
-                   if any(token_labels[t].startswith(p) for p in SHARED_TOKEN_PREFIXES)]
-    for t in shared_cols:
-        ax.axvline(t, color="orange", lw=0.5, alpha=0.4)
-    if shared_cols:
-        ax.text(shared_cols[len(shared_cols) // 2], -0.8,
-                "shared (≈chance)", ha="center", fontsize=6, color="orange", style="italic")
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label("Probe Accuracy (Other vs Burst)", fontsize=9)

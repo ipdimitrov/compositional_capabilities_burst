@@ -20,8 +20,8 @@ run_experiment() {
 # depth=3 burst at position 2  (2/3)
 run_experiment 3 2
 
-# depth=4 burst at position 2  (2/4)
-run_experiment 4 2
+# # depth=4 burst at position 2  (2/4)
+# run_experiment 4 2
 
-# depth=5 burst at position 2  (2/5)
-run_experiment 5 2
+# # depth=5 burst at position 2  (2/5)
+# run_experiment 5 2
