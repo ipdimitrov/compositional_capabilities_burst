@@ -3,7 +3,7 @@
 Launched as a subprocess by experiment.py.
 Each worker trains one model on one schedule and saves results.
 """
-import sys, os, argparse, pickle, math
+import sys, os, argparse, pickle, math, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -133,20 +133,22 @@ def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int = 64) -> torch.T
     return _flat_grad(net).float()
 
 
-def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL) -> dict:
+def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL,
+                            n_samples: int = 2048) -> dict:
     """Cosine similarity between burst-class and other-class gradient vectors."""
     net.train()
     net.zero_grad(set_to_none=True)
-    g_burst = _grad_vec_for_docs(net, docs_burst_BL, n_samples=64)
+    g_burst = _grad_vec_for_docs(net, docs_burst_BL, n_samples=n_samples)
     net.zero_grad(set_to_none=True)
-    g_other = _grad_vec_for_docs(net, docs_other_BL, n_samples=64)
+    g_other = _grad_vec_for_docs(net, docs_other_BL, n_samples=n_samples)
     cos_sim = F.cosine_similarity(g_burst.unsqueeze(0), g_other.unsqueeze(0)).item()
     net.zero_grad(set_to_none=True)
     return {"burst_vs_other": cos_sim}
 
 
 def compute_pairwise_grad_sim(net, task_docs: dict,
-                               burst_tasks: list, other_tasks: list) -> dict:
+                               burst_tasks: list, other_tasks: list,
+                               n_samples: int = 2048) -> dict:
     """Pairwise cosine similarity between all task gradient vectors.
 
     task_docs: {task_tuple: docs_np}
@@ -166,7 +168,7 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
     for task in all_tasks:
         if task in task_docs and task_docs[task].shape[0] > 0:
             net.zero_grad(set_to_none=True)
-            grad_vecs.append(_grad_vec_for_docs(net, task_docs[task], n_samples=32))
+            grad_vecs.append(_grad_vec_for_docs(net, task_docs[task], n_samples=n_samples))
         else:
             grad_vecs.append(None)
 
@@ -214,6 +216,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p, ev = cfg["batch_size"], cfg["p_target"], cfg["eval_every"]
+    gs_bs = cfg.get("grad_sim_batch_size", 2048)
 
     log = {"step": [], "loss": [], "phase": []}
     for k in EVAL_KEYS:
@@ -238,7 +241,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
     def do_grad_sim(phase):
         if burst_docs_all is None or other_docs_all is None:
             return
-        sim = compute_grad_cosine_sim(net, burst_docs_all, other_docs_all)
+        sim = compute_grad_cosine_sim(net, burst_docs_all, other_docs_all,
+                                      n_samples=gs_bs)
         grad_sim_log["step"].append(it)
         grad_sim_log["phase"].append(phase)
         grad_sim_log["burst_vs_other"].append(sim["burst_vs_other"])
@@ -248,7 +252,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
         task_docs = {**target_pool, **bg_pool}
         burst_tasks = list(target_pool.keys())
         other_tasks = list(bg_pool.keys())
-        snap = compute_pairwise_grad_sim(net, task_docs, burst_tasks, other_tasks)
+        snap = compute_pairwise_grad_sim(net, task_docs, burst_tasks, other_tasks,
+                                         n_samples=gs_bs)
         snap["step"] = it
         snap["phase"] = phase
         pairwise_snapshots.append(snap)
@@ -390,6 +395,20 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     dropoff_abs = peak_burst - reversion_end_burst
     dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > 1e-6 else 0.0
+
+    gs_dir = Path(run_dir) / "grad_cosine_sim"
+    gs_dir.mkdir(exist_ok=True)
+    gs_record = {
+        "schedule": schedule, "seed": seed, "label": label,
+        "grad_sim_batch_size": gs_bs,
+        "grad_sim_log": grad_sim_log,
+        "pairwise_snapshots": [
+            {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in s.items()}
+            for s in pairwise_snapshots
+        ],
+    }
+    with open(gs_dir / f"{label}.json", "w") as f:
+        json.dump(gs_record, f)
 
     result = {
         "schedule": schedule, "seed": seed,

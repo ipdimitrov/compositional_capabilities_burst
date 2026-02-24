@@ -59,18 +59,16 @@ def get_token_position_labels(doc_len: int, seq_len: int) -> list[str]:
 def collect_activations_KPTN(
     net: nanoGPT,
     docs_BL: np.ndarray,
-    max_samples: int,
 ) -> np.ndarray:
     """Collect residual-stream activations at every (layer, token_pos).
 
     Returns float32 array of shape (K, P, T, N).
     K = n_layers + 1 (post-embedding + post-block_0 + ... + post-block_{L-1}).
     T = doc_len - 1 (model input is tokens[:-1]).
+    P = len(docs_BL) — caller is responsible for subsampling.
     """
     net.eval()
-    n = min(len(docs_BL), max_samples)
-    idx = np.random.choice(len(docs_BL), n, replace=False)
-    tokens_PL = torch.from_numpy(docs_BL[idx]).long().to(DEVICE)
+    tokens_PL = torch.from_numpy(docs_BL).long().to(DEVICE)
     inp_PT = tokens_PL[:, :-1]
 
     tok_emb = net.transformer.wte(inp_PT)
@@ -108,7 +106,7 @@ def fit_probes_at_checkpoint(
     idx_burst = np.random.choice(len(burst_docs_BL), n_burst, replace=False)
     combined_BL = np.concatenate([other_docs_BL[idx_other], burst_docs_BL[idx_burst]], axis=0)
 
-    acts_KPTN = collect_activations_KPTN(net, combined_BL, n_other + n_burst)
+    acts_KPTN = collect_activations_KPTN(net, combined_BL)
 
     K, P_total, T, N = acts_KPTN.shape
     Pa, Pb = n_other, n_burst

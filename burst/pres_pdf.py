@@ -213,6 +213,26 @@ def build(rd, res, cfg, cp):
     for path in cp["per_sched"]:
         pdf.ch(path, w=240)
 
+    has_probes = cp.get("probe_dynamics") or cp.get("probe_heatmaps") or cp.get("probe_layer_schedule")
+    if has_probes:
+        pdf.add_page(); pdf.st("Linear Probes: Other vs Burst Representations")
+        pdf.bt(
+            "Logistic regression probes trained on residual-stream activations at every "
+            "(layer, token position) pair to classify Other-class vs Burst-class representations. "
+            "5-fold cross-validation accuracy, aggregated across seeds with 95% CI."
+        )
+        if cp.get("probe_dynamics"):
+            pdf.add_page(); pdf.sh("Probe Accuracy Over Training")
+            pdf.ch(cp["probe_dynamics"], w=260)
+        if cp.get("probe_layer_schedule"):
+            for p_ in cp["probe_layer_schedule"]:
+                pdf.add_page(); pdf.sh("Layer x Schedule Probe Accuracy")
+                pdf.ch(p_, w=240)
+        if cp.get("probe_heatmaps"):
+            pdf.add_page(); pdf.sh("Probe Heatmaps (per schedule, mean across seeds)")
+            for p_ in cp["probe_heatmaps"]:
+                pdf.ch(p_, w=260)
+
     pd_ = rd / "next_token_regime_probes"
     if pd_.exists():
         pdf.add_page(); pdf.st("Next-Token Probes")
@@ -232,7 +252,12 @@ def build(rd, res, cfg, cp):
                     if fp.exists():
                         pdf.add_page(); pdf.st(f"Evolution: {k} {m}"); pdf.ch(fp, w=260)
 
-    if cp.get("grad_cosine_overlay") or cp.get("grad_cosine_bars"):
+    has_gs = any(cp.get(k) for k in [
+        "grad_cosine_overlay", "grad_cosine_bars", "grad_cosine_per_seed",
+        "grad_cosine_rate", "grad_cosine_phase", "grad_cosine_vs_auc",
+        "grad_cosine_phase_bars",
+    ])
+    if has_gs:
         pdf.add_page(); pdf.st("Gradient Cosine Similarity: Burst vs Other Classes")
         pdf.sh("How It Works (Autoregressive Regime)")
         pdf.bt(
@@ -240,16 +265,17 @@ def build(rd, res, cfg, cp):
             "[S F3 F2 F1 ' ' input ' ' out1 ' ' out2 ' ' out3], the loss is standard "
             "next-token cross-entropy over all positions. At evaluation time, the model "
             "generates its own outputs token-by-token (free generation) from a prompt "
-            "containing only the function slots and input — it never sees the ground-truth "
+            "containing only the function slots and input -- it never sees the ground-truth "
             "intermediate or final outputs during inference."
         )
+        gs_bs = bcfg.get("grad_sim_batch_size", 64)
         pdf.bt(
-            "To compute gradient similarity, we sample 64 documents from each class "
+            f"To compute gradient similarity, we sample {gs_bs} documents from each class "
             "(burst and other), compute the next-token prediction loss on the full sequence "
             "for each class separately, backpropagate to obtain a gradient vector (the "
             "concatenation of all parameter gradients), and measure cosine similarity "
             "between the two gradient vectors. Because the loss is autoregressive over "
-            "the entire sequence — including the intermediate composition outputs — the "
+            "the entire sequence -- including the intermediate composition outputs -- the "
             "gradient captures how each class shapes the model's predictions at every "
             "position in the chain, not just the final output."
         )
@@ -258,14 +284,37 @@ def build(rd, res, cfg, cp):
         pdf.bt(
             f"Computed every {grad_sim_every} steps throughout training. "
             "High similarity means the burst class is pulling the model in the same direction "
-            "as the other classes — suggesting integrated, durable representations. "
+            "as the other classes -- suggesting integrated, durable representations. "
             "Low or negative similarity indicates conflicting gradient directions, "
             "which predicts faster forgetting during reversion."
         )
         if cp.get("grad_cosine_overlay"):
-            pdf.ch(cp["grad_cosine_overlay"], w=260)
+            pdf.add_page(); pdf.sh("Burst vs Other: All Schedules")
+            pdf.ch(cp["grad_cosine_overlay"], w=W - 20)
         if cp.get("grad_cosine_bars"):
+            pdf.sh("End-of-Burst Snapshot")
             pdf.ch(cp["grad_cosine_bars"], w=240)
+        if cp.get("grad_cosine_phase"):
+            pdf.add_page(); pdf.sh("Burst Phase vs Reversion Phase")
+            pdf.ch(cp["grad_cosine_phase"], w=260)
+        if cp.get("grad_cosine_phase_bars"):
+            pdf.add_page(); pdf.sh("Similarity Across Training Phases")
+            pdf.ch(cp["grad_cosine_phase_bars"], w=260)
+        if cp.get("grad_cosine_rate"):
+            pdf.add_page(); pdf.sh("Rate of Change")
+            pdf.bt("Derivative of cosine similarity over training steps. "
+                    "Peaks indicate where gradient alignment shifts fastest.")
+            pdf.ch(cp["grad_cosine_rate"], w=260)
+        if cp.get("grad_cosine_vs_auc"):
+            pdf.add_page(); pdf.sh("Gradient Alignment vs Forgetting Resistance")
+            pdf.bt("Each dot is one seed x schedule. Positive correlation means "
+                    "higher end-of-burst gradient alignment predicts slower forgetting.")
+            pdf.ch(cp["grad_cosine_vs_auc"], w=240)
+        if cp.get("grad_cosine_per_seed"):
+            pdf.add_page(); pdf.sh("Per-Seed Traces")
+            pdf.bt("Individual seed traces reveal variance in gradient alignment within each schedule.")
+            for p_ in cp["grad_cosine_per_seed"]:
+                pdf.ch(p_, w=240)
 
     if cp.get("pairwise_evolution"):
         pdf.add_page(); pdf.st("Pairwise Gradient Similarity: Burst Tasks vs Other Tasks")

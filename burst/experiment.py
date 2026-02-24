@@ -175,6 +175,8 @@ def main():
     parser.add_argument("--schedules", nargs="+", default=None)
     parser.add_argument("--n-seeds", type=int, default=None)
     parser.add_argument("--n-workers", type=int, default=None)
+    parser.add_argument("--grad-sim-batch-size", type=int, default=None)
+    parser.add_argument("--grad-sim-n-workers", type=int, default=None)
     args = parser.parse_args()
 
     exp = ExperimentConfig(
@@ -187,6 +189,10 @@ def main():
         exp.n_seeds = args.n_seeds
     if args.n_workers is not None:
         exp.n_workers = args.n_workers
+    if args.grad_sim_batch_size is not None:
+        exp.train.grad_sim_batch_size = args.grad_sim_batch_size
+    if args.grad_sim_n_workers is not None:
+        exp.grad_sim_n_workers = args.grad_sim_n_workers
 
     base_cfg = exp.base_cfg
 
@@ -229,12 +235,14 @@ def main():
                       "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    n_workers = min(len(jobs), exp.n_workers)
+    effective_n_workers = exp.grad_sim_n_workers if exp.grad_sim_n_workers is not None else exp.n_workers
+    n_workers = min(len(jobs), effective_n_workers)
     steps_per_job = base_cfg["total_steps"] + base_cfg["reversion_steps"]
 
     tc = exp.train
     print(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H", flush=True)
-    print(f"Jobs: {len(jobs)}, workers: {n_workers}", flush=True)
+    print(f"Jobs: {len(jobs)}, workers: {n_workers} "
+          f"(grad_sim_batch_size={tc.grad_sim_batch_size})", flush=True)
     print(f"Steps/job: {tc.total_steps} train + {tc.reversion_steps} reversion", flush=True)
     print(f"Schedules: {exp.schedules}\n", flush=True)
 
