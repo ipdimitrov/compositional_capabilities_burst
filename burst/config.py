@@ -132,10 +132,8 @@ class TrainConfig:
 @dataclass
 class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
-    n_seeds: int = 4
+    n_seeds: int = 10
     n_workers: int = 38
-    grad_sim_n_workers: int | None = None
-    grad_sim_every: int = 50
     depth: int = 3
     burst_pos: int = 3
     schedules: list[str] = field(default_factory=lambda: list(SCHEDULE_ORDER))

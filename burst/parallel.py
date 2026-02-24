@@ -6,7 +6,7 @@ and results are collected via pickle files in a temp directory.
 import sys, os, pickle, subprocess, time, tempfile
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Optional
 
 
 @dataclass
@@ -21,8 +21,8 @@ class JobResult:
 def run_job_pool(
     jobs: list[dict],
     worker_script: str,
-    build_cmd: callable,
-    on_done: callable | None,
+    build_cmd: Callable,
+    on_done: Optional[Callable],
     n_workers: int,
     data_payload: Any,
     poll_interval: float,
