@@ -34,7 +34,7 @@ from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
 from burst.experiment import DepthNData, build_data
 from burst.train_utils import DEVICE, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK
-from burst.config import N_A, DATA_SEED, SCHEDULES, SCHED_COLORS, SCHEDULE_ORDER, ExperimentConfig
+from burst.config import N_A, DATA_SEED, SCHED_COLORS, SCHEDULE_ORDER, ExperimentConfig
 from burst.parallel import run_job_pool
 
 """
