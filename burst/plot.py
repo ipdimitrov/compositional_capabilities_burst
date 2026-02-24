@@ -149,9 +149,6 @@ def plot_per_run(result, plots_dir):
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.2)
 
-    for ax_i, label_i in [(axes[1], "FOUNDATION+BURST"), (axes[1], "REVERSION"),
-                           (axes[2], "FOUNDATION+BURST"), (axes[2], "REVERSION")]:
-        pass
     axes[1].text(T * 0.5, -0.04, "FOUNDATION+BURST", ha="center", fontsize=7,
                  color="gray", transform=axes[1].get_xaxis_transform())
     axes[1].text(T + U * 0.5, -0.04, "REVERSION", ha="center", fontsize=7,

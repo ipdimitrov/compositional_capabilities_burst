@@ -11,8 +11,9 @@ import torch
 import torch.nn.functional as F
 from collections import Counter
 from pathlib import Path
-from omegaconf import OmegaConf
+
 import csv
+from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT

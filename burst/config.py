@@ -56,7 +56,6 @@ _sorted_pcts = sorted(BURST_FRACTIONS, reverse=True)
 _gradient = _build_gradient(len(_sorted_pcts))
 
 SCHEDULE_ORDER: list[str] = [_sched_name(p) for p in _sorted_pcts]
-SCHEDULES: list[str] = list(SCHEDULE_ORDER)
 
 UNIFORM_SCHEDULE: str = _sched_name(UNIFORM_PCT)
 
@@ -139,7 +138,7 @@ class ExperimentConfig:
     grad_sim_every: int = 50
     depth: int = 3
     burst_pos: int = 3
-    schedules: list[str] = field(default_factory=lambda: list(SCHEDULES))
+    schedules: list[str] = field(default_factory=lambda: list(SCHEDULE_ORDER))
 
     @property
     def base_cfg(self) -> dict:

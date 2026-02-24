@@ -272,29 +272,14 @@ class SyntheticEval(SyntheticData):
         self.task_map()
 
     def get_seq_info(self, sample):
-        """
-        Properties of the sequence
-        """
-        seq_info = {}
-
         sp_idx = self.token_idx[' ']
         total_len = len(sample)
-
-        if (not self.cfg['direct']):
-            sp_pos = np.where(sample == sp_idx)[0]
-
-            seq_info['last_space'] = sp_pos[-1]
-            seq_info['prompt'] = sp_pos[1] + 1
-            seq_info['new'] = total_len - seq_info['prompt']
-
-        else:
-            sp_pos = np.where(sample == sp_idx)[0]
-
-            seq_info['last_space'] = sp_pos[-1]
-            seq_info['prompt'] = sp_pos[1] + 1
-            seq_info['new'] = total_len - seq_info['prompt']
-
-        return seq_info
+        sp_pos = np.where(sample == sp_idx)[0]
+        return {
+            'last_space': sp_pos[-1],
+            'prompt': sp_pos[1] + 1,
+            'new': total_len - (sp_pos[1] + 1),
+        }
 
     def generate_step_document(self, task_info):
         """

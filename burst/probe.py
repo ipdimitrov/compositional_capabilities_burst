@@ -84,9 +84,6 @@ def collect_activations_KPTN(
     return np.stack(layer_acts, axis=0)
 
 
-build_probe_dataset = build_probe_docs
-
-
 def fit_probes_at_checkpoint(
     net: nanoGPT,
     other_docs_BL: np.ndarray,
@@ -156,11 +153,8 @@ def retrain_and_probe(
 
 
 def _default_checkpoint_steps(total_steps: int, reversion_steps: int, every: int) -> list[int]:
-    steps = set([0, total_steps, total_steps + reversion_steps])
-    s = every
-    while s <= total_steps + reversion_steps:
-        steps.add(s)
-        s += every
+    steps = set(range(0, total_steps + reversion_steps + 1, every))
+    steps |= {0, total_steps, total_steps + reversion_steps}
     return sorted(steps)
 
 
@@ -223,7 +217,7 @@ def main():
     set_seed(DATA_SEED)
     d = DepthNData(bcfg["n_alphabets"], bcfg["seq_len"], N_A, depth, burst_pos, DATA_SEED)
     doc_len = ti["doc_len"]
-    other_docs, burst_docs = build_probe_dataset(d, doc_len, N_PROBE_DOCS_PER_TASK)
+    other_docs, burst_docs = build_probe_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
     print(f"  Probe data: Other={other_docs.shape[0]} Burst={burst_docs.shape[0]}")
 
     token_labels = get_token_position_labels(doc_len, bcfg["seq_len"])
@@ -252,9 +246,7 @@ def main():
                     "context_size": cfg_out["context_size"]},
         })
 
-    ckpt_args = []
-    for s in checkpoint_steps:
-        ckpt_args += [str(s)]
+    ckpt_args = [str(s) for s in checkpoint_steps]
 
     def build_cmd(script, job_path, data_path, output_path):
         return ([sys.executable, script, "--worker",
