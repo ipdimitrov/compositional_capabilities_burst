@@ -7,6 +7,13 @@ from fpdf import FPDF
 from burst.pres_charts import PALETTE, SCHED_SHORT, _ordered, _group, generate_all
 W, H = 297, 210
 
+_UNICODE_SUBS = {"\u2014": "--", "\u2013": "-", "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2026": "..."}
+
+def _latin1_safe(t: str) -> str:
+    for u, a in _UNICODE_SUBS.items():
+        t = t.replace(u, a)
+    return t.encode("latin-1", "replace").decode("latin-1")
+
 class PDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -18,17 +25,17 @@ class PDF(FPDF):
     def st(self, t):
         self.set_font("Helvetica", "B", 20)
         self.set_text_color(13, 71, 161)
-        self.multi_cell(0, 10, t, align="L")
+        self.multi_cell(0, 10, _latin1_safe(t), align="L")
         self.ln(3)
     def sh(self, t):
         self.set_font("Helvetica", "B", 14)
         self.set_text_color(13, 71, 161)
-        self.cell(0, 8, t, new_x="LMARGIN", new_y="NEXT")
+        self.cell(0, 8, _latin1_safe(t), new_x="LMARGIN", new_y="NEXT")
         self.ln(2)
     def bt(self, t):
         self.set_font("Helvetica", "", 10)
         self.set_text_color(30, 30, 30)
-        self.multi_cell(0, 5, t)
+        self.multi_cell(0, 5, _latin1_safe(t))
         self.ln(2)
     def bu(self, t, b=""):
         self.set_font("Helvetica", "", 10)

@@ -19,12 +19,15 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def make_net(cfg: dict) -> nanoGPT:
-    return nanoGPT(OmegaConf.create({
+    net = nanoGPT(OmegaConf.create({
         "compile": False, "vocab_size": cfg["vocab_size"],
         "context_size": cfg["context_size"],
         "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
         "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
     })).to(DEVICE)
+    if DEVICE == "cuda":
+        net = torch.compile(net)
+    return net
 
 
 def make_optim_cfg(cfg: dict) -> OmegaConf:
@@ -51,7 +54,7 @@ def train_step(
     grad_clip: float,
 ) -> tuple[int, float]:
     """Single training step. Returns (new_it, loss_value)."""
-    dat = torch.from_numpy(batch_np).long().to(DEVICE)
+    dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
     it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_steps)
     optimizer.zero_grad(set_to_none=True)
@@ -135,10 +138,13 @@ def pad_to_len(arr: np.ndarray, target_len: int) -> np.ndarray:
     return np.concatenate([arr, np.zeros((arr.shape[0], pad_w), dtype=arr.dtype)], axis=1)
 
 
+N_PROBE_DOCS_PER_TASK = 200
+
+
 def build_probe_docs(
     data,
     doc_len: int,
-    n_per_task: int = 200,
+    n_per_task: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build balanced Other/Burst probe datasets from train compositions."""
     other_pool = data.gen_pool(data.other_train[:min(16, len(data.other_train))], n_per_task)
@@ -155,16 +161,14 @@ def build_probe_docs(
 
 def compute_lr_schedule(cfg: dict):
     """Compute LR schedule arrays from config. Returns (steps, lrs)."""
-    import math
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     total = T + U
     lr_max, lr_min, warmup = cfg["lr"], cfg["min_lr"], cfg["warmup_iters"]
     steps = np.arange(1, total + 1)
-    lrs = np.zeros(total)
-    for i, s in enumerate(steps):
-        if s < warmup:
-            lrs[i] = lr_max * s / warmup
-        else:
-            decay = (s - warmup) / (total - warmup)
-            lrs[i] = lr_min + 0.5 * (1.0 + math.cos(math.pi * decay)) * (lr_max - lr_min)
+    warmup_mask = steps < warmup
+    lrs = np.where(
+        warmup_mask,
+        lr_max * steps / warmup,
+        lr_min + 0.5 * (1.0 + np.cos(np.pi * (steps - warmup) / (total - warmup))) * (lr_max - lr_min),
+    )
     return steps, lrs

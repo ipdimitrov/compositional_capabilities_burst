@@ -206,14 +206,20 @@ def plot_summary_bars(results, plots_dir, cfg):
     plt.close(fig)
 
 
-def plot_auc_detail(results, plots_dir, cfg):
-    bcfg = cfg.get("base_cfg", cfg)
-    reversion_steps = bcfg["reversion_steps"]
-
+def _build_sched_groups(results):
     sched_groups = {}
     for r in results:
         s = r["schedule"]
         sched_groups.setdefault(s, []).append(r)
+    return sched_groups
+
+
+def plot_auc_detail(results, plots_dir, cfg, sched_groups=None):
+    bcfg = cfg.get("base_cfg", cfg)
+    reversion_steps = bcfg["reversion_steps"]
+
+    if sched_groups is None:
+        sched_groups = _build_sched_groups(results)
     ordered = ordered_schedules(sched_groups.keys())
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 6))
@@ -259,11 +265,9 @@ def plot_auc_detail(results, plots_dir, cfg):
     plt.close(fig)
 
 
-def plot_auc_diff_pct(results, plots_dir, cfg):
-    sched_groups = {}
-    for r in results:
-        s = r["schedule"]
-        sched_groups.setdefault(s, []).append(r)
+def plot_auc_diff_pct(results, plots_dir, cfg, sched_groups=None):
+    if sched_groups is None:
+        sched_groups = _build_sched_groups(results)
     ordered = ordered_schedules(sched_groups.keys())
     n = len(ordered)
 
@@ -305,11 +309,7 @@ def plot_auc_diff_pct(results, plots_dir, cfg):
     plt.close(fig)
 
 
-def plot_overlay_per_schedule(results, plots_dir):
-    T_ov = results[0]["config"]["total_steps"]
-    U_ov = results[0]["config"]["reversion_steps"]
-    total_steps = T_ov + U_ov
-
+def _build_sched_data(results):
     sched_data = defaultdict(lambda: defaultdict(list))
     for r in results:
         sched = r["schedule"]
@@ -317,6 +317,16 @@ def plot_overlay_per_schedule(results, plots_dir):
         for k in EVAL_KEYS:
             vals = np.array(r["log"].get(k, [0.0] * len(steps)))
             sched_data[sched][k].append((steps, vals))
+    return sched_data
+
+
+def plot_overlay_per_schedule(results, plots_dir, sched_data=None):
+    T_ov = results[0]["config"]["total_steps"]
+    U_ov = results[0]["config"]["reversion_steps"]
+    total_steps = T_ov + U_ov
+
+    if sched_data is None:
+        sched_data = _build_sched_data(results)
 
     for sched in ordered_schedules(sched_data.keys()):
         fig, ax = plt.subplots(figsize=(14, 8))
@@ -366,18 +376,13 @@ def plot_overlay_per_schedule(results, plots_dir):
         plt.close(fig)
 
 
-def plot_overlay_all_schedules(results, plots_dir):
+def plot_overlay_all_schedules(results, plots_dir, sched_data=None):
     T_ov = results[0]["config"]["total_steps"]
     U_ov = results[0]["config"]["reversion_steps"]
     total_steps = T_ov + U_ov
 
-    sched_data = defaultdict(lambda: defaultdict(list))
-    for r in results:
-        sched = r["schedule"]
-        steps = np.array(r["log"]["step"])
-        for k in EVAL_KEYS:
-            vals = np.array(r["log"].get(k, [0.0] * len(steps)))
-            sched_data[sched][k].append((steps, vals))
+    if sched_data is None:
+        sched_data = _build_sched_data(results)
 
     for ki, k in enumerate(EVAL_KEYS):
         fig, ax = plt.subplots(figsize=(11.7, 8.3))
@@ -741,17 +746,19 @@ def plot_task_distributions(run_dir):
 
     seeds = sorted(set(row["seed"] for row in all_data))
 
+    grouped = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for row in all_data:
+        grouped[row["schedule"]][row["seed"]][row["phase"]].append(row)
+
     for schedule in schedules:
         for seed in seeds:
-            run_data = [row for row in all_data
-                       if row["schedule"] == schedule and row["seed"] == seed]
-            if not run_data:
+            if seed not in grouped[schedule]:
                 continue
 
             label = f"{schedule}_s{seed}"
 
             for phase in phases:
-                phase_data = [row for row in run_data if row["phase"] == phase]
+                phase_data = grouped[schedule][seed].get(phase, [])
                 if not phase_data:
                     continue
 
@@ -838,10 +845,13 @@ def plot_task_distributions(run_dir):
                 plt.close()
                 generated_files.append(fname)
 
+    agg_grouped = defaultdict(lambda: defaultdict(list))
+    for row in all_data:
+        agg_grouped[row["schedule"]][row["phase"]].append(row)
+
     for schedule in schedules:
         for phase in phases:
-            sched_phase_data = [row for row in all_data
-                               if row["schedule"] == schedule and row["phase"] == phase]
+            sched_phase_data = agg_grouped[schedule].get(phase, [])
             if not sched_phase_data:
                 continue
 
@@ -980,17 +990,21 @@ def main():
     print("Summary bars...")
     plot_summary_bars(results, plots_dir, cfg)
 
+    sched_groups = _build_sched_groups(results)
+
     print("AUC detail...")
-    plot_auc_detail(results, plots_dir, cfg)
+    plot_auc_detail(results, plots_dir, cfg, sched_groups=sched_groups)
 
     print("AUC diff %...")
-    plot_auc_diff_pct(results, plots_dir, cfg)
+    plot_auc_diff_pct(results, plots_dir, cfg, sched_groups=sched_groups)
+
+    sched_data = _build_sched_data(results)
 
     print("Overlay per schedule...")
-    plot_overlay_per_schedule(results, plots_dir)
+    plot_overlay_per_schedule(results, plots_dir, sched_data=sched_data)
 
     print("Overlay all schedules...")
-    plot_overlay_all_schedules(results, plots_dir)
+    plot_overlay_all_schedules(results, plots_dir, sched_data=sched_data)
 
     print("LR schedule...")
     plot_lr_schedule(cfg.get("base_cfg", cfg), plots_dir)

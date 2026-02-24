@@ -68,27 +68,23 @@ def sample_batch(target_pool, bg_pool, n_target, batch_size):
     parts = []
     sampled_tasks = []
 
-    if n_target > 0:
-        per_chain = n_target // len(t_ids)
-        remainder = n_target % len(t_ids)
-        for i, tid in enumerate(t_ids):
-            n_samples = per_chain + (1 if i < remainder else 0)
-            for _ in range(n_samples):
-                parts.append(target_pool[tid][np.random.randint(len(target_pool[tid]))])
-                sampled_tasks.append(tid)
+    def _sample_from(pool, ids, n):
+        if n == 0:
+            return
+        per = n // len(ids)
+        rem = n % len(ids)
+        for i, tid in enumerate(ids):
+            k = per + (1 if i < rem else 0)
+            if k > 0:
+                idx = np.random.randint(len(pool[tid]), size=k)
+                parts.append(pool[tid][idx])
+                sampled_tasks.extend([tid] * k)
 
-    n_bg = batch_size - n_target
-    if n_bg > 0:
-        per_chain = n_bg // len(b_ids)
-        remainder = n_bg % len(b_ids)
-        for i, bid in enumerate(b_ids):
-            n_samples = per_chain + (1 if i < remainder else 0)
-            for _ in range(n_samples):
-                parts.append(bg_pool[bid][np.random.randint(len(bg_pool[bid]))])
-                sampled_tasks.append(bid)
+    _sample_from(target_pool, t_ids, n_target)
+    _sample_from(bg_pool, b_ids, batch_size - n_target)
 
     perm = np.random.permutation(batch_size)
-    return np.array(parts)[perm], [sampled_tasks[i] for i in perm]
+    return np.concatenate(parts)[perm], [sampled_tasks[i] for i in perm]
 
 
 @torch.no_grad()
@@ -97,10 +93,12 @@ def eval_free_gen(net, docs_BL, prompt_len: int):
         return 0.0
     net.eval()
     loader = torch.utils.data.DataLoader(
-        BurstDataset(docs_BL), batch_size=256, shuffle=False)
-    correct, total = 0, 0
+        BurstDataset(docs_BL), batch_size=256, shuffle=False,
+        pin_memory=(DEVICE == "cuda"))
+    correct_t = torch.zeros(1, device=DEVICE)
+    total = 0
     for dat, tgt in loader:
-        dat, tgt = dat.to(DEVICE), tgt.to(DEVICE)
+        dat, tgt = dat.to(DEVICE, non_blocking=True), tgt.to(DEVICE, non_blocking=True)
         inp = dat[:, :prompt_len]
         for _ in range(dat.shape[1] - prompt_len):
             nxt = net(inp)[:, -1, :].argmax(-1, keepdim=True)
@@ -109,26 +107,23 @@ def eval_free_gen(net, docs_BL, prompt_len: int):
         ref = tgt[:, prompt_len - 1:]
         ml = min(gen.shape[1], ref.shape[1])
         last6 = max(0, ml - 6)
-        correct += (gen[:, last6:ml] == ref[:, last6:ml]).float().sum().item()
+        correct_t += (gen[:, last6:ml] == ref[:, last6:ml]).float().sum()
         total += ref[:, last6:ml].numel()
     net.train()
-    return correct / max(total, 1)
+    return correct_t.item() / max(total, 1)
 
 
 def _flat_grad(net) -> torch.Tensor:
     """Concatenate all parameter gradients into a single flat vector."""
-    parts = []
-    for p in net.parameters():
-        if p.grad is not None:
-            parts.append(p.grad.detach().view(-1))
-    return torch.cat(parts) if parts else torch.zeros(1, device=DEVICE)
+    grads = [p.grad.detach().view(-1) for p in net.parameters() if p.grad is not None]
+    return torch.cat(grads) if grads else torch.zeros(1, device=DEVICE)
 
 
 def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int = 64) -> torch.Tensor:
     """Compute gradient vector for a sample of docs without modifying optimizer state."""
     n = min(n_samples, docs_np.shape[0])
     idx = np.random.choice(docs_np.shape[0], n, replace=False)
-    dat = torch.from_numpy(docs_np[idx]).long().to(DEVICE)
+    dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
     # Use float32 directly to avoid scaler state entanglement
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
@@ -176,14 +171,15 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
             grad_vecs.append(None)
 
     n = len(all_tasks)
-    matrix = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                matrix[i, j] = 1.0
-            elif grad_vecs[i] is not None and grad_vecs[j] is not None:
-                matrix[i, j] = F.cosine_similarity(
-                    grad_vecs[i].unsqueeze(0), grad_vecs[j].unsqueeze(0)).item()
+    matrix = np.eye(n)
+    valid = [(i, v) for i, v in enumerate(grad_vecs) if v is not None]
+    if len(valid) >= 2:
+        G = torch.stack([v for _, v in valid])
+        G_norm = F.normalize(G, dim=1)
+        sim = (G_norm @ G_norm.T).cpu().numpy()
+        for ri, (i, _) in enumerate(valid):
+            for rj, (j, _) in enumerate(valid):
+                matrix[i, j] = sim[ri, rj]
 
     net.zero_grad(set_to_none=True)
     return {"matrix": matrix.tolist(), "labels": labels,
@@ -260,7 +256,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     def train_step(batch_np, tasks_sampled):
         nonlocal it
-        dat = torch.from_numpy(batch_np).long().to(DEVICE)
+        dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
         it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, T + U)
         optimizer.zero_grad(set_to_none=True)

@@ -15,6 +15,7 @@ Usage:
     python scripts/probe_next_token_regimes.py data/burst_d3_<run_tag>
     python scripts/probe_next_token_regimes.py data/burst_d3_<run_tag> --seed-override 107
     python scripts/probe_next_token_regimes.py data/burst_d3_<run_tag> --probe-steps 250 500 750 1000
+    python scripts/probe_next_token_regimes.py data/burst_d3_<run_tag> --n-workers 38
 """
 import sys, os, argparse, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -32,8 +33,9 @@ from itertools import combinations
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
 from burst.experiment import DepthNData, build_data
-from burst.train_utils import DEVICE, retrain_with_callbacks, build_probe_docs
-from burst.config import N_A, DATA_SEED, SCHEDULES, SCHED_COLORS, SCHEDULE_ORDER
+from burst.train_utils import DEVICE, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK
+from burst.config import N_A, DATA_SEED, SCHEDULES, SCHED_COLORS, SCHEDULE_ORDER, ExperimentConfig
+from burst.parallel import run_job_pool
 
 """
 Dimension key:
@@ -70,12 +72,14 @@ def get_f3_positions(seq_len: int) -> list[int]:
 
 
 @torch.no_grad()
+COLLECT_BATCH_SIZE = 256
+
+
 def collect_all_layer_acts_KBM_N(
     net: nanoGPT,
     docs_BL: np.ndarray,
     f3_positions: list[int],
-    max_samples: int = 512,
-    batch_size: int = 256,
+    max_samples: int,
 ) -> tuple[list[torch.Tensor], torch.Tensor]:
     """Collect residual-stream activations at f3 positions for every layer."""
     net.eval()
@@ -89,9 +93,9 @@ def collect_all_layer_acts_KBM_N(
     all_layer_acts = [[] for _ in range(K)]
     all_targets = []
 
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        tokens_BL = torch.from_numpy(docs_BL[idx[start:end]]).long().to(DEVICE)
+    for start in range(0, n, COLLECT_BATCH_SIZE):
+        end = min(start + COLLECT_BATCH_SIZE, n)
+        tokens_BL = torch.as_tensor(docs_BL[idx[start:end]], dtype=torch.long, device=DEVICE)
         inp_BT = tokens_BL[:, :-1]
         tgt_BT = tokens_BL[:, 1:]
 
@@ -125,14 +129,14 @@ def logit_lens_accuracy_K(
 
     ln_f = net.transformer.ln_f
     lm_head = net.LM_head
+    targets_dev = targets_PM.to(DEVICE)
 
     for k in range(K):
         acts_PMN = layer_acts[k].to(DEVICE)
         normed_PMN = ln_f(acts_PMN)
         logits_PMV = lm_head(normed_PMN)
         preds_PM = logits_PMV.argmax(dim=-1)
-        correct = (preds_PM == targets_PM.to(DEVICE)).float()
-        acc_K[k] = correct.mean().item()
+        acc_K[k] = (preds_PM == targets_dev).float().mean().item()
 
     return acc_K
 
@@ -146,21 +150,25 @@ class LinearProbe(nn.Module):
         return self.linear(x_BN)
 
 
+LEARNED_PROBE_LR = 1e-2
+LEARNED_PROBE_EPOCHS = 200
+LEARNED_PROBE_VAL_FRAC = 0.2
+LEARNED_PROBE_VAL_EVERY = 10
+LEARNED_PROBE_PATIENCE = 30
+
+
 def train_learned_probe(
     acts_PMN: torch.Tensor,
     targets_PM: torch.Tensor,
     n_embd: int,
-    lr: float = 1e-2,
-    epochs: int = 200,
-    val_frac: float = 0.2,
 ) -> float:
-    """Train a linear probe (N → 10) on flattened (P*M) samples, return val accuracy."""
+    """Train a linear probe (N -> 10) on flattened (P*M) samples, return val accuracy."""
     P, M, N = acts_PMN.shape
     feats_SN = acts_PMN.reshape(P * M, N)
     labels_S = targets_PM.reshape(P * M)
 
     n_total = feats_SN.shape[0]
-    n_val = max(int(n_total * val_frac), 1)
+    n_val = max(int(n_total * LEARNED_PROBE_VAL_FRAC), 1)
     n_train = n_total - n_val
 
     torch.manual_seed(PROBE_SEED)
@@ -173,10 +181,11 @@ def train_learned_probe(
     val_labels = labels_S[val_idx].to(DEVICE)
 
     probe = LinearProbe(n_embd, N_DIGITS).to(DEVICE)
-    optimizer = torch.optim.Adam(probe.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(probe.parameters(), lr=LEARNED_PROBE_LR)
 
     best_val_acc = 0.0
-    for _ in range(epochs):
+    epochs_without_improvement = 0
+    for epoch in range(LEARNED_PROBE_EPOCHS):
         probe.train()
         logits_SC = probe(train_feats)
         loss = F.cross_entropy(logits_SC, train_labels)
@@ -184,12 +193,18 @@ def train_learned_probe(
         loss.backward()
         optimizer.step()
 
-        probe.eval()
-        with torch.no_grad():
-            val_logits = probe(val_feats)
-            val_preds = val_logits.argmax(dim=-1)
-            val_acc = (val_preds == val_labels).float().mean().item()
-            best_val_acc = max(best_val_acc, val_acc)
+        if (epoch + 1) % LEARNED_PROBE_VAL_EVERY == 0 or epoch == LEARNED_PROBE_EPOCHS - 1:
+            probe.eval()
+            with torch.no_grad():
+                val_preds = probe(val_feats).argmax(dim=-1)
+                val_acc = (val_preds == val_labels).float().mean().item()
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += LEARNED_PROBE_VAL_EVERY
+            if epochs_without_improvement >= LEARNED_PROBE_PATIENCE:
+                break
 
     return best_val_acc
 
@@ -216,7 +231,7 @@ def retrain_and_probe_at_steps(
     burst_docs_BL: np.ndarray,
     n_layers: int,
     seq_len: int,
-    max_samples: int = 512,
+    max_samples: int,
 ) -> dict[int, dict]:
     """Retrain once and probe at each requested step along the way.
 
@@ -249,7 +264,7 @@ def probe_all_layers(
     burst_docs_BL: np.ndarray,
     n_layers: int,
     seq_len: int,
-    max_samples: int = 512,
+    max_samples: int,
 ) -> dict:
     """Run both probe methods on both regimes at every layer."""
     f3_pos = get_f3_positions(seq_len)
@@ -498,6 +513,30 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir):
     plt.close(fig)
 
 
+def _worker_main():
+    """Subprocess entry: load pickled args, run single probe job, save results."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--job-path", required=True)
+    parser.add_argument("--data-path", required=True)
+    parser.add_argument("--output-path", required=True)
+    parser.add_argument("--probe-steps", type=int, nargs="+", required=True)
+    parser.add_argument("--n-layers", type=int, required=True)
+    parser.add_argument("--seq-len", type=int, required=True)
+    parser.add_argument("--max-samples", type=int, required=True)
+    wargs = parser.parse_args()
+
+    with open(wargs.job_path, "rb") as f:
+        job = pickle.load(f)
+    with open(wargs.data_path, "rb") as f:
+        tp, bp, other_docs, burst_docs = pickle.load(f)
+
+    step_results = retrain_and_probe_at_steps(
+        job, tp, bp, wargs.probe_steps,
+        other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples)
+    with open(wargs.output_path, "wb") as f:
+        pickle.dump({"label": job["label"], "step_results": step_results}, f)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Next-token probes (logit lens + learned) for Other vs Burst regimes")
@@ -506,9 +545,10 @@ def main():
                         help="Global steps to probe at (default: total_steps + reversion_steps)")
     parser.add_argument("--probe-step", type=int, default=None,
                         help="Single step (legacy, use --probe-steps for multiple)")
-    parser.add_argument("--probe-max-samples", type=int, default=512)
+    parser.add_argument("--probe-max-samples", type=int, required=True)
     parser.add_argument("--seed-override", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--n-workers", type=int, required=True)
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -551,7 +591,7 @@ def main():
 
     set_seed(DATA_SEED)
     d = DepthNData(bcfg["n_alphabets"], seq_len, N_A, depth, burst_pos, DATA_SEED)
-    other_docs, burst_docs = build_regime_docs(d, doc_len)
+    other_docs, burst_docs = build_regime_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
     print(f"  Other docs: {other_docs.shape}  Burst docs: {burst_docs.shape}")
 
     jobs_cfg = cfg["jobs"]
@@ -559,36 +599,57 @@ def main():
         jobs_cfg = [j for j in jobs_cfg if j["seed"] == args.seed_override]
 
     schedules_to_run = sorted(set(j["schedule"] for j in jobs_cfg))
+    n_workers = min(len(jobs_cfg), args.n_workers)
     print(f"\nSchedules: {schedules_to_run}")
-    print(f"Jobs: {len(jobs_cfg)}")
+    print(f"Jobs: {len(jobs_cfg)}, workers: {n_workers}")
     print(f"Layers: {n_layers + 1} (emb + {n_layers} blocks)")
     n_probes = len(PROBE_METHODS) * len(jobs_cfg) * (n_layers + 1) * 2 * len(probe_steps)
-    n_retrains = len(jobs_cfg)
     print(f"Total probe evaluations: {n_probes}")
-    print(f"Retraining runs: {n_retrains} (single pass per job, probing at {len(probe_steps)} steps)\n")
+    print(f"Retraining runs: {len(jobs_cfg)} (single pass per job, probing at {len(probe_steps)} steps)\n")
 
-    all_step_results: dict[int, dict] = {step: {} for step in probe_steps}
-
-    for ji, jcfg in enumerate(jobs_cfg):
-        label = jcfg["label"]
-        seed = jcfg["seed"]
-        schedule = jcfg["schedule"]
-
-        job = {
+    jobs = []
+    for jcfg in jobs_cfg:
+        label, seed, schedule = jcfg["label"], jcfg["seed"], jcfg["schedule"]
+        jobs.append({
             "label": label, "schedule": schedule, "seed": seed,
             "cfg": {**bcfg, "seed": seed,
                     "vocab_size": cfg_out["vocab_size"],
                     "context_size": cfg_out["context_size"]},
-        }
+        })
 
-        print(f"\n[{ji+1}/{len(jobs_cfg)}] {label} — training once, probing at steps {probe_steps}",
-              flush=True)
-        step_results = retrain_and_probe_at_steps(
-            job, tp, bp, probe_steps,
-            other_docs, burst_docs, n_layers, seq_len, args.probe_max_samples)
+    step_args = [str(s) for s in probe_steps]
 
-        for step, result in step_results.items():
-            all_step_results[step][label] = result
+    def build_cmd(script, job_path, data_path, output_path):
+        return ([sys.executable, script, "--worker",
+                 "--job-path", job_path, "--data-path", data_path,
+                 "--output-path", output_path,
+                 "--probe-steps"] + step_args +
+                ["--n-layers", str(n_layers),
+                 "--seq-len", str(seq_len),
+                 "--max-samples", str(args.probe_max_samples)])
+
+    all_step_results: dict[int, dict] = {step: {} for step in probe_steps}
+
+    def on_done(jr, n_done, n_total):
+        if jr.success:
+            for step, res in jr.data["step_results"].items():
+                all_step_results[step][jr.data["label"]] = res
+            print(f"  [{n_done}/{n_total}] {jr.label:30s} done ({jr.elapsed:.0f}s)", flush=True)
+        else:
+            print(f"  FAIL [{n_done}/{n_total}]: {jr.label}", flush=True)
+            if jr.error:
+                print(f"    {jr.error}", flush=True)
+
+    run_job_pool(
+        jobs=jobs,
+        worker_script=os.path.abspath(__file__),
+        build_cmd=build_cmd,
+        on_done=on_done,
+        n_workers=n_workers,
+        data_payload=(tp, bp, other_docs, burst_docs),
+        poll_interval=1.0,
+        tmp_prefix="probe_ntp_",
+    )
 
     all_step_diffs = {}
     for probe_step in probe_steps:
@@ -637,4 +698,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--worker" in sys.argv:
+        sys.argv.remove("--worker")
+        _worker_main()
+    else:
+        main()

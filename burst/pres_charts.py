@@ -73,10 +73,11 @@ def schedule_bars(pdir, results, cfg):
     return p_
 
 
-def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left"):
+def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left", groups=None):
     bcfg = cfg.get("base_cfg", cfg)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
-    groups = _group(results)
+    if groups is None:
+        groups = _group(results)
     fig, ax = plt.subplots(figsize=(14, 7))
     for sched in _ordered(groups.keys()):
         runs = groups[sched]
@@ -103,10 +104,11 @@ def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left"):
     return p_
 
 
-def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0):
+def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0, groups=None):
     bcfg = cfg.get("base_cfg", cfg)
     U = bcfg["reversion_steps"]
-    groups = _group(results)
+    if groups is None:
+        groups = _group(results)
     scheds = _ordered(groups.keys())
     n = len(scheds)
     fig, ax = plt.subplots(figsize=(12, 7))
@@ -141,8 +143,9 @@ def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0):
     return p_
 
 
-def auc_diff(pdir, results, cfg):
-    groups = _group(results)
+def auc_diff(pdir, results, cfg, groups=None):
+    if groups is None:
+        groups = _group(results)
     scheds = _ordered(groups.keys())
     n = len(scheds)
     mean_aucs = {s: np.mean([r["reversion_auc"] for r in groups[s]])
@@ -200,10 +203,11 @@ def lr_schedule(pdir, cfg):
     return p_
 
 
-def reversion_zoom(pdir, results, cfg):
+def reversion_zoom(pdir, results, cfg, groups=None):
     bcfg = cfg.get("base_cfg", cfg)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
-    groups = _group(results)
+    if groups is None:
+        groups = _group(results)
     fig, ax = plt.subplots(figsize=(14, 7))
     burst_log_key = "acc_burst"
     for sched in _ordered(groups.keys()):
@@ -232,10 +236,11 @@ def reversion_zoom(pdir, results, cfg):
     return p_
 
 
-def summary_table(pdir, results, cfg):
+def summary_table(pdir, results, cfg, groups=None):
     bcfg = cfg.get("base_cfg", cfg)
     U = bcfg["reversion_steps"]
-    groups = _group(results)
+    if groups is None:
+        groups = _group(results)
     scheds = _ordered(groups.keys())
     fig, ax = plt.subplots(figsize=(14, 4))
     ax.axis("off")
@@ -277,10 +282,11 @@ def summary_table(pdir, results, cfg):
     return p_
 
 
-def per_sched(pdir, results, cfg):
+def per_sched(pdir, results, cfg, groups=None):
     bcfg = cfg.get("base_cfg", cfg)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
-    groups = _group(results)
+    if groups is None:
+        groups = _group(results)
     paths = []
     for sched in _ordered(groups.keys()):
         runs = groups[sched]
@@ -310,11 +316,12 @@ def per_sched(pdir, results, cfg):
     return paths
 
 
-def grad_cosine_sim_overlay(pdir, results, cfg):
+def grad_cosine_sim_overlay(pdir, results, cfg, groups=None):
     """Plot burst-vs-other gradient cosine similarity over training steps, per schedule."""
     bcfg = cfg.get("base_cfg", cfg)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
-    groups = _group(results)
+    if groups is None:
+        groups = _group(results)
 
     has_data = any("grad_sim_log" in r and r["grad_sim_log"]["step"] for r in results)
     if not has_data:
@@ -360,11 +367,12 @@ def grad_cosine_sim_overlay(pdir, results, cfg):
     return p_
 
 
-def grad_cosine_sim_by_schedule(pdir, results, cfg):
+def grad_cosine_sim_by_schedule(pdir, results, cfg, groups=None):
     """Bar chart: mean burst-vs-other cosine similarity at end of burst phase, per schedule."""
     bcfg = cfg.get("base_cfg", cfg)
     T = bcfg["total_steps"]
-    groups = _group(results)
+    if groups is None:
+        groups = _group(results)
 
     has_data = any("grad_sim_log" in r and r["grad_sim_log"]["step"] for r in results)
     if not has_data:
@@ -418,21 +426,18 @@ def pairwise_grad_cosine_heatmap(pdir, results, cfg):
     if not has_data:
         return []
 
-    # Collect all unique step values across all results
-    all_steps = sorted(set(
-        snap["step"]
-        for r in results if "pairwise_snapshots" in r
-        for snap in r["pairwise_snapshots"]
-    ))
+    snaps_by_step = defaultdict(list)
+    for r in results:
+        if "pairwise_snapshots" not in r:
+            continue
+        for snap in r["pairwise_snapshots"]:
+            snaps_by_step[snap["step"]].append(snap)
+
+    all_steps = sorted(snaps_by_step.keys())
 
     paths = []
     for target_step in all_steps:
-        snaps_at_step = [
-            snap
-            for r in results if "pairwise_snapshots" in r
-            for snap in r["pairwise_snapshots"]
-            if snap["step"] == target_step
-        ]
+        snaps_at_step = snaps_by_step[target_step]
         if not snaps_at_step:
             continue
 
@@ -508,14 +513,18 @@ def pairwise_grad_cosine_evolution(pdir, results, cfg):
             if mat.shape[0] != n:
                 continue
 
-            bb = [mat[i, j] for i in range(n_b) for j in range(n_b) if i != j]
-            oo = [mat[i, j] for i in range(n_b, n) for j in range(n_b, n) if i != j]
-            bo = [mat[i, j] for i in range(n_b) for j in range(n_b, n)]
+            bb_block = mat[:n_b, :n_b]
+            n_o = n - n_b
+            oo_block = mat[n_b:, n_b:]
+            bo_block = mat[:n_b, n_b:]
+
+            bb_mask = ~np.eye(n_b, dtype=bool)
+            oo_mask = ~np.eye(n_o, dtype=bool)
 
             steps.append(snap["step"])
-            bb_vals.append(np.mean(bb) if bb else 0.0)
-            oo_vals.append(np.mean(oo) if oo else 0.0)
-            bo_vals.append(np.mean(bo) if bo else 0.0)
+            bb_vals.append(bb_block[bb_mask].mean() if n_b > 1 else 0.0)
+            oo_vals.append(oo_block[oo_mask].mean() if n_o > 1 else 0.0)
+            bo_vals.append(bo_block.mean() if bo_block.size > 0 else 0.0)
         return np.array(steps), np.array(bb_vals), np.array(oo_vals), np.array(bo_vals)
 
     all_steps_set = sorted(set(
@@ -576,6 +585,7 @@ def generate_all(run_dir, results, cfg):
     pdir.mkdir(exist_ok=True)
     cp = {}
     ns = len(set(r["seed"] for r in results))
+    gr = _group(results)
 
     burst_key = "acc_burst"
     other_key = "acc_other"
@@ -588,42 +598,42 @@ def generate_all(run_dir, results, cfg):
     cp["overlay_burst"] = overlay(pdir, results, cfg, burst_key,
                               "Burst Class Accuracy (free generation)",
                               f"Burst Class Accuracy Over Foundation+Burst & Reversion\n(mean +/- 95% CI, n={ns} seeds)",
-                              "overlay_burst.png")
+                              "overlay_burst.png", groups=gr)
     print("  Other classes overlay...")
     cp["overlay_other"] = overlay(pdir, results, cfg, other_key,
                               "Other Classes Accuracy (free generation)",
                               f"Other Classes Accuracy Over Foundation+Burst & Reversion\n(mean +/- 95% CI, n={ns} seeds)",
-                              "overlay_other.png", loc="lower right")
+                              "overlay_other.png", loc="lower right", groups=gr)
     print("  Reversion AUC bars...")
     cp["auc_bars"] = bar_chart(pdir, results, cfg, auc_metric,
                                "Reversion AUC (higher = slower forgetting)",
                                "Reversion AUC by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-                               "auc_bars.png")
+                               "auc_bars.png", groups=gr)
     print("  Quarter-life bars...")
     cp["ql_bars"] = bar_chart(pdir, results, cfg, "quarter_life",
                               "Quarter-life (reversion steps to 25% of peak)",
                               "Quarter-life by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-                              "quarterlife_bars.png")
+                              "quarterlife_bars.png", groups=gr)
     print("  Peak burst bars...")
     cp["peak_bars"] = bar_chart(pdir, results, cfg, peak_metric,
                                 "Peak Burst Class Accuracy at End of Training",
                                 "Peak Burst Class Accuracy by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-                                "peak_b_bars.png", fmt_dec=3)
+                                "peak_b_bars.png", fmt_dec=3, groups=gr)
     print("  AUC diff heatmap...")
-    cp["auc_diff"] = auc_diff(pdir, results, cfg)
+    cp["auc_diff"] = auc_diff(pdir, results, cfg, groups=gr)
     print("  LR schedule...")
     cp["lr"] = lr_schedule(pdir, cfg)
     print("  Reversion zoom...")
-    cp["reversion_zoom"] = reversion_zoom(pdir, results, cfg)
+    cp["reversion_zoom"] = reversion_zoom(pdir, results, cfg, groups=gr)
     print("  Summary table...")
-    cp["summary_table"] = summary_table(pdir, results, cfg)
+    cp["summary_table"] = summary_table(pdir, results, cfg, groups=gr)
     print("  Per-schedule overlays...")
-    cp["per_sched"] = per_sched(pdir, results, cfg)
+    cp["per_sched"] = per_sched(pdir, results, cfg, groups=gr)
 
     print("  Gradient cosine similarity overlay...")
-    cp["grad_cosine_overlay"] = grad_cosine_sim_overlay(pdir, results, cfg)
+    cp["grad_cosine_overlay"] = grad_cosine_sim_overlay(pdir, results, cfg, groups=gr)
     print("  Gradient cosine similarity bars...")
-    cp["grad_cosine_bars"] = grad_cosine_sim_by_schedule(pdir, results, cfg)
+    cp["grad_cosine_bars"] = grad_cosine_sim_by_schedule(pdir, results, cfg, groups=gr)
     print("  Pairwise gradient cosine heatmaps...")
     cp["pairwise_heatmaps"] = pairwise_grad_cosine_heatmap(pdir, results, cfg)
     print("  Pairwise gradient cosine evolution...")

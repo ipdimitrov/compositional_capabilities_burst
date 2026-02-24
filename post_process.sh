@@ -11,12 +11,14 @@ post_process() {
     local pid_plot=$!
 
     (
-        "${PYTHON}" burst/probe.py "${run_dir}" && \
+        "${PYTHON}" burst/probe.py "${run_dir}" \
+            --checkpoint-every 50 --probe-max-samples 512 --n-workers 38 && \
         "${PYTHON}" burst/plot_probes.py "${run_dir}"
     ) &
     local pid_probe=$!
 
-    "${PYTHON}" scripts/probe_next_token_regimes.py "${run_dir}" --probe-steps 250 500 750 1000 &
+    "${PYTHON}" scripts/probe_next_token_regimes.py "${run_dir}" \
+        --probe-steps 250 500 750 1000 --probe-max-samples 512 --n-workers 38 &
     local pid_ntp=$!
 
     local fail=0
