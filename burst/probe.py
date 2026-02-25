@@ -1,9 +1,11 @@
 """Linear probes for Other-vs-Burst representation analysis.
 
-Retrains models from experiment.py using saved config.json,
+Loads saved checkpoints from experiment.py training runs,
 collects residual-stream activations at (layer, token_position) pairs
-across training checkpoints, and fits logistic regression probes to
+across training checkpoints, and fits GPU-accelerated linear probes to
 classify Other-class vs Burst-class representations.
+
+Falls back to retraining from scratch when checkpoints are unavailable.
 
 Usage:
     python burst/probe.py data/burst_d3_<run_tag>
@@ -16,10 +18,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from pathlib import Path
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import cross_val_score
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
@@ -42,6 +43,13 @@ Dimension key:
     T: n_token_positions (= L - 1, since model sees tokens :-1)
 """
 
+GPU_PROBE_LR = 1e-2
+GPU_PROBE_EPOCHS = 200
+GPU_PROBE_VAL_FRAC = 0.2
+GPU_PROBE_PATIENCE = 30
+GPU_PROBE_VAL_EVERY = 10
+COLLECT_BATCH_SIZE = 512
+
 
 def get_token_position_labels(doc_len: int, seq_len: int) -> list[str]:
     labels = ["S", "F3", "F2", "F1", "sp0"]
@@ -59,29 +67,79 @@ def get_token_position_labels(doc_len: int, seq_len: int) -> list[str]:
 def collect_activations_KPTN(
     net: nanoGPT,
     docs_BL: np.ndarray,
-) -> np.ndarray:
+) -> list[torch.Tensor]:
     """Collect residual-stream activations at every (layer, token_pos).
 
-    Returns float32 array of shape (K, P, T, N).
+    Returns list of K tensors, each of shape (P, T, N) on CPU.
     K = n_layers + 1 (post-embedding + post-block_0 + ... + post-block_{L-1}).
     T = doc_len - 1 (model input is tokens[:-1]).
     P = len(docs_BL) — caller is responsible for subsampling.
     """
     net.eval()
-    tokens_PL = torch.from_numpy(docs_BL).long().to(DEVICE)
-    inp_PT = tokens_PL[:, :-1]
+    P = len(docs_BL)
+    K = len(net.transformer.h) + 1
 
-    tok_emb = net.transformer.wte(inp_PT)
-    pos = torch.arange(inp_PT.size(1), device=DEVICE)
-    pos_emb = net.transformer.wpe(pos)
-    x_PTN = net.transformer.drop(tok_emb + pos_emb)
+    all_layer_acts = [[] for _ in range(K)]
 
-    layer_acts = [x_PTN.float().cpu().numpy()]
-    for block in net.transformer.h:
-        x_PTN = block(x_PTN)
-        layer_acts.append(x_PTN.float().cpu().numpy())
+    for start in range(0, P, COLLECT_BATCH_SIZE):
+        end = min(start + COLLECT_BATCH_SIZE, P)
+        tokens_bL = torch.as_tensor(docs_BL[start:end], dtype=torch.long, device=DEVICE)
+        inp_bT = tokens_bL[:, :-1]
 
-    return np.stack(layer_acts, axis=0)
+        tok_emb = net.transformer.wte(inp_bT)
+        pos = torch.arange(inp_bT.size(1), device=DEVICE)
+        pos_emb = net.transformer.wpe(pos)
+        x_bTN = net.transformer.drop(tok_emb + pos_emb)
+
+        all_layer_acts[0].append(x_bTN.float().cpu())
+        for bi, block in enumerate(net.transformer.h):
+            x_bTN = block(x_bTN)
+            all_layer_acts[bi + 1].append(x_bTN.float().cpu())
+
+    return [torch.cat(chunks, dim=0) for chunks in all_layer_acts]
+
+
+def _fit_gpu_probe(feats_PN: torch.Tensor, labels_P: torch.Tensor) -> float:
+    """Train a single binary linear probe on GPU, return val accuracy."""
+    N = feats_PN.shape[1]
+    n_total = feats_PN.shape[0]
+    n_val = max(int(n_total * GPU_PROBE_VAL_FRAC), 1)
+
+    torch.manual_seed(PROBE_SEED)
+    perm = torch.randperm(n_total)
+    train_idx, val_idx = perm[n_val:], perm[:n_val]
+
+    train_feats = feats_PN[train_idx].to(DEVICE)
+    train_labels = labels_P[train_idx].to(DEVICE)
+    val_feats = feats_PN[val_idx].to(DEVICE)
+    val_labels = labels_P[val_idx].to(DEVICE)
+
+    probe = nn.Linear(N, 2).to(DEVICE)
+    optimizer = torch.optim.Adam(probe.parameters(), lr=GPU_PROBE_LR)
+
+    best_val_acc = 0.0
+    epochs_no_improve = 0
+    for epoch in range(GPU_PROBE_EPOCHS):
+        probe.train()
+        logits = probe(train_feats)
+        loss = F.cross_entropy(logits, train_labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if (epoch + 1) % GPU_PROBE_VAL_EVERY == 0 or epoch == GPU_PROBE_EPOCHS - 1:
+            probe.eval()
+            with torch.no_grad():
+                val_acc = (probe(val_feats).argmax(-1) == val_labels).float().mean().item()
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += GPU_PROBE_VAL_EVERY
+            if epochs_no_improve >= GPU_PROBE_PATIENCE:
+                break
+
+    return best_val_acc
 
 
 def fit_probes_at_checkpoint(
@@ -90,10 +148,10 @@ def fit_probes_at_checkpoint(
     burst_docs_BL: np.ndarray,
     max_samples: int,
 ) -> dict:
-    """Fit logistic regression probes at every (layer, token_pos).
+    """Fit GPU linear probes at every (layer, token_pos).
 
     Returns dict with:
-        'train_acc_KT': (K, T) array — 5-fold CV accuracy on train compositions
+        'train_acc_KT': (K, T) array — val-split accuracy on train compositions
     """
     np.random.seed(PROBE_SEED)
 
@@ -103,25 +161,68 @@ def fit_probes_at_checkpoint(
     idx_burst = np.random.choice(len(burst_docs_BL), n_burst, replace=False)
     combined_BL = np.concatenate([other_docs_BL[idx_other], burst_docs_BL[idx_burst]], axis=0)
 
-    acts_KPTN = collect_activations_KPTN(net, combined_BL)
+    acts_K_PTN = collect_activations_KPTN(net, combined_BL)
 
-    K, P_total, T, N = acts_KPTN.shape
-    Pa, Pb = n_other, n_burst
-    X_KPTN = acts_KPTN
-    y_P = np.array([0] * Pa + [1] * Pb)
+    K = len(acts_K_PTN)
+    T = acts_K_PTN[0].shape[1]
+    labels_P = torch.cat([torch.zeros(n_other, dtype=torch.long),
+                          torch.ones(n_burst, dtype=torch.long)])
 
     train_acc_KT = np.zeros((K, T))
 
     for k in range(K):
         for t in range(T):
-            feats_PN = X_KPTN[k, :, t, :]
-            clf = LogisticRegression(
-                C=0.1, max_iter=2000, solver="lbfgs", random_state=PROBE_SEED)
-            scores = cross_val_score(clf, feats_PN, y_P, cv=5,
-                                     scoring="accuracy", n_jobs=-1)
-            train_acc_KT[k, t] = scores.mean()
+            feats_PN = acts_K_PTN[k][:, t, :]
+            train_acc_KT[k, t] = _fit_gpu_probe(feats_PN, labels_P)
 
     return {"train_acc_KT": train_acc_KT}
+
+
+def _load_checkpoint(cfg: dict, ckpt_path: str) -> nanoGPT:
+    """Load a model from a saved checkpoint file."""
+    from omegaconf import OmegaConf
+    net = nanoGPT(OmegaConf.create({
+        "compile": False, "vocab_size": cfg["vocab_size"],
+        "context_size": cfg["context_size"],
+        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
+        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
+    })).to(DEVICE)
+    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
+    return net
+
+
+def probe_from_checkpoints(
+    job: dict,
+    ckpt_dir: Path,
+    other_docs_BL: np.ndarray,
+    burst_docs_BL: np.ndarray,
+    checkpoint_steps: list[int],
+    probe_max_samples: int,
+) -> dict:
+    """Load saved checkpoints and probe at each requested step."""
+    cfg = job["cfg"]
+    probe_results = {}
+
+    available_ckpts = {}
+    if ckpt_dir.exists():
+        for pt_file in ckpt_dir.glob("step_*.pt"):
+            step = int(pt_file.stem.split("_")[1])
+            available_ckpts[step] = str(pt_file)
+
+    for step in checkpoint_steps:
+        if step not in available_ckpts:
+            continue
+        print(f"    Loading ckpt step {step}...", flush=True)
+        net = _load_checkpoint(cfg, available_ckpts[step])
+        probe_results[step] = fit_probes_at_checkpoint(
+            net, other_docs_BL, burst_docs_BL, probe_max_samples)
+        del net
+        torch.cuda.empty_cache()
+
+    return {
+        "label": job["label"], "schedule": job["schedule"],
+        "seed": job["seed"], "probes": probe_results,
+    }
 
 
 def retrain_and_probe(
@@ -172,9 +273,16 @@ def _worker_main():
     with open(wargs.data_path, "rb") as f:
         tp, bp, other_docs, burst_docs = pickle.load(f)
 
-    result = retrain_and_probe(
-        job, tp, bp, other_docs, burst_docs,
-        wargs.checkpoint_steps, wargs.probe_max_samples)
+    ckpt_dir = job.get("ckpt_dir")
+    if ckpt_dir and Path(ckpt_dir).exists():
+        result = probe_from_checkpoints(
+            job, Path(ckpt_dir), other_docs, burst_docs,
+            wargs.checkpoint_steps, wargs.probe_max_samples)
+    else:
+        result = retrain_and_probe(
+            job, tp, bp, other_docs, burst_docs,
+            wargs.checkpoint_steps, wargs.probe_max_samples)
+
     with open(wargs.output_path, "wb") as f:
         pickle.dump(result, f)
 
@@ -223,6 +331,13 @@ def main():
     token_labels = get_token_position_labels(doc_len, bcfg["seq_len"])
     print(f"  Token positions ({len(token_labels)}): {token_labels[:6]}...{token_labels[-3:]}")
 
+    ckpt_root = run_dir / "checkpoints"
+    use_checkpoints = ckpt_root.exists()
+    if use_checkpoints:
+        print(f"  Found checkpoints at {ckpt_root}, will load instead of retraining")
+    else:
+        print(f"  No checkpoints found, will retrain from scratch")
+
     jobs_cfg = cfg["jobs"]
     if args.jobs:
         jobs_cfg = [j for j in jobs_cfg if j["label"] in args.jobs]
@@ -231,7 +346,8 @@ def main():
 
     n_workers = min(len(jobs_cfg), args.n_workers)
     print(f"\nProbing {len(jobs_cfg)} jobs on {DEVICE}, workers: {n_workers}")
-    print(f"Model: {bcfg['n_layer']}L/{bcfg['n_embd']}d/{bcfg['n_head']}H\n")
+    print(f"Model: {bcfg['n_layer']}L/{bcfg['n_embd']}d/{bcfg['n_head']}H")
+    print(f"Mode: {'checkpoint-loading' if use_checkpoints else 'retrain'}\n")
 
     probe_dir = run_dir / "probes"
     probe_dir.mkdir(exist_ok=True)
@@ -239,12 +355,15 @@ def main():
     jobs = []
     for jcfg in jobs_cfg:
         label, seed, schedule = jcfg["label"], jcfg["seed"], jcfg["schedule"]
-        jobs.append({
+        job_entry = {
             "label": label, "schedule": schedule, "seed": seed,
             "cfg": {**bcfg, "seed": seed,
                     "vocab_size": cfg_out["vocab_size"],
                     "context_size": cfg_out["context_size"]},
-        })
+        }
+        if use_checkpoints:
+            job_entry["ckpt_dir"] = str(ckpt_root / label)
+        jobs.append(job_entry)
 
     ckpt_args = [str(s) for s in checkpoint_steps]
 
@@ -268,8 +387,9 @@ def main():
             with open(probe_dir / f"{result['label']}_probe.pkl", "wb") as f:
                 pickle.dump(result, f)
             all_probe_results.append(result)
+            pkl_path = probe_dir / f"{result['label']}_probe.pkl"
             print(f"  [{n_done}/{n_total}] {jr.label:30s} "
-                  f"-> {probe_dir / f'{result[\"label\"]}_probe.pkl'} ({jr.elapsed:.0f}s)",
+                  f"-> {pkl_path} ({jr.elapsed:.0f}s)",
                   flush=True)
         else:
             print(f"  FAIL [{n_done}/{n_total}]: {jr.label}", flush=True)

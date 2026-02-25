@@ -196,6 +196,8 @@ def build(rd, res, cfg, cp):
         pdf.vbox("NOT SUPPORTED", (211, 47, 47), f"{best} higher ({av[best]:.0f} vs burst_10 {b10_auc:.0f}).")
 
     for ti, t in enumerate(thresholds):
+        if t not in cp["life_bars"]:
+            continue
         label = reversion_life_label(t)
         pct = int(t * 100)
         lv = life_vals[t]
@@ -329,27 +331,35 @@ def build(rd, res, cfg, cp):
             for p_ in cp["grad_cosine_per_seed"]:
                 pdf.ch(p_, w=240)
 
-    if cp.get("pairwise_evolution"):
-        pdf.add_page(); pdf.st("Pairwise Gradient Similarity: Burst Tasks vs Other Tasks")
+    if cp.get("pairwise_evo_by_metric"):
+        pdf.add_page(); pdf.st("Pairwise Gradient Similarity: Metrics Over Time")
         pdf.bt(
-            "For the burst-at-position-2 setting, we track three pairwise cosine similarity "
-            "quantities across training: (1) burst–burst (within burst-class tasks), "
-            "(2) other–other (within other-class tasks), and (3) burst–other (cross-group). "
-            "When burst–other similarity rises, the model is learning the burst class in a "
-            "way that aligns with its existing knowledge of other classes."
+            "Tasks are grouped by which function sits at the burst position. "
+            "BURST = all burst-class tasks pooled; O_F1..O_Fn = other-class tasks grouped "
+            "by function at burst position; ALL_OTHER = all other tasks; ALL_DATA = everything. "
+            "Each plot shows one metric over training, one line per schedule."
         )
-        pdf.ch(cp["pairwise_evolution"], w=260)
+        for p_ in (cp["pairwise_evo_by_metric"] or []):
+            pdf.ch(p_, w=260)
+
+    if cp.get("pairwise_evo_per_schedule"):
+        pdf.add_page(); pdf.st("Pairwise Gradient Similarity: Per Schedule")
+        pdf.bt(
+            "Each subplot shows all pairwise metrics for one schedule over training. "
+            "Error bands are 95% CI across seeds."
+        )
+        pdf.ch(cp["pairwise_evo_per_schedule"], w=270)
 
     if cp.get("pairwise_heatmaps"):
-        pdf.add_page(); pdf.st("Pairwise Gradient Cosine Heatmaps (Snapshots)")
+        pdf.add_page(); pdf.st("Pairwise Gradient Cosine Heatmaps (Per Schedule)")
         pdf.bt(
-            "Each heatmap shows the full pairwise gradient cosine similarity matrix at a "
-            "specific training step. Rows/columns B1-B5 are burst-class task gradient vectors; "
-            "O1-O5 are other-class task gradient vectors. The black lines separate the two groups. "
-            "Averaged over all seeds and schedules."
+            "Each heatmap shows the pairwise gradient cosine similarity matrix at a "
+            "specific training step for a specific schedule. Groups: BURST, O_F1..O_Fn "
+            "(other tasks by function at burst position), ALL_OTHER, ALL_DATA. "
+            "Averaged over seeds within each schedule."
         )
         for p_ in (cp["pairwise_heatmaps"] or []):
-            pdf.ch(p_, w=220)
+            pdf.ch(p_, w=210)
 
     pdf.add_page(); pdf.st("Conclusions")
     pdf.bu("All schedules acquire burst class (peak ~ 1.0).", "Acquisition: ")

@@ -39,13 +39,19 @@ def run_job_pool(
 
     t0 = time.time()
 
-    def launch(idx):
+    def launch(idx, max_retries=5):
         job = jobs[idx]
         job_path = str(tmp_dir / f"_job_{idx}.pkl")
         out_path = str(tmp_dir / f"_result_{idx}.pkl")
         with open(job_path, "wb") as f:
             pickle.dump(job, f)
         cmd = build_cmd(worker_script, job_path, data_path, out_path)
+        for attempt in range(max_retries):
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                return proc, out_path
+            except BlockingIOError:
+                time.sleep(2 ** attempt)
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return proc, out_path
 

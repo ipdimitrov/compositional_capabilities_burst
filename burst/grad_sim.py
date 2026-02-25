@@ -22,7 +22,10 @@ from burst.parallel import run_job_pool
 from burst.config import PHASE_BURST, PHASE_REVERSION
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GPU_UTILIZATION_TARGET = 0.92
+GPU_UTILIZATION_TARGET = 0.95
+
+
+CUDA_CONTEXT_OVERHEAD = 400 * 1024 * 1024
 
 
 def estimate_max_workers(cfg: dict, grad_sim_batch_size: int) -> int:
@@ -50,9 +53,10 @@ def estimate_max_workers(cfg: dict, grad_sim_batch_size: int) -> int:
     del net, dummy, logits, loss
     torch.cuda.empty_cache()
 
-    total_bytes = torch.cuda.get_device_properties(0).total_memory
-    usable = total_bytes * GPU_UTILIZATION_TARGET
-    return max(1, int(usable / peak_bytes))
+    per_worker = peak_bytes + CUDA_CONTEXT_OVERHEAD
+    free_bytes, _ = torch.cuda.mem_get_info()
+    usable = free_bytes * GPU_UTILIZATION_TARGET
+    return max(1, int(usable / per_worker))
 
 
 def _flat_grad(net) -> torch.Tensor:
@@ -60,7 +64,7 @@ def _flat_grad(net) -> torch.Tensor:
     return torch.cat(grads) if grads else torch.zeros(1, device=DEVICE)
 
 
-def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int = 64) -> torch.Tensor:
+def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int) -> torch.Tensor:
     n = min(n_samples, docs_np.shape[0])
     idx = np.random.choice(docs_np.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
@@ -73,7 +77,7 @@ def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int = 64) -> torch.T
 
 
 def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL,
-                            n_samples: int = 2048) -> dict:
+                            n_samples: int) -> dict:
     net.train()
     net.zero_grad(set_to_none=True)
     g_burst = _grad_vec_for_docs(net, docs_burst_BL, n_samples=n_samples)
@@ -86,23 +90,57 @@ def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL,
 
 def compute_pairwise_grad_sim(net, task_docs: dict,
                                burst_tasks: list, other_tasks: list,
-                               n_samples: int = 2048) -> dict:
+                               n_samples: int, depth: int,
+                               burst_pos: int, n_a: int) -> dict:
+    """Pairwise grad cosine sim with principled task grouping.
+
+    Groups:
+      BURST       -- all burst-class tasks pooled
+      O_F1..O_Fn  -- other-class tasks grouped by function at burst_pos
+      ALL_OTHER   -- all other-class tasks pooled
+      ALL_DATA    -- everything pooled
+    """
+    from burst.config import CLASS_BURST
     net.train()
 
-    b_tasks = burst_tasks[:5]
-    o_tasks = other_tasks[:5]
-    all_tasks = b_tasks + o_tasks
-    labels = [f"B{i+1}" for i in range(len(b_tasks))] + [f"O{i+1}" for i in range(len(o_tasks))]
+    burst_pos_idx = 1 + (depth - burst_pos)
+
+    group_docs: dict[str, list[np.ndarray]] = {"BURST": []}
+    for fi in range(1, n_a + 1):
+        group_docs[f"O_F{fi}"] = []
+
+    for task, docs in task_docs.items():
+        if docs.shape[0] == 0:
+            continue
+        if task[0] == CLASS_BURST:
+            group_docs["BURST"].append(docs)
+        else:
+            fn_at_bp = task[burst_pos_idx]
+            key = f"O_F{fn_at_bp}"
+            if key in group_docs:
+                group_docs[key].append(docs)
+
+    other_sub_docs = []
+    for fi in range(1, n_a + 1):
+        other_sub_docs.extend(group_docs[f"O_F{fi}"])
+    group_docs["ALL_OTHER"] = list(other_sub_docs)
+    group_docs["ALL_DATA"] = group_docs["BURST"] + group_docs["ALL_OTHER"]
+
+    label_order = ["BURST"]
+    label_order += [f"O_F{fi}" for fi in range(1, n_a + 1)]
+    label_order += ["ALL_OTHER", "ALL_DATA"]
 
     grad_vecs = []
-    for task in all_tasks:
-        if task in task_docs and task_docs[task].shape[0] > 0:
+    for label in label_order:
+        doc_list = group_docs[label]
+        if doc_list:
+            pooled = np.concatenate(doc_list)
             net.zero_grad(set_to_none=True)
-            grad_vecs.append(_grad_vec_for_docs(net, task_docs[task], n_samples=n_samples))
+            grad_vecs.append(_grad_vec_for_docs(net, pooled, n_samples=n_samples))
         else:
             grad_vecs.append(None)
 
-    n = len(all_tasks)
+    n = len(label_order)
     matrix = np.eye(n)
     valid = [(i, v) for i, v in enumerate(grad_vecs) if v is not None]
     if len(valid) >= 2:
@@ -114,8 +152,9 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
                 matrix[i, j] = sim[ri, rj]
 
     net.zero_grad(set_to_none=True)
-    return {"matrix": matrix.tolist(), "labels": labels,
-            "n_burst": len(b_tasks), "n_other": len(o_tasks)}
+    return {"matrix": matrix.tolist(), "labels": label_order,
+            "n_burst": 1, "n_other_sub": n_a,
+            "n_other": 1, "n_all": 1}
 
 
 def _worker_main():
@@ -137,6 +176,9 @@ def _worker_main():
     step = job["step"]
     phase = job["phase"]
     is_pairwise = job["is_pairwise"]
+    depth = job["depth"]
+    burst_pos_val = job["burst_pos"]
+    n_a = job["n_a"]
     gs_bs = args.grad_sim_batch_size
 
     net = nanoGPT(OmegaConf.create({
@@ -161,8 +203,10 @@ def _worker_main():
         task_docs = {**target_pool, **bg_pool}
         burst_tasks = list(target_pool.keys())
         other_tasks = list(bg_pool.keys())
-        snap = compute_pairwise_grad_sim(net, task_docs, burst_tasks, other_tasks,
-                                         n_samples=gs_bs)
+        snap = compute_pairwise_grad_sim(
+            net, task_docs, burst_tasks, other_tasks,
+            n_samples=gs_bs, depth=depth,
+            burst_pos=burst_pos_val, n_a=n_a)
         result["pairwise"] = snap
 
     with open(args.output_path, "wb") as f:
@@ -185,6 +229,11 @@ def main():
     gs_bs = args.grad_sim_batch_size or base_cfg.get("grad_sim_batch_size", 2048)
     T = base_cfg["total_steps"]
     U = base_cfg["reversion_steps"]
+
+    task_info = run_cfg.get("task_info", {})
+    depth = run_cfg.get("depth", task_info.get("depth", 3))
+    burst_pos = run_cfg.get("burst_pos", task_info.get("burst_pos", depth))
+    n_a = run_cfg.get("n_a", task_info.get("n_a", 4))
 
     pairwise_global_steps = {0, T // 2, T - 1, T + U // 2, T + U - 1}
 
@@ -240,6 +289,9 @@ def main():
                 "is_pairwise": is_pairwise,
                 "ckpt_path": str(pt_file),
                 "cfg": cfg,
+                "depth": depth,
+                "burst_pos": burst_pos,
+                "n_a": n_a,
             })
 
     if not jobs:

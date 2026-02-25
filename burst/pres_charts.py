@@ -146,13 +146,18 @@ def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0, groups=No
     U = bcfg["reversion_steps"]
     if groups is None:
         groups = _group(results)
+    if not any(metric in r for r in results):
+        print(f"    [skip] no results contain metric '{metric}'")
+        return None
     scheds = _ordered(groups.keys())
     n = len(scheds)
     fig, ax = plt.subplots(figsize=(12, 7))
     xs = np.arange(n)
     means, cis, all_v = [], [], []
     for sched in scheds:
-        vals = np.array([r[metric] for r in groups[sched]])
+        vals = np.array([r[metric] for r in groups[sched] if metric in r])
+        if len(vals) == 0:
+            vals = np.array([0.0])
         m = vals.mean()
         ci = 1.96 * vals.std() / np.sqrt(len(vals)) if len(vals) > 1 else vals.std()
         means.append(m)
@@ -704,65 +709,244 @@ def grad_cosine_mean_over_phases_bars(pdir, cfg, gs_records):
     return p_
 
 
-def pairwise_grad_cosine_heatmap(pdir, cfg, gs_records):
-    snaps_by_step = defaultdict(list)
-    for r in gs_records:
-        if "pairwise_snapshots" not in r:
-            continue
-        for snap in r["pairwise_snapshots"]:
-            snaps_by_step[snap["step"]].append(snap)
+def _draw_pairwise_heatmap(ax, mean_matrix, labels, n_burst, n_other_sub,
+                           show_error, std_matrix):
+    n = len(labels)
+    im = ax.imshow(mean_matrix, cmap="RdBu_r", vmin=-1.0, vmax=1.0, interpolation="nearest")
 
-    if not snaps_by_step:
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(labels, fontsize=9, fontweight="bold", rotation=45, ha="right")
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(labels, fontsize=9, fontweight="bold")
+
+    seps = []
+    if n_burst > 0:
+        seps.append(n_burst - 0.5)
+    if n_other_sub > 0:
+        seps.append(n_burst + n_other_sub - 0.5)
+    if n > n_burst + n_other_sub + 1:
+        seps.append(n - 1 - 0.5)
+    for sep in seps:
+        ax.axhline(sep, color="black", lw=1.5)
+        ax.axvline(sep, color="black", lw=1.5)
+
+    fontsize = 8 if show_error else 9
+    for i in range(n):
+        for j in range(n):
+            val = mean_matrix[i, j]
+            txt_color = "white" if abs(val) > 0.55 else "black"
+            if show_error and std_matrix is not None:
+                txt = f"{val:.2f}\n+/-{std_matrix[i,j]:.2f}"
+                ax.text(j, i, txt, ha="center", va="center",
+                        fontsize=6, fontweight="bold", color=txt_color)
+            else:
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                        fontsize=fontsize, fontweight="bold", color=txt_color)
+    return im
+
+
+def pairwise_grad_cosine_heatmap(pdir, cfg, gs_records):
+    gs_groups = _group_gs(gs_records)
+    scheds = _ordered(gs_groups.keys())
+
+    paths = []
+    for sched in scheds:
+        records = gs_groups[sched]
+        snaps_by_step: dict[int, list] = defaultdict(list)
+        for r in records:
+            if "pairwise_snapshots" not in r:
+                continue
+            for snap in r["pairwise_snapshots"]:
+                snaps_by_step[snap["step"]].append(snap)
+
+        if not snaps_by_step:
+            continue
+
+        for target_step in sorted(snaps_by_step.keys()):
+            snaps_at_step = snaps_by_step[target_step]
+            if not snaps_at_step:
+                continue
+
+            labels = snaps_at_step[0]["labels"]
+            n = len(labels)
+            matrices = [np.array(s["matrix"]) for s in snaps_at_step
+                        if len(s["matrix"]) == n]
+            if not matrices:
+                continue
+            stacked = np.array(matrices)
+            mean_matrix = np.mean(stacked, axis=0)
+            std_matrix = np.std(stacked, axis=0) if len(matrices) > 1 else np.zeros_like(mean_matrix)
+
+            n_burst = snaps_at_step[0].get("n_burst", 1)
+            n_other_sub = snaps_at_step[0].get("n_other_sub", 0)
+            phase = snaps_at_step[0]["phase"]
+            n_seeds = len(matrices)
+            sched_label = SCHED_SHORT.get(sched, sched)
+
+            for show_error in [False, True]:
+                suffix = "err" if show_error else "mean"
+                fig_w = max(7, n * 1.1) if show_error else max(6, n * 0.9)
+                fig_h = max(6, n * 1.0) if show_error else max(5, n * 0.8)
+                fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+                im = _draw_pairwise_heatmap(
+                    ax, mean_matrix, labels, n_burst, n_other_sub,
+                    show_error=show_error, std_matrix=std_matrix)
+                fig.colorbar(im, ax=ax, shrink=0.8, pad=0.03, label="Cosine Similarity")
+                err_note = " (mean +/- std)" if show_error else ""
+                ax.set_title(
+                    f"Pairwise Grad Cosine Sim -- {sched_label} -- Step {target_step} ({phase}){err_note}\n"
+                    f"(avg over {n_seeds} seeds)",
+                    fontsize=11, fontweight="bold")
+                fig.tight_layout()
+                p_ = pdir / f"pw_heatmap_{sched}_step{target_step}_{suffix}.png"
+                fig.savefig(p_, dpi=200, bbox_inches="tight")
+                plt.close(fig)
+                paths.append(p_)
+
+    return paths
+
+
+def _extract_pairwise_metrics(snap: dict) -> dict[str, float]:
+    """Extract scalar summary metrics from a pairwise snapshot matrix.
+
+    With the new grouping [BURST, O_F1..O_Fn, ALL_OTHER, ALL_DATA]:
+      - burst_vs_other_sub: mean of BURST row across O_F1..O_Fn columns
+      - other_sub_within:   mean off-diagonal of the O_F* block
+      - burst_vs_all_other: BURST vs ALL_OTHER cell
+      - burst_vs_all_data:  BURST vs ALL_DATA cell
+    """
+    mat = np.array(snap["matrix"])
+    n_b = snap.get("n_burst", 1)
+    n_os = snap.get("n_other_sub", 0)
+    n = mat.shape[0]
+    if n < 2:
+        return {}
+
+    burst_idx = 0
+    of_start, of_end = n_b, n_b + n_os
+    all_other_idx = of_end if of_end < n else None
+    all_data_idx = of_end + 1 if of_end + 1 < n else None
+
+    metrics: dict[str, float] = {}
+
+    if n_os > 0:
+        metrics["burst_vs_other_sub"] = float(mat[burst_idx, of_start:of_end].mean())
+        of_block = mat[of_start:of_end, of_start:of_end]
+        if n_os > 1:
+            mask = ~np.eye(n_os, dtype=bool)
+            metrics["other_sub_within"] = float(of_block[mask].mean())
+        else:
+            metrics["other_sub_within"] = 1.0
+
+    if all_other_idx is not None:
+        metrics["burst_vs_all_other"] = float(mat[burst_idx, all_other_idx])
+    if all_data_idx is not None:
+        metrics["burst_vs_all_data"] = float(mat[burst_idx, all_data_idx])
+
+    return metrics
+
+
+PAIRWISE_METRIC_LABELS = {
+    "burst_vs_other_sub": "BURST vs O_F* (mean)",
+    "other_sub_within": "O_F* within-group (off-diag mean)",
+    "burst_vs_all_other": "BURST vs ALL_OTHER",
+    "burst_vs_all_data": "BURST vs ALL_DATA",
+}
+
+PAIRWISE_METRIC_COLORS = {
+    "burst_vs_other_sub": "#FF6F00",
+    "other_sub_within": "#1565C0",
+    "burst_vs_all_other": "#D32F2F",
+    "burst_vs_all_data": "#7B1FA2",
+}
+
+
+def _collect_pairwise_series(gs_records, scheds_grouped):
+    """Build {sched: {metric: (steps_ref, vals_array_SxT)}} from pairwise snapshots."""
+    result = {}
+    for sched, records in scheds_grouped.items():
+        all_steps_set = sorted(set(
+            snap["step"]
+            for r in records if "pairwise_snapshots" in r
+            for snap in r["pairwise_snapshots"]
+        ))
+        if not all_steps_set:
+            continue
+        steps_ref = np.array(all_steps_set)
+
+        per_seed: dict[str, list[np.ndarray]] = defaultdict(list)
+        for r in records:
+            if "pairwise_snapshots" not in r or not r["pairwise_snapshots"]:
+                continue
+            seed_steps, seed_metrics = [], defaultdict(list)
+            for snap in sorted(r["pairwise_snapshots"], key=lambda s: s["step"]):
+                m = _extract_pairwise_metrics(snap)
+                if not m:
+                    continue
+                seed_steps.append(snap["step"])
+                for k, v in m.items():
+                    seed_metrics[k].append(v)
+            if len(seed_steps) < 2:
+                continue
+            s_arr = np.array(seed_steps)
+            for k, vals in seed_metrics.items():
+                per_seed[k].append(np.interp(steps_ref, s_arr, np.array(vals)))
+
+        if not per_seed:
+            continue
+        result[sched] = {
+            "_steps": steps_ref,
+            **{k: np.array(v) for k, v in per_seed.items()},
+        }
+    return result
+
+
+def pairwise_grad_cosine_evolution_by_metric(pdir, cfg, gs_records):
+    """One plot per metric, one line per schedule, error bars across seeds."""
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+
+    gs_groups = _group_gs(gs_records)
+    scheds = _ordered(gs_groups.keys())
+    series = _collect_pairwise_series(gs_records, gs_groups)
+    if not series:
         return []
 
-    all_steps = sorted(snaps_by_step.keys())
+    metrics = list(PAIRWISE_METRIC_LABELS.keys())
     paths = []
-    for target_step in all_steps:
-        snaps_at_step = snaps_by_step[target_step]
-        if not snaps_at_step:
+    for metric in metrics:
+        fig, ax = plt.subplots(figsize=(14, 7))
+        any_data = False
+        for sched in scheds:
+            if sched not in series or metric not in series[sched]:
+                continue
+            steps_ref = series[sched]["_steps"]
+            vals_arr = series[sched][metric]
+            m = np.mean(vals_arr, axis=0)
+            n_s = len(vals_arr)
+            ci = 1.96 * np.std(vals_arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals_arr, axis=0)
+            c = PALETTE.get(sched, "gray")
+            ax.plot(steps_ref, m, color=c, lw=2, label=SCHED_SHORT.get(sched, sched),
+                    marker="o", markersize=4)
+            ax.fill_between(steps_ref, m - ci, m + ci, color=c, alpha=0.12)
+            any_data = True
+
+        if not any_data:
+            plt.close(fig)
             continue
 
-        labels = snaps_at_step[0]["labels"]
-        n = len(labels)
-        matrices = [np.array(s["matrix"]) for s in snaps_at_step if len(s["matrix"]) == n]
-        if not matrices:
-            continue
-        mean_matrix = np.mean(matrices, axis=0)
-
-        n_burst = snaps_at_step[0]["n_burst"]
-        phase = snaps_at_step[0]["phase"]
-
-        fig, ax = plt.subplots(figsize=(max(6, n * 0.9), max(5, n * 0.8)))
-        im = ax.imshow(mean_matrix, cmap="RdBu_r", vmin=-1.0, vmax=1.0, interpolation="nearest")
-
-        ax.set_xticks(range(n))
-        ax.set_xticklabels(labels, fontsize=10, fontweight="bold")
-        ax.set_yticks(range(n))
-        ax.set_yticklabels(labels, fontsize=10, fontweight="bold")
-
-        if 0 < n_burst < n:
-            sep = n_burst - 0.5
-            ax.axhline(sep, color="black", lw=2)
-            ax.axvline(sep, color="black", lw=2)
-            ax.text(n_burst / 2 - 0.5, -0.7, "Burst Tasks", ha="center",
-                    fontsize=9, color="#D32F2F", fontweight="bold")
-            ax.text(n_burst + (n - n_burst) / 2 - 0.5, -0.7, "Other Tasks", ha="center",
-                    fontsize=9, color="#1565C0", fontweight="bold")
-
-        for i in range(n):
-            for j in range(n):
-                val = mean_matrix[i, j]
-                color = "white" if abs(val) > 0.55 else "black"
-                ax.text(j, i, f"{val:.2f}", ha="center", va="center",
-                        fontsize=9, fontweight="bold", color=color)
-
-        fig.colorbar(im, ax=ax, shrink=0.8, pad=0.03, label="Cosine Similarity")
-        ax.set_title(
-            f"Pairwise Gradient Cosine Similarity -- Step {target_step} ({phase})\n"
-            f"(B=Burst tasks, O=Other-class tasks, avg over {len(matrices)} runs)",
-            fontsize=12, fontweight="bold")
+        ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
+        ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.4)
+        ax.text(T * 0.5, -0.12, "BURST", ha="center", fontsize=11, color="gray",
+                fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.text(T + U * 0.5, -0.12, "REVERSION", ha="center", fontsize=11, color="gray",
+                fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.set_xlim(0, T + U)
+        _style(ax, "Step", "Cosine Similarity",
+               f"{PAIRWISE_METRIC_LABELS[metric]}\n(mean +/- 95% CI per schedule)")
+        ax.legend(fontsize=9, loc="best", framealpha=0.9, edgecolor="gray")
         fig.tight_layout()
-        p_ = pdir / f"pairwise_grad_cosine_step{target_step}.png"
+        p_ = pdir / f"pw_evo_{metric}.png"
         fig.savefig(p_, dpi=200, bbox_inches="tight")
         plt.close(fig)
         paths.append(p_)
@@ -770,79 +954,64 @@ def pairwise_grad_cosine_heatmap(pdir, cfg, gs_records):
     return paths
 
 
-def pairwise_grad_cosine_evolution(pdir, cfg, gs_records):
+def pairwise_grad_cosine_evolution_per_schedule(pdir, cfg, gs_records):
+    """One subplot per schedule, each showing all metric lines over time."""
     bcfg = cfg.get("base_cfg", cfg)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
 
-    def _extract_means(snaps):
-        steps, bb_vals, oo_vals, bo_vals = [], [], [], []
-        for snap in snaps:
-            mat = np.array(snap["matrix"])
-            n_b = snap["n_burst"]
-            n_o = snap["n_other"]
-            n = n_b + n_o
-            if mat.shape[0] != n:
+    gs_groups = _group_gs(gs_records)
+    scheds = _ordered(gs_groups.keys())
+    series = _collect_pairwise_series(gs_records, gs_groups)
+    if not series:
+        return None
+
+    active_scheds = [s for s in scheds if s in series]
+    if not active_scheds:
+        return None
+
+    metrics = list(PAIRWISE_METRIC_LABELS.keys())
+    n_cols = min(3, len(active_scheds))
+    n_rows = math.ceil(len(active_scheds) / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(6 * n_cols, 4.5 * n_rows), squeeze=False)
+
+    for idx, sched in enumerate(active_scheds):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row][col]
+        steps_ref = series[sched]["_steps"]
+
+        for metric in metrics:
+            if metric not in series[sched]:
                 continue
-            bb_block = mat[:n_b, :n_b]
-            n_o = n - n_b
-            oo_block = mat[n_b:, n_b:]
-            bo_block = mat[:n_b, n_b:]
-            bb_mask = ~np.eye(n_b, dtype=bool)
-            oo_mask = ~np.eye(n_o, dtype=bool)
-            steps.append(snap["step"])
-            bb_vals.append(bb_block[bb_mask].mean() if n_b > 1 else 0.0)
-            oo_vals.append(oo_block[oo_mask].mean() if n_o > 1 else 0.0)
-            bo_vals.append(bo_block.mean() if bo_block.size > 0 else 0.0)
-        return np.array(steps), np.array(bb_vals), np.array(oo_vals), np.array(bo_vals)
+            vals_arr = series[sched][metric]
+            m = np.mean(vals_arr, axis=0)
+            n_s = len(vals_arr)
+            ci = 1.96 * np.std(vals_arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals_arr, axis=0)
+            c = PAIRWISE_METRIC_COLORS.get(metric, "gray")
+            ax.plot(steps_ref, m, color=c, lw=2, label=PAIRWISE_METRIC_LABELS[metric],
+                    marker="o", markersize=3)
+            ax.fill_between(steps_ref, m - ci, m + ci, color=c, alpha=0.12)
 
-    all_steps_set = sorted(set(
-        snap["step"]
-        for r in gs_records if "pairwise_snapshots" in r
-        for snap in r["pairwise_snapshots"]
-    ))
-    if not all_steps_set:
-        return None
+        ax.axvline(T, color="black", ls="--", lw=1.5, alpha=0.5)
+        ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.4)
+        ax.set_xlim(0, T + U)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set_title(SCHED_SHORT.get(sched, sched), fontsize=10, fontweight="bold")
+        ax.set_xlabel("Step", fontsize=9)
+        ax.set_ylabel("Cosine Sim", fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.grid(True, alpha=0.15, lw=0.5)
+        if idx == 0:
+            ax.legend(fontsize=6, loc="best", framealpha=0.9)
 
-    steps_ref = np.array(all_steps_set)
-    bb_all, oo_all, bo_all = [], [], []
-    for r in gs_records:
-        if "pairwise_snapshots" not in r or not r["pairwise_snapshots"]:
-            continue
-        s, bb, oo, bo = _extract_means(r["pairwise_snapshots"])
-        if len(s) < 2:
-            continue
-        bb_all.append(np.interp(steps_ref, s, bb))
-        oo_all.append(np.interp(steps_ref, s, oo))
-        bo_all.append(np.interp(steps_ref, s, bo))
+    for idx in range(len(active_scheds), n_rows * n_cols):
+        row, col = divmod(idx, n_cols)
+        axes[row][col].set_visible(False)
 
-    if not bb_all:
-        return None
-
-    fig, ax = plt.subplots(figsize=(14, 7))
-    for arr, color, label in [
-        (np.array(bb_all), "#D32F2F", "Burst-Burst (within-group)"),
-        (np.array(oo_all), "#1565C0", "Other-Other (within-group)"),
-        (np.array(bo_all), "#FF6F00", "Burst-Other (cross-group)"),
-    ]:
-        m = np.mean(arr, axis=0)
-        n_s = len(arr)
-        ci = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(arr, axis=0)
-        ax.plot(steps_ref, m, color=color, lw=2.5, label=label, marker="o", markersize=5)
-        ax.fill_between(steps_ref, m - ci, m + ci, color=color, alpha=0.15)
-
-    ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
-    ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.4)
-    ax.text(T * 0.5, -0.12, "FOUNDATION+BURST", ha="center", fontsize=11, color="gray",
-            fontweight="bold", transform=ax.get_xaxis_transform())
-    ax.text(T + U * 0.5, -0.12, "REVERSION", ha="center", fontsize=11, color="gray",
-            fontweight="bold", transform=ax.get_xaxis_transform())
-    ax.set_xlim(steps_ref[0], steps_ref[-1])
-    _style(ax, "Step", "Mean Cosine Similarity",
-           "Pairwise Gradient Cosine Similarity Evolution\n"
-           "Burst Tasks vs Other-Class Tasks (mean +/- 95% CI, all seeds/schedules)")
-    ax.legend(fontsize=12, loc="best", framealpha=0.9, edgecolor="gray")
+    fig.suptitle("Pairwise Grad Cosine Metrics per Schedule\n(mean +/- 95% CI across seeds)",
+                 fontsize=13, fontweight="bold")
     fig.tight_layout()
-    p_ = pdir / "pairwise_grad_cosine_evolution.png"
+    p_ = pdir / "pw_evo_per_schedule.png"
     fig.savefig(p_, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return p_
@@ -1099,12 +1268,14 @@ def generate_all(run_dir, results, cfg):
         label = reversion_life_label(t)
         pct = int(t * 100)
         print(f"  {label} bars...")
-        cp["life_bars"][t] = bar_chart(
+        chart = bar_chart(
             pdir, results, cfg, key,
             f"{label} (reversion steps to {pct}% of peak)",
             f"{label} by Schedule\n(mean +/- 95% CI, individual seeds shown)",
             f"life_{pct}_bars.png", groups=gr,
         )
+        if chart is not None:
+            cp["life_bars"][t] = chart
     print("  Peak burst bars...")
     cp["peak_bars"] = bar_chart(pdir, results, cfg, peak_metric,
                                 "Peak Burst Class Accuracy at End of Training",
@@ -1141,8 +1312,10 @@ def generate_all(run_dir, results, cfg):
     cp["grad_cosine_phase_bars"] = grad_cosine_mean_over_phases_bars(gs_dir, cfg, gs_records)
     print("  Pairwise gradient cosine heatmaps...")
     cp["pairwise_heatmaps"] = pairwise_grad_cosine_heatmap(gs_dir, cfg, gs_records)
-    print("  Pairwise gradient cosine evolution...")
-    cp["pairwise_evolution"] = pairwise_grad_cosine_evolution(gs_dir, cfg, gs_records)
+    print("  Pairwise gradient cosine evolution (by metric)...")
+    cp["pairwise_evo_by_metric"] = pairwise_grad_cosine_evolution_by_metric(gs_dir, cfg, gs_records)
+    print("  Pairwise gradient cosine evolution (per schedule)...")
+    cp["pairwise_evo_per_schedule"] = pairwise_grad_cosine_evolution_per_schedule(gs_dir, cfg, gs_records)
 
     probe_data, probe_meta = _load_probe_data(run_dir)
     if probe_data:
