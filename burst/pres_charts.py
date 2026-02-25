@@ -13,6 +13,7 @@ from burst.train_utils import compute_lr_schedule as _compute_lr
 from burst.config import (
     SCHED_COLORS as PALETTE, SCHED_DISPLAY as SCHED_SHORT,
     SCHEDULE_ORDER, ordered_schedules as _ordered,
+    TrainConfig, reversion_life_key, reversion_life_label,
 )
 
 
@@ -170,7 +171,7 @@ def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0, groups=No
     ax.set_xticks(xs)
     ax.set_xticklabels([SCHED_SHORT[s] for s in scheds], fontsize=10, fontweight="bold")
     _style(ax, "", yl, title)
-    if metric == "quarter_life":
+    if metric.startswith("life_"):
         ax.axhline(U, color="gray", ls=":", alpha=0.5, lw=1.5)
     fig.tight_layout()
     p_ = pdir / fname
@@ -258,8 +259,10 @@ def reversion_zoom(pdir, results, cfg, groups=None):
         ci = 1.96 * np.std(uv, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(uv, axis=0)
         ax.plot(reversion_steps_arr, m, color=PALETTE[sched], lw=2.5, label=SCHED_SHORT[sched])
         ax.fill_between(reversion_steps_arr, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
-    ax.axhline(0.25, color="gray", ls=":", alpha=0.5, lw=1.5)
-    ax.text(U * 0.95, 0.27, "25% threshold", fontsize=9, color="gray", ha="right")
+    thresholds = TrainConfig().reversion_thresholds
+    for t in thresholds:
+        ax.axhline(t, color="gray", ls=":", alpha=0.35, lw=1)
+        ax.text(U * 0.95, t + 0.015, f"{int(t*100)}%", fontsize=7, color="gray", ha="right")
     ax.set_xlim(0, U)
     ax.set_ylim(-0.05, 1.05)
     _style(ax, "Reversion Steps (after Burst Class removal)", "Burst Class Accuracy",
@@ -278,10 +281,14 @@ def summary_table(pdir, results, cfg, groups=None):
     if groups is None:
         groups = _group(results)
     scheds = _ordered(groups.keys())
-    fig, ax = plt.subplots(figsize=(14, 4))
+    thresholds = TrainConfig().reversion_thresholds
+    fig_w = max(14, 6 + 2.5 * len(thresholds))
+    fig, ax = plt.subplots(figsize=(fig_w, 4))
     ax.axis("off")
-    cols = ["Schedule", "Peak Burst\n(mean +/- CI)", "Quarter-life\n(mean +/- CI)",
-            "Reversion AUC\n(mean +/- CI)", "Other Classes Acc\n(mean +/- CI)"]
+    cols = ["Schedule", "Peak Burst\n(mean +/- CI)"]
+    for t in thresholds:
+        cols.append(f"{reversion_life_label(t)}\n(mean +/- CI)")
+    cols += ["Reversion AUC\n(mean +/- CI)", "Other Classes Acc\n(mean +/- CI)"]
     rows = []
     for sched in scheds:
         runs = groups[sched]
@@ -289,13 +296,18 @@ def summary_table(pdir, results, cfg, groups=None):
             m = vals.mean()
             ci = 1.96 * vals.std() / np.sqrt(len(vals)) if len(vals) > 1 else vals.std()
             return f"{m:.{d}f} +/- {ci:.{d}f}" if d > 0 else f"{m:.0f} +/- {ci:.0f}"
-        rows.append([
+        row = [
             SCHED_SHORT[sched],
             fmt(np.array([r["peak_burst"] for r in runs]), 3),
-            fmt(np.array([r.get("quarter_life", U) for r in runs]), 0),
+        ]
+        for t in thresholds:
+            key = reversion_life_key(t)
+            row.append(fmt(np.array([r.get(key, U) for r in runs]), 0))
+        row += [
             fmt(np.array([r["reversion_auc"] for r in runs]), 0),
             fmt(np.array([r["log"]["acc_other"][-1] for r in runs]), 3),
-        ])
+        ]
+        rows.append(row)
     table = ax.table(cellText=rows, colLabels=cols, loc="center",
                      cellLoc="center", colColours=["#E0E0E0"] * len(cols))
     table.auto_set_font_size(False)
@@ -1080,11 +1092,19 @@ def generate_all(run_dir, results, cfg):
                                "Reversion AUC (higher = slower forgetting)",
                                "Reversion AUC by Schedule\n(mean +/- 95% CI, individual seeds shown)",
                                "auc_bars.png", groups=gr)
-    print("  Quarter-life bars...")
-    cp["ql_bars"] = bar_chart(pdir, results, cfg, "quarter_life",
-                              "Quarter-life (reversion steps to 25% of peak)",
-                              "Quarter-life by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-                              "quarterlife_bars.png", groups=gr)
+    thresholds = TrainConfig().reversion_thresholds
+    cp["life_bars"] = {}
+    for t in thresholds:
+        key = reversion_life_key(t)
+        label = reversion_life_label(t)
+        pct = int(t * 100)
+        print(f"  {label} bars...")
+        cp["life_bars"][t] = bar_chart(
+            pdir, results, cfg, key,
+            f"{label} (reversion steps to {pct}% of peak)",
+            f"{label} by Schedule\n(mean +/- 95% CI, individual seeds shown)",
+            f"life_{pct}_bars.png", groups=gr,
+        )
     print("  Peak burst bars...")
     cp["peak_bars"] = bar_chart(pdir, results, cfg, peak_metric,
                                 "Peak Burst Class Accuracy at End of Training",

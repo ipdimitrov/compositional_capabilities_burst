@@ -23,6 +23,7 @@ from burst.data import BurstDataset
 from burst.config import (
     EVAL_KEYS, MIXED_FRACTIONS, UNIFORM_SCHEDULE,
     PHASE_FOUNDATION, PHASE_BURST, PHASE_REVERSION,
+    TrainConfig, reversion_life_key,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -292,15 +293,21 @@ def run(job, shared_data_path, run_dir, progress_dir):
     reversion_end_burst = reversion_accs[-1] if reversion_accs else peak_burst
     reversion_auc = float(np.trapz(reversion_accs, reversion_steps)) if len(reversion_accs) > 1 else 0.0
 
-    quarter_life = U
-    half_life = U
+    thresholds = TrainConfig().reversion_thresholds
+    life_times: dict[str, int] = {}
     if peak_burst > 1e-6:
+        remaining = {t: True for t in thresholds}
         for acc_val, us in zip(reversion_accs, reversion_steps):
-            if half_life == U and acc_val <= peak_burst * 0.5:
-                half_life = us
-            if acc_val <= peak_burst * 0.25:
-                quarter_life = us
+            for t in list(remaining):
+                if acc_val <= peak_burst * t:
+                    life_times[reversion_life_key(t)] = us
+                    del remaining[t]
+            if not remaining:
                 break
+    for t in thresholds:
+        k = reversion_life_key(t)
+        if k not in life_times:
+            life_times[k] = U
 
     dropoff_abs = peak_burst - reversion_end_burst
     dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > 1e-6 else 0.0
@@ -310,7 +317,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
         "label": label, "log": log, "config": dict(cfg),
         "peak_burst": peak_burst, "reversion_end_burst": reversion_end_burst,
         "dropoff_abs": dropoff_abs, "dropoff_pct": dropoff_pct,
-        "quarter_life": quarter_life, "reversion_auc": reversion_auc,
+        "reversion_auc": reversion_auc,
+        **life_times,
     }
     for k in EVAL_KEYS:
         for phase in (PHASE_BURST, PHASE_REVERSION):

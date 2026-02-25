@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 from fpdf import FPDF
 from burst.pres_charts import PALETTE, SCHED_SHORT, _ordered, _group, generate_all
+from burst.config import TrainConfig, reversion_life_key, reversion_life_label
 W, H = 297, 210
 
 _UNICODE_SUBS = {"\u2014": "--", "\u2013": "-", "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2026": "..."}
@@ -143,9 +144,12 @@ def build(rd, res, cfg, cp):
     if "burst_10" in sc:
         pdf.bu(f"~{int(p*100)}% burst class randomly throughout (uniform control)", "burst_10: ")
 
+    thresholds = TrainConfig().reversion_thresholds
     pdf.add_page(); pdf.st("Metrics")
     pdf.bu("Burst class accuracy at end of training", "Peak Burst: ")
-    pdf.bu(f"Reversion steps to 25% of peak (cap {U})", "Quarter-life: ")
+    for t in thresholds:
+        pct = int(t * 100)
+        pdf.bu(f"Reversion steps to {pct}% of peak (cap {U})", f"{reversion_life_label(t)}: ")
     pdf.bu("Area under burst class curve during reversion", "Reversion AUC: ")
 
     pdf.add_page(); pdf.st("Hypotheses")
@@ -162,7 +166,10 @@ def build(rd, res, cfg, cp):
 
     pv = {s: np.mean([r.get(peak_key, 0) for r in gr[s]]) for s in sc}
     av = {s: np.mean([r.get(auc_key, 0) for r in gr[s]]) for s in sc}
-    qv = {s: np.mean([r.get("quarter_life", U) for r in gr[s]]) for s in sc}
+    life_vals = {}
+    for t in thresholds:
+        key = reversion_life_key(t)
+        life_vals[t] = {s: np.mean([r.get(key, U) for r in gr[s]]) for s in sc}
     ae = {s: np.mean([r["log"][other_log_key][-1] for r in gr[s]]) for s in sc}
 
     pdf.add_page(); pdf.st("Result 1: Peak Burst Class Accuracy"); pdf.ch(cp["peak_bars"], w=240)
@@ -188,13 +195,19 @@ def build(rd, res, cfg, cp):
         b10_auc = av.get("burst_10", 0)
         pdf.vbox("NOT SUPPORTED", (211, 47, 47), f"{best} higher ({av[best]:.0f} vs burst_10 {b10_auc:.0f}).")
 
-    pdf.add_page(); pdf.st("Result 5: Quarter-life"); pdf.ch(cp["ql_bars"], w=240)
-    pdf.hbox(3, "burst_100 = fastest forgetting")
-    low = min(qv, key=qv.get)
-    if low == "burst_100":
-        pdf.vbox("SUPPORTED", (0, 128, 0), f"Lowest quarter-life ({qv['burst_100']:.0f}). High variance.")
-    else:
-        pdf.vbox("NOT SUPPORTED", (211, 47, 47), f"{low} lower ({qv[low]:.0f}).")
+    for ti, t in enumerate(thresholds):
+        label = reversion_life_label(t)
+        pct = int(t * 100)
+        lv = life_vals[t]
+        pdf.add_page()
+        pdf.st(f"Result 5.{ti+1}: {label}")
+        pdf.ch(cp["life_bars"][t], w=240)
+        pdf.hbox(3, "burst_100 = fastest forgetting")
+        low = min(lv, key=lv.get)
+        if low == "burst_100":
+            pdf.vbox("SUPPORTED", (0, 128, 0), f"Lowest {label} ({lv['burst_100']:.0f}). High variance.")
+        else:
+            pdf.vbox("NOT SUPPORTED", (211, 47, 47), f"{low} lower ({lv[low]:.0f}).")
 
     pdf.add_page(); pdf.st("Result 6: Schedule Ordering"); pdf.ch(cp["auc_diff"], w=200)
     pdf.hbox(4, "Mixed schedules ordered by other-classes content")
