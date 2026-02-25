@@ -13,6 +13,14 @@ post_process() {
     local half_workers=$(( probe_workers / 2 ))
     echo "=== post-processing ${run_dir} (probe_workers=${probe_workers}) ==="
 
+    local T U
+    T=$("${PYTHON}" -c "import json,sys; c=json.load(open('${run_dir}/config.json')); print(c['base_cfg']['total_steps'])")
+    U=$("${PYTHON}" -c "import json,sys; c=json.load(open('${run_dir}/config.json')); print(c['base_cfg']['reversion_steps'])")
+    local q1=$(( T / 4 ))
+    local q2=$(( T / 2 ))
+    local q3=$(( 3 * T / 4 ))
+    local ntp_steps="${q1} ${q2} ${q3} ${T}"
+
     local fail=0
 
     echo "  Running plots (background)..."
@@ -24,8 +32,9 @@ post_process() {
         --checkpoint-every 50 --probe-max-samples 512 --n-workers "${half_workers}" &
     local pid_probe=$!
 
+    echo "  Running next-token probes at steps: ${ntp_steps} ..."
     "${PYTHON}" scripts/probe_next_token_regimes.py "${run_dir}" \
-        --probe-steps 250 500 750 1000 --probe-max-samples 512 --n-workers "${half_workers}" &
+        --probe-steps ${ntp_steps} --probe-max-samples 512 --n-workers "${half_workers}" &
     local pid_ntp=$!
 
     wait "${pid_probe}" && "${PYTHON}" burst/plot_probes.py "${run_dir}" \
@@ -39,7 +48,7 @@ post_process() {
     wait "${pid_plot}" || { echo "FAIL: plot.py"; fail=1; }
 
     if [ "${fail}" -eq 0 ]; then
-        echo "Building presentation PDF..."
+        echo "Building presentation HTML..."
         "${PYTHON}" burst/pres_pdf.py "${run_dir}"
     else
         echo "WARNING: some post-processing steps failed, skipping PDF"

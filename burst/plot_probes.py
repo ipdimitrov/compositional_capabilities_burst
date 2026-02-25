@@ -7,7 +7,7 @@ Reads probe results from probe.py and generates:
   4. Mean-pooled probe accuracy over time per schedule
 
 Usage:
-    python burst/plot_probes.py data/burst_d3_<run_tag>
+    python burst/plot_probes.py data/burst_d<depth>_<run_tag>
 """
 import sys, os, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -436,9 +436,9 @@ def _mean_acc_at_step(results: list[dict], schedule: str, step: int, key: str) -
 def main():
     if len(sys.argv) < 2:
         data_dir = Path("data")
-        burst_dirs = sorted([d for d in data_dir.glob("burst_d3_*") if d.is_dir()])
+        burst_dirs = sorted([d for d in data_dir.glob("burst_d*") if d.is_dir()])
         if not burst_dirs:
-            print("No burst_d3_* dirs found"); sys.exit(1)
+            print("No burst_d* dirs found"); sys.exit(1)
         run_dir = burst_dirs[-1]
         print(f"Auto-detected: {run_dir}")
     else:

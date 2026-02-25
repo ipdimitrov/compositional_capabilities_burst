@@ -2,11 +2,13 @@
 
 Runs after training (burst/experiment.py) as a separate pass, loading
 checkpoints and computing grad-sim with full GPU utilisation at the
-grad_sim_batch_size level.
+grad_sim_batch_size level.  Checkpoints are kept by default so the
+computation can be re-run with different settings.
 
 Usage:
     python burst/grad_sim.py <run_dir>
     python burst/grad_sim.py <run_dir> --n-workers 8 --grad-sim-batch-size 2048
+    python burst/grad_sim.py <run_dir> --delete-checkpoints
 """
 import sys, os, argparse, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -163,7 +165,7 @@ def _worker_main():
     parser.add_argument("--job-path", required=True)
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--output-path", required=True)
-    parser.add_argument("--grad-sim-batch-size", type=int, default=2048)
+    parser.add_argument("--grad-sim-batch-size", type=int, required=True)
     args = parser.parse_args()
 
     with open(args.job_path, "rb") as f:
@@ -218,7 +220,7 @@ def main():
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--n-workers", type=int, default=None)
     parser.add_argument("--grad-sim-batch-size", type=int, default=None)
-    parser.add_argument("--keep-checkpoints", action="store_true")
+    parser.add_argument("--delete-checkpoints", action="store_true")
     args = parser.parse_args()
 
     run_dir = args.run_dir
@@ -385,7 +387,7 @@ def main():
             pickle.dump(all_results, f)
         print(f"Updated all_results.pkl with grad-sim data for {len(per_label)} labels", flush=True)
 
-    if not args.keep_checkpoints:
+    if args.delete_checkpoints:
         import shutil
         shutil.rmtree(ckpt_root)
         print(f"Cleaned up checkpoints", flush=True)

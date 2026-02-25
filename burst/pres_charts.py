@@ -777,9 +777,15 @@ def pairwise_grad_cosine_heatmap(pdir, cfg, gs_records):
             mean_matrix = np.mean(stacked, axis=0)
             std_matrix = np.std(stacked, axis=0) if len(matrices) > 1 else np.zeros_like(mean_matrix)
 
-            n_burst = snaps_at_step[0].get("n_burst", 1)
-            n_other_sub = snaps_at_step[0].get("n_other_sub", 0)
-            phase = snaps_at_step[0]["phase"]
+            ref_snap = snaps_at_step[0]
+            new_fmt = _is_new_format(ref_snap)
+            if new_fmt:
+                n_burst = ref_snap["n_burst"]
+                n_other_sub = ref_snap["n_other_sub"]
+            else:
+                n_burst = ref_snap.get("n_burst", n // 2)
+                n_other_sub = n - n_burst
+            phase = ref_snap["phase"]
             n_seeds = len(matrices)
             sched_label = SCHED_SHORT.get(sched, sched)
 
@@ -806,43 +812,61 @@ def pairwise_grad_cosine_heatmap(pdir, cfg, gs_records):
     return paths
 
 
+def _is_new_format(snap: dict) -> bool:
+    return "n_other_sub" in snap
+
+
 def _extract_pairwise_metrics(snap: dict) -> dict[str, float]:
     """Extract scalar summary metrics from a pairwise snapshot matrix.
 
-    With the new grouping [BURST, O_F1..O_Fn, ALL_OTHER, ALL_DATA]:
+    New format [BURST, O_F1..O_Fn, ALL_OTHER, ALL_DATA]:
       - burst_vs_other_sub: mean of BURST row across O_F1..O_Fn columns
       - other_sub_within:   mean off-diagonal of the O_F* block
       - burst_vs_all_other: BURST vs ALL_OTHER cell
       - burst_vs_all_data:  BURST vs ALL_DATA cell
+
+    Old format [B1..B5, O1..O5] (backwards compat):
+      - burst_vs_other_sub: mean of burst-other cross-block
+      - other_sub_within:   mean off-diagonal of other-other block
     """
     mat = np.array(snap["matrix"])
-    n_b = snap.get("n_burst", 1)
-    n_os = snap.get("n_other_sub", 0)
     n = mat.shape[0]
     if n < 2:
         return {}
 
-    burst_idx = 0
-    of_start, of_end = n_b, n_b + n_os
-    all_other_idx = of_end if of_end < n else None
-    all_data_idx = of_end + 1 if of_end + 1 < n else None
+    if _is_new_format(snap):
+        n_b = snap["n_burst"]
+        n_os = snap["n_other_sub"]
+        burst_idx = 0
+        of_start, of_end = n_b, n_b + n_os
+        all_other_idx = of_end if of_end < n else None
+        all_data_idx = of_end + 1 if of_end + 1 < n else None
 
-    metrics: dict[str, float] = {}
+        metrics: dict[str, float] = {}
+        if n_os > 0:
+            metrics["burst_vs_other_sub"] = float(mat[burst_idx, of_start:of_end].mean())
+            of_block = mat[of_start:of_end, of_start:of_end]
+            if n_os > 1:
+                mask = ~np.eye(n_os, dtype=bool)
+                metrics["other_sub_within"] = float(of_block[mask].mean())
+            else:
+                metrics["other_sub_within"] = 1.0
+        if all_other_idx is not None:
+            metrics["burst_vs_all_other"] = float(mat[burst_idx, all_other_idx])
+        if all_data_idx is not None:
+            metrics["burst_vs_all_data"] = float(mat[burst_idx, all_data_idx])
+        return metrics
 
-    if n_os > 0:
-        metrics["burst_vs_other_sub"] = float(mat[burst_idx, of_start:of_end].mean())
-        of_block = mat[of_start:of_end, of_start:of_end]
-        if n_os > 1:
-            mask = ~np.eye(n_os, dtype=bool)
-            metrics["other_sub_within"] = float(of_block[mask].mean())
-        else:
-            metrics["other_sub_within"] = 1.0
-
-    if all_other_idx is not None:
-        metrics["burst_vs_all_other"] = float(mat[burst_idx, all_other_idx])
-    if all_data_idx is not None:
-        metrics["burst_vs_all_data"] = float(mat[burst_idx, all_data_idx])
-
+    n_b = snap.get("n_burst", n // 2)
+    n_o = n - n_b
+    bo_block = mat[:n_b, n_b:]
+    oo_block = mat[n_b:, n_b:]
+    metrics = {
+        "burst_vs_other_sub": float(bo_block.mean()),
+    }
+    if n_o > 1:
+        oo_mask = ~np.eye(n_o, dtype=bool)
+        metrics["other_sub_within"] = float(oo_block[oo_mask].mean())
     return metrics
 
 

@@ -12,10 +12,10 @@ activations at every transformer layer, and produces per-regime
 accuracy curves, A−B diffs, and diff-in-diffs.
 
 Usage:
-    python scripts/probe_next_token_regimes.py data/burst_d3_<run_tag>
-    python scripts/probe_next_token_regimes.py data/burst_d3_<run_tag> --seed-override 107
-    python scripts/probe_next_token_regimes.py data/burst_d3_<run_tag> --probe-steps 250 500 750 1000
-    python scripts/probe_next_token_regimes.py data/burst_d3_<run_tag> --n-workers 38
+    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag>
+    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> --seed-override 107
+    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> --probe-steps 250 500 750 1000
+    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> --n-workers 38
 """
 import sys, os, argparse, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

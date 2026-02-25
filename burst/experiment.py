@@ -6,7 +6,7 @@ checkpoints.
 
 Usage:
     python burst/experiment.py --depth 3 --burst-pos 2
-    python burst/experiment.py --depth 5 --burst-pos 3 --schedules burst_100 burst_50 burst_10
+    python burst/experiment.py --depth 5 --burst-pos 3 --n-a 6 --schedules burst_100 burst_50 burst_10
 """
 import sys, os, time, pickle, json, subprocess, argparse, itertools
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -168,9 +168,9 @@ class DepthNData:
         return {t: np.array([self._make_doc(t) for _ in range(n)]) for t in tasks}
 
 
-def build_data(cfg: dict, depth: int, burst_pos: int):
+def build_data(cfg: dict, depth: int, burst_pos: int, n_a: int):
     set_seed(DATA_SEED)
-    d = DepthNData(cfg["n_alphabets"], cfg["seq_len"], N_A, depth, burst_pos, DATA_SEED)
+    d = DepthNData(cfg["n_alphabets"], cfg["seq_len"], n_a, depth, burst_pos, DATA_SEED)
     nd, ne = cfg["n_docs_per_task"], cfg["n_eval_per_task"]
 
     bg_pool = d.gen_pool(d.other_train, nd)
@@ -203,7 +203,7 @@ def build_data(cfg: dict, depth: int, burst_pos: int):
     cfg_out["context_size"] = max(cfg["context_size"], ref.shape[1] + 5)
 
     task_info = {
-        "n_a": N_A,
+        "n_a": n_a,
         "depth": depth,
         "burst_pos": burst_pos,
         "n_other_train": len(d.other_train),
@@ -218,6 +218,7 @@ def main():
     parser.add_argument("--run-tag", default=None)
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--burst-pos", type=int, default=3)
+    parser.add_argument("--n-a", type=int, default=N_A)
     parser.add_argument("--schedules", nargs="+", default=None)
     parser.add_argument("--n-seeds", type=int, default=None)
     parser.add_argument("--n-workers", type=int, default=None)
@@ -246,8 +247,9 @@ def main():
     if DEVICE == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
 
-    print(f"\nBuilding data (depth={exp.depth}, burst_pos={exp.burst_pos})...", flush=True)
-    tp, bp, ed, pl, cfg_out, ti = build_data(base_cfg, exp.depth, exp.burst_pos)
+    n_a = args.n_a
+    print(f"\nBuilding data (depth={exp.depth}, burst_pos={exp.burst_pos}, n_a={n_a})...", flush=True)
+    tp, bp, ed, pl, cfg_out, ti = build_data(base_cfg, exp.depth, exp.burst_pos, n_a)
     print(f"  Other classes: {ti['n_other_train']}  "
           f"Burst class: {ti['n_burst_train']}  "
           f"doc_len: {ti['doc_len']}  prompt: {ti['prompt_len']}", flush=True)
@@ -268,7 +270,7 @@ def main():
 
     with open(run_dir / "config.json", "w") as f:
         json.dump({
-            "base_cfg": base_cfg, "n_a": N_A, "seed_base": SEED_BASE,
+            "base_cfg": base_cfg, "n_a": n_a, "seed_base": SEED_BASE,
             "n_seeds": exp.n_seeds, "schedules": exp.schedules, "n_jobs": len(jobs),
             "task_info": ti, "depth": exp.depth, "burst_pos": exp.burst_pos,
             "jobs": [{"label": j["label"], "schedule": j["schedule"],
