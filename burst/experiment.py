@@ -25,10 +25,51 @@ from burst.data import BurstDataset, pad_pools_to_same_length
 from burst.config import (
     N_A, SEED_BASE, DATA_SEED,
     CLASS_OTHER, CLASS_BURST,
-    ExperimentConfig,
+    ExperimentConfig, TrainConfig,
+    reversion_life_key, reversion_life_label,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+GPU_UTILIZATION_TARGET = 0.90
+
+
+CUDA_CONTEXT_OVERHEAD = 400 * 1024 * 1024  # ~400 MB per subprocess CUDA context
+
+
+def estimate_max_train_workers(cfg: dict) -> int:
+    """Profile peak VRAM for one training forward+backward and estimate how
+    many worker subprocesses can run in parallel.
+
+    Each subprocess has its own CUDA context (~400 MB overhead) on top of
+    the model + activation memory measured by torch."""
+    if DEVICE != "cuda":
+        return 1
+
+    net = nanoGPT(OmegaConf.create({
+        "compile": False, "vocab_size": cfg["vocab_size"],
+        "context_size": cfg["context_size"],
+        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
+        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
+    })).to(DEVICE)
+    net.train()
+
+    bs = cfg.get("batch_size", 128)
+    dummy = torch.randint(0, cfg["vocab_size"],
+                          (bs, cfg["context_size"]), device=DEVICE)
+    torch.cuda.reset_peak_memory_stats()
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        logits = net(dummy[:, :-1])
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), dummy[:, 1:].reshape(-1))
+    loss.backward()
+    peak_bytes = torch.cuda.max_memory_allocated()
+
+    del net, dummy, logits, loss
+    torch.cuda.empty_cache()
+
+    per_worker = peak_bytes + CUDA_CONTEXT_OVERHEAD
+    free_bytes, _ = torch.cuda.mem_get_info()
+    usable = free_bytes * GPU_UTILIZATION_TARGET
+    return max(1, int(usable / per_worker))
 
 
 class NpEncoder(json.JSONEncoder):
@@ -234,7 +275,15 @@ def main():
                       "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    n_workers = min(len(jobs), exp.n_workers)
+    sample_cfg = {**base_cfg, "vocab_size": cfg_out["vocab_size"],
+                  "context_size": cfg_out["context_size"]}
+    if DEVICE == "cuda":
+        max_train = estimate_max_train_workers(sample_cfg)
+        print(f"  Auto VRAM estimate: {max_train} max train workers", flush=True)
+    else:
+        max_train = 1
+
+    n_workers = min(len(jobs), exp.n_workers, max_train)
     steps_per_job = base_cfg["total_steps"] + base_cfg["reversion_steps"]
 
     tc = exp.train
@@ -284,10 +333,13 @@ def main():
             if rp.exists():
                 with open(rp, "rb") as f:
                     r = pickle.load(f)
-                ql = r.get('quarter_life', '?')
+                thresholds = TrainConfig().reversion_thresholds
+                first_key = reversion_life_key(thresholds[0])
+                first_lbl = reversion_life_label(thresholds[0])
+                lv = r.get(first_key, '?')
                 tqdm.write(f"  [{n_done}/{len(jobs)}] {label:30s} "
                            f"peak={r['peak_burst']:.3f} "
-                           f"t1/4={ql} auc={r['reversion_auc']:.0f} ({time.time()-t0:.0f}s)")
+                           f"{first_lbl}={lv} auc={r['reversion_auc']:.0f} ({time.time()-t0:.0f}s)")
             else:
                 se = proc.stderr.read().decode() if proc.stderr else ""
                 tqdm.write(f"  FAIL [{n_done}/{len(jobs)}]: {label} (exit {proc.returncode})")

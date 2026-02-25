@@ -116,7 +116,7 @@ class TrainConfig:
     p_target: float = 0.10
     reversion_steps: int = 500
     eval_every: int = 10
-    unlearn_threshold: float = 0.25
+    reversion_thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70)
 
     n_docs_per_task: int = 500
     n_eval_per_task: int = 500
@@ -144,6 +144,16 @@ class ExperimentConfig:
 
 
 DEFAULT_CONFIG = ExperimentConfig()
+
+
+def reversion_life_key(threshold: float) -> str:
+    pct = int(threshold * 100)
+    return f"life_{pct}"
+
+
+def reversion_life_label(threshold: float) -> str:
+    pct = int(threshold * 100)
+    return f"{pct}%-life"
 
 
 def ordered_schedules(scheds) -> list[str]:

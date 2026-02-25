@@ -18,6 +18,7 @@ from burst.config import (
     EVAL_KEYS, CURVE_STYLE, SCHED_COLORS, SCHEDULE_ORDER,
     PHASE_FOUNDATION, PHASE_BURST, PHASE_REVERSION,
     ordered_schedules, sched_sort_key,
+    TrainConfig, reversion_life_key, reversion_life_label,
 )
 
 W, H = 297, 210
@@ -128,17 +129,22 @@ def plot_per_run(result, plots_dir):
     ax.grid(True, alpha=0.2)
 
     peak = result["peak_burst"]
-    ql = result.get("quarter_life", U)
-    ql_str = f"{ql:.0f}" if ql < U else f">{U}"
     drop = result.get("dropoff_abs", 0)
     drop_pct = result.get("dropoff_pct", 0)
+    thresholds = TrainConfig().reversion_thresholds
+    first_key = reversion_life_key(thresholds[0])
+    first_val = result.get(first_key, U)
+    first_str = f"{first_val:.0f}" if first_val < U else f">{U}"
     ax.text(T + U * 0.5, 0.95,
-            f"peak={peak:.3f}  t1/4={ql_str}  drop={drop:.3f}({drop_pct:.0f}%)",
+            f"peak={peak:.3f}  {reversion_life_label(thresholds[0])}={first_str}  drop={drop:.3f}({drop_pct:.0f}%)",
             ha="center", fontsize=7, color="#D32F2F", fontweight="bold",
             transform=ax.get_xaxis_transform())
-    if ql < U:
-        ax.axvline(T + ql, color="#D32F2F", ls="--", lw=1.5, alpha=0.7)
-        ax.axhline(peak * 0.25, color="#D32F2F", ls=":", lw=1, alpha=0.4)
+    for t in thresholds:
+        lk = reversion_life_key(t)
+        lv = result.get(lk, U)
+        if lv < U:
+            ax.axvline(T + lv, color="#D32F2F", ls="--", lw=1, alpha=0.4)
+            ax.axhline(peak * t, color="#D32F2F", ls=":", lw=0.8, alpha=0.3)
 
     ax = axes[2]
     ax.plot(steps, loss, color="#333", lw=1, label="loss")
@@ -167,23 +173,28 @@ def plot_summary_bars(results, plots_dir, cfg):
     total_steps = bcfg["total_steps"]
     reversion_steps = bcfg["reversion_steps"]
 
+    thresholds = TrainConfig().reversion_thresholds
+    first_t = thresholds[0]
+    first_key = reversion_life_key(first_t)
+    first_label = reversion_life_label(first_t)
+
     ordered = sorted(results, key=lambda r: sched_sort_key(r["schedule"]))
     scheds = [r["schedule"] for r in ordered]
     peaks = [r["peak_burst"] for r in ordered]
-    quarterlives = [r.get("quarter_life", reversion_steps) for r in ordered]
+    life_vals = [r.get(first_key, reversion_steps) for r in ordered]
     aucs = [r["reversion_auc"] for r in ordered]
     colors = [SCHED_COLORS.get(s, "gray") for s in scheds]
     xs = np.arange(len(scheds))
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-    fig.suptitle("Peak Burst Class Accuracy + Quarter-life + AUC by Schedule",
+    fig.suptitle(f"Peak Burst Class Accuracy + {first_label} + AUC by Schedule",
                  fontsize=14, fontweight="bold")
 
     titles = [f"Peak Burst Class Accuracy at step {total_steps}",
-              "Quarter-life t1/4 (lower = faster forgetting)",
+              f"{first_label} (lower = faster forgetting)",
               "Reversion AUC (lower = faster forgetting)"]
-    ylabels = ["Peak Burst Class accuracy", "Quarter-life (reversion steps)", "Reversion AUC"]
-    data = [peaks, quarterlives, aucs]
+    ylabels = ["Peak Burst Class accuracy", f"{first_label} (reversion steps)", "Reversion AUC"]
+    data = [peaks, life_vals, aucs]
 
     for ax, vals, title, ylabel in zip(axes, data, titles, ylabels):
         bars = ax.bar(xs, vals, color=colors, edgecolor="black", lw=0.5)
@@ -535,7 +546,10 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     pdf.bul("Other Classes: compositional accuracy on known functions")
     pdf.bul("Burst Class: accuracy on b* chains (acquisition + retention)")
     pdf.bul("Peak Burst: b* accuracy at end of training")
-    pdf.bul(f"Quarter-life: reversion steps until Burst Class drops to 25% of peak (capped at {reversion_steps})")
+    thresholds = TrainConfig().reversion_thresholds
+    for t in thresholds:
+        pct = int(t * 100)
+        pdf.bul(f"{reversion_life_label(t)}: reversion steps until Burst Class drops to {pct}% of peak (capped at {reversion_steps})")
     pdf.bul("Reversion AUC: area under Burst Class curve during reversion (lower = faster forgetting)")
 
     burst_len = max(int(p_target * total_steps), 1)
@@ -587,22 +601,24 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "Positive (red) means the row schedule has higher AUC (slower forgetting). "
         "Negative (blue) means faster forgetting relative to the column schedule.")
 
+    first_key = reversion_life_key(thresholds[0])
+    first_label_short = reversion_life_label(thresholds[0])
     pdf.add_page()
     pdf.stitle("Ranking: Fastest Forgetting First")
-    rows = sorted(results, key=lambda r: r.get("quarter_life", reversion_steps))
+    rows = sorted(results, key=lambda r: r.get(first_key, reversion_steps))
     pdf.set_font("Courier", "", 7.5); pdf.set_text_color(40, 40, 40)
     pdf.cell(0, 4,
-             f"  {'Rank':<5}{'Schedule':<16}{'Peak Burst':>10}{'t1/4':>8}{'Rev AUC':>9}",
+             f"  {'Rank':<5}{'Schedule':<16}{'Peak Burst':>10}{first_label_short:>10}{'Rev AUC':>9}",
              new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 4, "  " + "-" * 48, new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 4, "  " + "-" * 50, new_x="LMARGIN", new_y="NEXT")
     for i, r in enumerate(rows):
-        ql = r.get("quarter_life", reversion_steps)
-        ql_str = f"{ql:.0f}" if ql < reversion_steps else f">{reversion_steps}"
+        lv = r.get(first_key, reversion_steps)
+        lv_str = f"{lv:.0f}" if lv < reversion_steps else f">{reversion_steps}"
         peak = r["peak_burst"]
         auc = r["reversion_auc"]
         pdf.cell(0, 4,
                  f"  {i+1:<5}{r['schedule']:<16}{peak:>10.3f}"
-                 f"{ql_str:>8}{auc:>9.0f}",
+                 f"{lv_str:>10}{auc:>9.0f}",
                  new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
