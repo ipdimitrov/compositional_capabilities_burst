@@ -71,10 +71,10 @@ def get_f3_positions(seq_len: int) -> list[int]:
     return list(range(o3_0_model_input, o3_0_model_input + seq_len))
 
 
-@torch.no_grad()
 COLLECT_BATCH_SIZE = 256
 
 
+@torch.no_grad()
 def collect_all_layer_acts_KBM_N(
     net: nanoGPT,
     docs_BL: np.ndarray,
@@ -220,6 +220,53 @@ def learned_probe_accuracy_K(
     for k in range(K):
         acc_K[k] = train_learned_probe(layer_acts[k], targets_PM, n_embd)
     return acc_K
+
+
+def _load_checkpoint(cfg: dict, ckpt_path: str) -> nanoGPT:
+    from omegaconf import OmegaConf
+    net = nanoGPT(OmegaConf.create({
+        "compile": False, "vocab_size": cfg["vocab_size"],
+        "context_size": cfg["context_size"],
+        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
+        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
+    })).to(DEVICE)
+    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
+    return net
+
+
+def probe_from_checkpoints_at_steps(
+    job: dict,
+    ckpt_dir: Path,
+    probe_steps: list[int],
+    other_docs_BL: np.ndarray,
+    burst_docs_BL: np.ndarray,
+    n_layers: int,
+    seq_len: int,
+    max_samples: int,
+) -> dict[int, dict]:
+    """Load saved checkpoints and probe at each requested step."""
+    cfg = job["cfg"]
+    results_by_step: dict[int, dict] = {}
+
+    available_ckpts = {}
+    if ckpt_dir.exists():
+        for pt_file in ckpt_dir.glob("step_*.pt"):
+            step = int(pt_file.stem.split("_")[1])
+            available_ckpts[step] = str(pt_file)
+
+    for step in probe_steps:
+        if step not in available_ckpts:
+            print(f"    WARNING: no checkpoint for step {step}, skipping", flush=True)
+            continue
+        print(f"    Loading ckpt step {step}...", flush=True)
+        net = _load_checkpoint(cfg, available_ckpts[step])
+        net.eval()
+        results_by_step[step] = probe_all_layers(
+            net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples)
+        del net
+        torch.cuda.empty_cache()
+
+    return results_by_step
 
 
 def retrain_and_probe_at_steps(
@@ -555,9 +602,16 @@ def _worker_main():
     with open(wargs.data_path, "rb") as f:
         tp, bp, other_docs, burst_docs = pickle.load(f)
 
-    step_results = retrain_and_probe_at_steps(
-        job, tp, bp, wargs.probe_steps,
-        other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples)
+    ckpt_dir = job.get("ckpt_dir")
+    if ckpt_dir and Path(ckpt_dir).exists():
+        step_results = probe_from_checkpoints_at_steps(
+            job, Path(ckpt_dir), wargs.probe_steps,
+            other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples)
+    else:
+        step_results = retrain_and_probe_at_steps(
+            job, tp, bp, wargs.probe_steps,
+            other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples)
+
     with open(wargs.output_path, "wb") as f:
         pickle.dump({"label": job["label"], "step_results": step_results}, f)
 
@@ -623,6 +677,9 @@ def main():
     if args.seed_override is not None:
         jobs_cfg = [j for j in jobs_cfg if j["seed"] == args.seed_override]
 
+    ckpt_root = run_dir / "checkpoints"
+    use_checkpoints = ckpt_root.exists()
+
     schedules_to_run = sorted(set(j["schedule"] for j in jobs_cfg))
     n_workers = min(len(jobs_cfg), args.n_workers)
     print(f"\nSchedules: {schedules_to_run}")
@@ -630,17 +687,21 @@ def main():
     print(f"Layers: {n_layers + 1} (emb + {n_layers} blocks)")
     n_probes = len(PROBE_METHODS) * len(jobs_cfg) * (n_layers + 1) * 2 * len(probe_steps)
     print(f"Total probe evaluations: {n_probes}")
-    print(f"Retraining runs: {len(jobs_cfg)} (single pass per job, probing at {len(probe_steps)} steps)\n")
+    mode = "checkpoint-loading" if use_checkpoints else "retrain"
+    print(f"Mode: {mode} ({len(jobs_cfg)} jobs, probing at {len(probe_steps)} steps)\n")
 
     jobs = []
     for jcfg in jobs_cfg:
         label, seed, schedule = jcfg["label"], jcfg["seed"], jcfg["schedule"]
-        jobs.append({
+        job_entry = {
             "label": label, "schedule": schedule, "seed": seed,
             "cfg": {**bcfg, "seed": seed,
                     "vocab_size": cfg_out["vocab_size"],
                     "context_size": cfg_out["context_size"]},
-        })
+        }
+        if use_checkpoints:
+            job_entry["ckpt_dir"] = str(ckpt_root / label)
+        jobs.append(job_entry)
 
     step_args = [str(s) for s in probe_steps]
 
