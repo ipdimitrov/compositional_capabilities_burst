@@ -8,10 +8,10 @@ classify Other-class vs Burst-class representations.
 Falls back to retraining from scratch when checkpoints are unavailable.
 
 Usage:
-    python burst/probe.py data/burst_d3_<run_tag>
-    python burst/probe.py data/burst_d3_<run_tag> --jobs end_block_s42 uniform_s42
-    python burst/probe.py data/burst_d3_<run_tag> --checkpoint-every 50
-    python burst/probe.py data/burst_d3_<run_tag> --n-workers 38
+    python burst/probe.py data/burst_d<depth>_<run_tag>
+    python burst/probe.py data/burst_d<depth>_<run_tag> --jobs end_block_s42 uniform_s42
+    python burst/probe.py data/burst_d<depth>_<run_tag> --checkpoint-every 50
+    python burst/probe.py data/burst_d<depth>_<run_tag> --n-workers 38
 """
 import sys, os, argparse, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

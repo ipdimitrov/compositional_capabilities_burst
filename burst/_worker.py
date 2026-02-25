@@ -271,7 +271,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
         if rows:
             fieldnames = ["schedule", "seed", "phase", "task_type", "composition", "count"]
-            depth = len(task[1:]) if counter_data else 3
+            depth = len(next(iter(counter_data))[1:])
             fieldnames += [f"f{d}" for d in range(depth, 0, -1)]
             with open(csv_path, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")

@@ -1,6 +1,6 @@
 """Plot + PDF report for burst experiment.
 
-Usage: python burst/plot.py data/burst_d3_<run_tag>
+Usage: python burst/plot.py data/burst_d<depth>_<run_tag>
 """
 import sys, os, pickle, json, math, csv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -100,18 +100,21 @@ def plot_lr_schedule(cfg, plots_dir):
     plt.close(fig)
 
 
-def plot_per_run(result, plots_dir):
+def plot_per_run(result, plots_dir, run_cfg=None):
     log, sched, seed, cfg = result["log"], result["schedule"], result["seed"], result["config"]
     steps = np.array(log["step"])
     loss = np.array(log["loss"])
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p = cfg["batch_size"], cfg["p_target"]
 
+    _ti = (run_cfg or {}).get("task_info", {})
+    _depth = (run_cfg or {}).get("depth", _ti.get("depth", 3))
+
     train_m = np.array([ph == "burst" for ph in log["phase"]])
     reversion_m = np.array([ph == "reversion" for ph in log["phase"]])
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), gridspec_kw={"height_ratios": [1, 4, 2]})
-    fig.suptitle(f"{sched}  seed={seed}  (depth-3 bijection chain)",
+    fig.suptitle(f"{sched}  seed={seed}  (depth-{_depth} bijection chain)",
                  fontsize=13, fontweight="bold")
 
     _schedule_bar(axes[0], T, U, sched, p, bs, seed)
@@ -441,11 +444,13 @@ def plot_overlay_all_schedules(results, plots_dir, sched_data=None):
 
 
 class ReportPDF(FPDF):
+    _header_title: str = "Bijection Burst  |  Free Generation"
+
     def header(self):
         if self.page_no() > 1:
             self.set_font("Helvetica", "I", 7)
             self.set_text_color(130, 130, 130)
-            self.cell(0, 4, "Depth-3 Bijection Burst  |  Free Generation", align="L")
+            self.cell(0, 4, self._header_title, align="L")
             self.cell(0, 4, f"Page {self.page_no()}/{{nb}}", align="R")
             self.ln(6)
 
@@ -488,6 +493,7 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     burst_pos = cfg.get("burst_pos", cfg.get("task_info", {}).get("burst_pos", depth))
 
     pdf = ReportPDF(orientation="L", format="A4")
+    pdf._header_title = f"Depth-{depth} Bijection Burst (pos {burst_pos})  |  Free Generation"
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=12)
 
@@ -522,8 +528,6 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         "the correct output sequence.")
 
     pdf.sub("Training Data (Other Classes = background knowledge)")
-    depth = cfg.get("depth", 3)
-    burst_pos = cfg.get("burst_pos", depth)
     n_a_comps = n_a ** depth
     pdf.body(
         f"{n_a} bijection functions. The model trains on all {n_a}^{depth} = {n_a_comps} "
@@ -981,9 +985,9 @@ def plot_task_distributions(run_dir):
 def main():
     if len(sys.argv) < 2:
         data_dir = Path("data")
-        burst_dirs = sorted([d for d in data_dir.glob("burst_d3_*") if d.is_dir()])
+        burst_dirs = sorted([d for d in data_dir.glob("burst_d*") if d.is_dir()])
         if not burst_dirs:
-            print("No burst_d3_* dirs found"); sys.exit(1)
+            print("No burst_d* dirs found"); sys.exit(1)
         run_dir = burst_dirs[-1]
         print(f"Auto-detected: {run_dir}")
     else:
@@ -996,7 +1000,7 @@ def main():
     print("Per-run plots...")
     per_run_fnames = []
     for r in results:
-        fname = plot_per_run(r, plots_dir)
+        fname = plot_per_run(r, plots_dir, run_cfg=cfg)
         per_run_fnames.append(fname)
         print(f"  {fname}")
 
