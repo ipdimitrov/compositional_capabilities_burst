@@ -28,48 +28,9 @@ from burst.config import (
     ExperimentConfig, TrainConfig,
     reversion_life_key, reversion_life_label,
 )
+from burst.gpu import gpu_cfg
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GPU_UTILIZATION_TARGET = 0.90
-
-
-CUDA_CONTEXT_OVERHEAD = 400 * 1024 * 1024  # ~400 MB per subprocess CUDA context
-
-
-def estimate_max_train_workers(cfg: dict) -> int:
-    """Profile peak VRAM for one training forward+backward and estimate how
-    many worker subprocesses can run in parallel.
-
-    Each subprocess has its own CUDA context (~400 MB overhead) on top of
-    the model + activation memory measured by torch."""
-    if DEVICE != "cuda":
-        return 1
-
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
-    net.train()
-
-    bs = cfg.get("batch_size", 128)
-    dummy = torch.randint(0, cfg["vocab_size"],
-                          (bs, cfg["context_size"]), device=DEVICE)
-    torch.cuda.reset_peak_memory_stats()
-    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        logits = net(dummy[:, :-1])
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), dummy[:, 1:].reshape(-1))
-    loss.backward()
-    peak_bytes = torch.cuda.max_memory_allocated()
-
-    del net, dummy, logits, loss
-    torch.cuda.empty_cache()
-
-    per_worker = peak_bytes + CUDA_CONTEXT_OVERHEAD
-    free_bytes, _ = torch.cuda.mem_get_info()
-    usable = free_bytes * GPU_UTILIZATION_TARGET
-    return max(1, int(usable / per_worker))
 
 
 class NpEncoder(json.JSONEncoder):
@@ -277,45 +238,45 @@ def main():
                       "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    sample_cfg = {**base_cfg, "vocab_size": cfg_out["vocab_size"],
-                  "context_size": cfg_out["context_size"]}
-    if DEVICE == "cuda":
-        max_train = estimate_max_train_workers(sample_cfg)
-        print(f"  Auto VRAM estimate: {max_train} max train workers", flush=True)
-    else:
-        max_train = 1
+    n_procs = min(len(jobs), exp.n_workers)
+    jobs_per_proc = max(1, (len(jobs) + n_procs - 1) // n_procs)
+    print(f"  {gpu_cfg.summary()}", flush=True)
+    print(f"  Layout: {n_procs} processes x ~{jobs_per_proc} jobs/proc", flush=True)
 
-    n_workers = min(len(jobs), exp.n_workers, max_train)
     steps_per_job = base_cfg["total_steps"] + base_cfg["reversion_steps"]
 
     tc = exp.train
     print(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H", flush=True)
-    print(f"Jobs: {len(jobs)}, workers: {n_workers}", flush=True)
+    print(f"Jobs: {len(jobs)}, parallel processes: {n_procs}, "
+          f"jobs/process: ~{jobs_per_proc}", flush=True)
     print(f"Steps/job: {tc.total_steps} train + {tc.reversion_steps} reversion", flush=True)
     print(f"Schedules: {exp.schedules}\n", flush=True)
 
-    worker_script = str(Path(__file__).parent / "_worker.py")
+    batched_script = str(Path(__file__).parent / "_worker_batched.py")
     t0 = time.time()
 
-    def launch(idx, job):
-        job_path = str(run_dir / f"_job_{idx}.pkl")
-        with open(job_path, "wb") as f:
-            pickle.dump(job, f)
+    job_chunks = [jobs[i:i + jobs_per_proc] for i in range(0, len(jobs), jobs_per_proc)]
+
+    def launch_chunk(chunk_idx, chunk):
+        chunk_path = str(run_dir / f"_chunk_{chunk_idx}.pkl")
+        with open(chunk_path, "wb") as f:
+            pickle.dump(chunk, f)
         return subprocess.Popen(
-            [sys.executable, worker_script,
-             "--job-path", job_path, "--data-path", data_path,
+            [sys.executable, batched_script,
+             "--jobs-path", chunk_path, "--data-path", data_path,
              "--run-dir", str(run_dir), "--progress-dir", str(progress_dir)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-    active = {}
-    next_idx = 0
-    for _ in range(min(n_workers, len(jobs))):
-        j = jobs[next_idx]
-        active[j["label"]] = (j, launch(next_idx, j))
-        next_idx += 1
+    active_chunks: dict[int, tuple[list, subprocess.Popen]] = {}
+    next_chunk = 0
+    for _ in range(min(n_procs, len(job_chunks))):
+        chunk = job_chunks[next_chunk]
+        active_chunks[next_chunk] = (chunk, launch_chunk(next_chunk, chunk))
+        next_chunk += 1
 
     pbar = tqdm(total=len(jobs) * steps_per_job, desc="All jobs", unit="step", ncols=120)
     n_done, prev_steps = 0, 0
+    reported_jobs: set[str] = set()
 
     while n_done < len(jobs):
         time.sleep(2)
@@ -328,11 +289,14 @@ def main():
             pbar.update(cur_steps - prev_steps)
             prev_steps = cur_steps
 
-        for label in [l for l, (_, proc) in active.items() if proc.poll() is not None]:
-            job, proc = active.pop(label)
-            n_done += 1
-            rp = run_dir / f"{job['label']}.pkl"
+        for job in jobs:
+            label = job["label"]
+            if label in reported_jobs:
+                continue
+            rp = run_dir / f"{label}.pkl"
             if rp.exists():
+                reported_jobs.add(label)
+                n_done += 1
                 with open(rp, "rb") as f:
                     r = pickle.load(f)
                 thresholds = TrainConfig().reversion_thresholds
@@ -342,16 +306,25 @@ def main():
                 tqdm.write(f"  [{n_done}/{len(jobs)}] {label:30s} "
                            f"peak={r['peak_burst']:.3f} "
                            f"{first_lbl}={lv} auc={r['reversion_auc']:.0f} ({time.time()-t0:.0f}s)")
-            else:
-                se = proc.stderr.read().decode() if proc.stderr else ""
-                tqdm.write(f"  FAIL [{n_done}/{len(jobs)}]: {label} (exit {proc.returncode})")
-                if se:
-                    tqdm.write(f"    {se[:500]}")
 
-            if next_idx < len(jobs):
-                j = jobs[next_idx]
-                active[j["label"]] = (j, launch(next_idx, j))
-                next_idx += 1
+        done_chunks = [ci for ci, (_, proc) in active_chunks.items() if proc.poll() is not None]
+        for ci in done_chunks:
+            chunk, proc = active_chunks.pop(ci)
+            if proc.returncode != 0:
+                se = proc.stderr.read().decode() if proc.stderr else ""
+                for j in chunk:
+                    if j["label"] not in reported_jobs:
+                        reported_jobs.add(j["label"])
+                        n_done += 1
+                        tqdm.write(f"  FAIL [{n_done}/{len(jobs)}]: {j['label']} "
+                                   f"(chunk {ci} exit {proc.returncode})")
+                        if se:
+                            tqdm.write(f"    {se[:500]}")
+
+            if next_chunk < len(job_chunks):
+                c = job_chunks[next_chunk]
+                active_chunks[next_chunk] = (c, launch_chunk(next_chunk, c))
+                next_chunk += 1
 
     pbar.update(pbar.total - pbar.n)
     pbar.close()
@@ -371,6 +344,8 @@ def main():
         f.unlink()
     if progress_dir.exists(): progress_dir.rmdir()
     for f in run_dir.glob("_job_*.pkl"):
+        f.unlink()
+    for f in run_dir.glob("_chunk_*.pkl"):
         f.unlink()
 
     print(f"Results: {run_dir} ({len(all_results)} ok)", flush=True)

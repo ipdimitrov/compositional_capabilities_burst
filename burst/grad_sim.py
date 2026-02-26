@@ -22,43 +22,9 @@ from omegaconf import OmegaConf
 from net.nanogpt import nanoGPT
 from burst.parallel import run_job_pool
 from burst.config import PHASE_BURST, PHASE_REVERSION, parse_run_config
+from burst.gpu import gpu_cfg
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GPU_UTILIZATION_TARGET = 0.95
-
-
-CUDA_CONTEXT_OVERHEAD = 400 * 1024 * 1024
-
-
-def estimate_max_workers(cfg: dict, grad_sim_batch_size: int) -> int:
-    if DEVICE != "cuda":
-        return 1
-
-    model_cfg = OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })
-    net = nanoGPT(model_cfg).to(DEVICE)
-    net.train()
-
-    dummy = torch.randint(0, cfg["vocab_size"],
-                          (grad_sim_batch_size, cfg["context_size"]), device=DEVICE)
-    torch.cuda.reset_peak_memory_stats()
-    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        logits = net(dummy[:, :-1])
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), dummy[:, 1:].reshape(-1))
-    loss.backward()
-    peak_bytes = torch.cuda.max_memory_allocated()
-
-    del net, dummy, logits, loss
-    torch.cuda.empty_cache()
-
-    per_worker = peak_bytes + CUDA_CONTEXT_OVERHEAD
-    free_bytes, _ = torch.cuda.mem_get_info()
-    usable = free_bytes * GPU_UTILIZATION_TARGET
-    return max(1, int(usable / per_worker))
 
 
 def _flat_grad(net) -> torch.Tensor:
@@ -257,10 +223,8 @@ def main():
                 sample_cfg = r["config"]
             break
 
-    if args.n_workers is not None:
-        n_workers = args.n_workers
-    else:
-        n_workers = estimate_max_workers(sample_cfg, gs_bs)
+    n_workers = args.n_workers or gpu_cfg.gradsim_workers
+    print(f"{gpu_cfg.summary()}", flush=True)
     print(f"Grad-sim: batch_size={gs_bs}, workers={n_workers}", flush=True)
 
     jobs = []

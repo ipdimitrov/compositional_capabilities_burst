@@ -133,10 +133,15 @@ class TrainConfig:
 class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     n_seeds: int = 10
-    n_workers: int = 38
+    n_workers: int = 0
     depth: int = 3
     burst_pos: int = 3
     schedules: list[str] = field(default_factory=lambda: list(SCHEDULE_ORDER))
+
+    def __post_init__(self):
+        if self.n_workers == 0:
+            from burst.gpu import gpu_cfg
+            self.n_workers = gpu_cfg.train_workers
 
     @property
     def base_cfg(self) -> dict:
