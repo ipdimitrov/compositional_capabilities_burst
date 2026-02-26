@@ -30,6 +30,7 @@ from burst.train_utils import (
 )
 from burst.config import DATA_SEED, parse_run_config
 from burst.parallel import run_job_pool
+from burst.gpu import gpu_cfg
 
 PROBE_SEED = 1337
 
@@ -297,7 +298,7 @@ def main():
                         help="Max samples per class for activation collection")
     parser.add_argument("--seed-override", type=int, default=None,
                         help="Run only this seed across all schedules")
-    parser.add_argument("--n-workers", type=int, required=True)
+    parser.add_argument("--n-workers", type=int, default=None)
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -341,8 +342,9 @@ def main():
     if args.seed_override is not None:
         jobs_cfg = [j for j in jobs_cfg if j["seed"] == args.seed_override]
 
-    n_workers = min(len(jobs_cfg), args.n_workers)
-    print(f"\nProbing {len(jobs_cfg)} jobs on {DEVICE}, workers: {n_workers}")
+    n_workers = min(len(jobs_cfg), args.n_workers or gpu_cfg.probe_workers)
+    print(f"\n{gpu_cfg.summary()}")
+    print(f"Probing {len(jobs_cfg)} jobs on {DEVICE}, workers: {n_workers}")
     print(f"Model: {bcfg['n_layer']}L/{bcfg['n_embd']}d/{bcfg['n_head']}H")
     print(f"Mode: {'checkpoint-loading' if use_checkpoints else 'retrain'}\n")
 

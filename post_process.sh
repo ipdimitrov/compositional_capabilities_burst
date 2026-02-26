@@ -2,16 +2,16 @@
 # Shared post-processing: runs plot, probe, and next-token probes in parallel,
 # then builds the presentation PDF once all are done.
 # Sourced by run.sh and run_overnight.sh.
+#
+# Worker counts are auto-computed by burst/gpu.py — no manual tuning needed.
 
 post_process() {
     local run_dir="$1"
-    export PYTHON="${PYTHON:-.venv/bin/python}"
+    export PYTHON="${PYTHON:-/venv/main/bin/python}"
     export OPENBLAS_NUM_THREADS=1
     export OMP_NUM_THREADS=1
     export MKL_NUM_THREADS=1
-    local probe_workers="${PROBE_WORKERS:-32}"
-    local half_workers=$(( probe_workers / 2 ))
-    echo "=== post-processing ${run_dir} (probe_workers=${probe_workers}) ==="
+    echo "=== post-processing ${run_dir} ==="
 
     local T U
     T=$("${PYTHON}" -c "import json,sys; c=json.load(open('${run_dir}/config.json')); print(c['base_cfg']['total_steps'])")
@@ -29,12 +29,12 @@ post_process() {
 
     echo "  Running probes (checkpoint-loading, parallel)..."
     "${PYTHON}" burst/probe.py "${run_dir}" \
-        --checkpoint-every 50 --probe-max-samples 512 --n-workers "${half_workers}" &
+        --checkpoint-every 50 --probe-max-samples 512 &
     local pid_probe=$!
 
     echo "  Running next-token probes at steps: ${ntp_steps} ..."
     "${PYTHON}" scripts/probe_next_token_regimes.py "${run_dir}" \
-        --probe-steps ${ntp_steps} --probe-max-samples 512 --n-workers "${half_workers}" &
+        --probe-steps ${ntp_steps} --probe-max-samples 512 &
     local pid_ntp=$!
 
     wait "${pid_probe}" && "${PYTHON}" burst/plot_probes.py "${run_dir}" \

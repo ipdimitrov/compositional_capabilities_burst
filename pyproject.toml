@@ -3,9 +3,9 @@ name = "compositional-capabilities"
 version = "0.1.0"
 requires-python = "==3.10.*"
 dependencies = [
-    "torch",
-    "torchvision", 
-    "torchaudio",
+    # "torch",
+    # "torchvision", 
+    # "torchaudio",
     "numba==0.57.0",
     "omegaconf==2.3.0",
     "numpy==1.24.4",

@@ -36,6 +36,7 @@ from burst.experiment import DepthNData, build_data
 from burst.train_utils import DEVICE, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK
 from burst.config import DATA_SEED, SCHED_COLORS, SCHEDULE_ORDER, parse_run_config
 from burst.parallel import run_job_pool
+from burst.gpu import gpu_cfg
 
 """
 Dimension key:
@@ -633,7 +634,7 @@ def main():
     parser.add_argument("--probe-max-samples", type=int, required=True)
     parser.add_argument("--seed-override", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--n-workers", type=int, required=True)
+    parser.add_argument("--n-workers", type=int, default=None)
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -684,8 +685,9 @@ def main():
     use_checkpoints = ckpt_root.exists()
 
     schedules_to_run = sorted(set(j["schedule"] for j in jobs_cfg))
-    n_workers = min(len(jobs_cfg), args.n_workers)
-    print(f"\nSchedules: {schedules_to_run}")
+    n_workers = min(len(jobs_cfg), args.n_workers or gpu_cfg.probe_workers)
+    print(f"\n{gpu_cfg.summary()}")
+    print(f"Schedules: {schedules_to_run}")
     print(f"Jobs: {len(jobs_cfg)}, workers: {n_workers}")
     print(f"Layers: {n_layers + 1} (emb + {n_layers} blocks)")
     n_probes = len(PROBE_METHODS) * len(jobs_cfg) * (n_layers + 1) * 2 * len(probe_steps)

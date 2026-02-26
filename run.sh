@@ -2,7 +2,8 @@
 # Priority runs: depth-3 pos-2, depth-4 pos-2, depth-5 pos-2
 set -euo pipefail
 
-PYTHON="${PYTHON:-.venv/bin/python}"
+PYTHON="${PYTHON:-/venv/main/bin/python}"
+source "$(dirname "$0")/gpu_profile.sh"
 source "$(dirname "$0")/post_process.sh"
 
 run_experiment() {
