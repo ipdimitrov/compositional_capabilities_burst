@@ -182,10 +182,14 @@ def plot_training_dynamics(
     total_steps = result["total_steps"]
     n_layers = result["n_layers"]
 
-    interesting_tokens = []
-    for i, lbl in enumerate(token_labels):
-        if lbl in ("F3", "F2", "F1", "sp1", "o1_0", "o3_5", "sp3"):
-            interesting_tokens.append((i, lbl))
+    interesting_set = set()
+    for lbl in token_labels:
+        if lbl.startswith("F") or lbl == "sp1" or lbl.endswith("_0"):
+            interesting_set.add(lbl)
+    last_sp = [l for l in token_labels if l.startswith("sp")]
+    if last_sp:
+        interesting_set.add(last_sp[-1])
+    interesting_tokens = [(i, lbl) for i, lbl in enumerate(token_labels) if lbl in interesting_set]
     if not interesting_tokens:
         interesting_tokens = [(i, token_labels[i]) for i in range(min(5, len(token_labels)))]
 

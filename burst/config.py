@@ -146,6 +146,29 @@ class ExperimentConfig:
 DEFAULT_CONFIG = ExperimentConfig()
 
 
+def parse_run_config(cfg: dict) -> dict:
+    """Extract experiment-level fields from a saved config.json dict.
+
+    Returns dict with keys: depth, burst_pos, n_a, base_cfg.
+    Raises KeyError if any required field is missing.
+    """
+    base_cfg = cfg["base_cfg"]
+
+    depth = cfg.get("depth") or cfg.get("task_info", {}).get("depth")
+    if depth is None:
+        raise KeyError("config missing 'depth' (checked cfg.depth and cfg.task_info.depth)")
+
+    burst_pos = cfg.get("burst_pos") or cfg.get("task_info", {}).get("burst_pos")
+    if burst_pos is None:
+        raise KeyError("config missing 'burst_pos' (checked cfg.burst_pos and cfg.task_info.burst_pos)")
+
+    n_a = cfg.get("n_a") or cfg.get("task_info", {}).get("n_a")
+    if n_a is None:
+        raise KeyError("config missing 'n_a' (checked cfg.n_a and cfg.task_info.n_a)")
+
+    return {"depth": depth, "burst_pos": burst_pos, "n_a": n_a, "base_cfg": base_cfg}
+
+
 def reversion_life_key(threshold: float) -> str:
     pct = int(threshold * 100)
     return f"life_{pct}"

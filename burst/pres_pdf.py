@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 from pathlib import Path
 from burst.pres_charts import PALETTE, SCHED_SHORT, _ordered, _group, generate_all
-from burst.config import TrainConfig, reversion_life_key, reversion_life_label
+from burst.config import TrainConfig, reversion_life_key, reversion_life_label, parse_run_config
 
 
 def _img_tag(path, max_width=900) -> str:
@@ -59,20 +59,9 @@ def _chart(path, max_width=900) -> str:
     return f'<div class="chart">{tag}</div>' if tag else ""
 
 
-def _safe_get(obj, key, default=None):
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return default
-
-
 def build(rd, res, cfg, cp):
-    bcfg = cfg.get("base_cfg", cfg)
-    n_a = cfg.get("n_a", 4)
-    ti = cfg.get("task_info", {})
-    if not isinstance(ti, dict):
-        ti = {}
-    depth = cfg.get("depth", _safe_get(ti, "depth", 3))
-    burst_pos = cfg.get("burst_pos", _safe_get(ti, "burst_pos", depth))
+    rc = parse_run_config(cfg)
+    bcfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
     nl, ne, nh = bcfg["n_layer"], bcfg["n_embd"], bcfg["n_head"]
     bs, p = bcfg["batch_size"], bcfg["p_target"]
@@ -439,12 +428,14 @@ def build(rd, res, cfg, cp):
     _try(_followup, "Follow-up Ideas")
 
     def _appendix():
-        doc_len = _safe_get(ti, "doc_len", 32)
-        prompt_len = _safe_get(ti, "prompt_len", 12)
+        ti = cfg.get("task_info", {})
+        doc_len = ti.get("doc_len", "?")
+        prompt_len = ti.get("prompt_len", "?")
+        seed_base = cfg.get("seed_base", 107)
         parts.append(_section("Appendix"))
         parts.append(f"<p>Depth={depth}, burst_pos={burst_pos}. Doc={doc_len}, prompt={prompt_len}</p>")
-        parts.append(f"<p>Bijections: permutations of 0-9. [0]=id, [1-{n_a}]=other, [{n_a+1}]=b*. Data seed={cfg.get('seed_base', 999)}.</p>")
-        parts.append(f"<p>Seeds: {cfg.get('seed_base',107)}-{cfg.get('seed_base',107)+ns-1}.</p>")
+        parts.append(f"<p>Bijections: permutations of 0-9. [0]=id, [1-{n_a}]=other, [{n_a+1}]=b*. Data seed={seed_base}.</p>")
+        parts.append(f"<p>Seeds: {seed_base}-{seed_base+ns-1}.</p>")
     _try(_appendix, "Appendix")
 
     parts.append("</body></html>")

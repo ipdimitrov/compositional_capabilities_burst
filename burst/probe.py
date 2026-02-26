@@ -28,7 +28,7 @@ from burst.experiment import DepthNData, build_data
 from burst.train_utils import (
     DEVICE, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK,
 )
-from burst.config import N_A, DATA_SEED, ExperimentConfig
+from burst.config import DATA_SEED, parse_run_config
 from burst.parallel import run_job_pool
 
 PROBE_SEED = 1337
@@ -51,15 +51,14 @@ GPU_PROBE_VAL_EVERY = 10
 COLLECT_BATCH_SIZE = 512
 
 
-def get_token_position_labels(doc_len: int, seq_len: int) -> list[str]:
-    labels = ["S", "F3", "F2", "F1", "sp0"]
+def get_token_position_labels(doc_len: int, seq_len: int, depth: int) -> list[str]:
+    labels = ["S"]
+    labels += [f"F{depth - i}" for i in range(depth)]
+    labels += ["sp0"]
     labels += [f"in{i}" for i in range(seq_len)]
-    labels += ["sp1"]
-    labels += [f"o1_{i}" for i in range(seq_len)]
-    labels += ["sp2"]
-    labels += [f"o2_{i}" for i in range(seq_len)]
-    labels += ["sp3"]
-    labels += [f"o3_{i}" for i in range(seq_len)]
+    for d in range(1, depth + 1):
+        labels += [f"sp{d}"]
+        labels += [f"o{d}_{i}" for i in range(seq_len)]
     return labels[:doc_len - 1]
 
 
@@ -305,7 +304,8 @@ def main():
     with open(run_dir / "config.json") as f:
         cfg = json.load(f)
 
-    bcfg = cfg["base_cfg"]
+    rc = parse_run_config(cfg)
+    bcfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
     total_steps = bcfg["total_steps"]
     reversion_steps = bcfg["reversion_steps"]
 
@@ -313,22 +313,19 @@ def main():
     print(f"Checkpoint steps ({len(checkpoint_steps)}): "
           f"{checkpoint_steps[:8]}...{checkpoint_steps[-3:]}")
 
-    depth = cfg.get("depth", cfg.get("task_info", {}).get("depth", 3))
-    burst_pos = cfg.get("burst_pos", cfg.get("task_info", {}).get("burst_pos", depth))
-
     print(f"Rebuilding data (seed={DATA_SEED})...")
-    tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos)
+    tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
     print(f"  Other tasks: {ti['n_other_train']}  "
           f"Burst tasks: {ti['n_burst_train']}  "
           f"doc_len: {ti['doc_len']}")
 
     set_seed(DATA_SEED)
-    d = DepthNData(bcfg["n_alphabets"], bcfg["seq_len"], N_A, depth, burst_pos, DATA_SEED)
+    d = DepthNData(bcfg["n_alphabets"], bcfg["seq_len"], n_a, depth, burst_pos, DATA_SEED)
     doc_len = ti["doc_len"]
     other_docs, burst_docs = build_probe_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
     print(f"  Probe data: Other={other_docs.shape[0]} Burst={burst_docs.shape[0]}")
 
-    token_labels = get_token_position_labels(doc_len, bcfg["seq_len"])
+    token_labels = get_token_position_labels(doc_len, bcfg["seq_len"], depth)
     print(f"  Token positions ({len(token_labels)}): {token_labels[:6]}...{token_labels[-3:]}")
 
     ckpt_root = run_dir / "checkpoints"

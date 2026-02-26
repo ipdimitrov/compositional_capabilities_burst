@@ -53,5 +53,10 @@ post_process() {
     else
         echo "WARNING: some post-processing steps failed, skipping PDF"
     fi
+
+    echo "  Organizing files for download..."
+    "${PYTHON}" scripts/organize_run.py "${run_dir}" \
+        || echo "WARNING: organize_run.py failed (non-critical)"
+
     echo "=== Done: ${run_dir} ==="
 }

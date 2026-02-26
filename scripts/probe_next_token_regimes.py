@@ -34,7 +34,7 @@ from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
 from burst.experiment import DepthNData, build_data
 from burst.train_utils import DEVICE, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK
-from burst.config import N_A, DATA_SEED, SCHED_COLORS, SCHEDULE_ORDER, ExperimentConfig
+from burst.config import DATA_SEED, SCHED_COLORS, SCHEDULE_ORDER, parse_run_config
 from burst.parallel import run_job_pool
 
 """
@@ -59,16 +59,16 @@ def _ordered_schedules(scheds):
     return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
 
 
-def get_f3_positions(seq_len: int) -> list[int]:
-    """Model-input positions whose targets are the 6 f3-output digits.
+def get_final_output_positions(seq_len: int, depth: int) -> list[int]:
+    """Model-input positions whose targets are the final-output digits.
 
     Position p in model-input predicts token p+1 in the original sequence.
-    o3_0 is at original position 4+seq_len+1+seq_len+1+seq_len+1 = 26 (for seq_len=6).
-    Model-input position 25 predicts o3_0, position 30 predicts o3_5.
+    The final output block starts at: 1 + depth + (depth * (1 + seq_len)) + 1
+    Model-input position is one less than the original position.
     """
-    o3_0_original = 1 + 3 + 1 + seq_len + 1 + seq_len + 1 + seq_len + 1
-    o3_0_model_input = o3_0_original - 1
-    return list(range(o3_0_model_input, o3_0_model_input + seq_len))
+    final_out_original = 1 + depth + 1 + seq_len + (depth - 1) * (1 + seq_len) + 1
+    final_out_model_input = final_out_original - 1
+    return list(range(final_out_model_input, final_out_model_input + seq_len))
 
 
 COLLECT_BATCH_SIZE = 256
@@ -243,6 +243,7 @@ def probe_from_checkpoints_at_steps(
     n_layers: int,
     seq_len: int,
     max_samples: int,
+    depth: int,
 ) -> dict[int, dict]:
     """Load saved checkpoints and probe at each requested step."""
     cfg = job["cfg"]
@@ -262,7 +263,7 @@ def probe_from_checkpoints_at_steps(
         net = _load_checkpoint(cfg, available_ckpts[step])
         net.eval()
         results_by_step[step] = probe_all_layers(
-            net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples)
+            net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth)
         del net
         torch.cuda.empty_cache()
 
@@ -279,6 +280,7 @@ def retrain_and_probe_at_steps(
     n_layers: int,
     seq_len: int,
     max_samples: int,
+    depth: int,
 ) -> dict[int, dict]:
     """Retrain once and probe at each requested step along the way.
 
@@ -292,7 +294,7 @@ def retrain_and_probe_at_steps(
             net.eval()
             print(f"    Probing step {global_step} ({phase})...", flush=True)
             results_by_step[global_step] = probe_all_layers(
-                net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples)
+                net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth)
             net.train()
 
     net = retrain_with_callbacks(
@@ -312,9 +314,10 @@ def probe_all_layers(
     n_layers: int,
     seq_len: int,
     max_samples: int,
+    depth: int,
 ) -> dict:
     """Run both probe methods on both regimes at every layer."""
-    f3_pos = get_f3_positions(seq_len)
+    f3_pos = get_final_output_positions(seq_len, depth)
     n_embd = net.config.n_embd
     K = n_layers + 1
 
@@ -595,6 +598,7 @@ def _worker_main():
     parser.add_argument("--n-layers", type=int, required=True)
     parser.add_argument("--seq-len", type=int, required=True)
     parser.add_argument("--max-samples", type=int, required=True)
+    parser.add_argument("--depth", type=int, required=True)
     wargs = parser.parse_args()
 
     with open(wargs.job_path, "rb") as f:
@@ -606,11 +610,13 @@ def _worker_main():
     if ckpt_dir and Path(ckpt_dir).exists():
         step_results = probe_from_checkpoints_at_steps(
             job, Path(ckpt_dir), wargs.probe_steps,
-            other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples)
+            other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples,
+            wargs.depth)
     else:
         step_results = retrain_and_probe_at_steps(
             job, tp, bp, wargs.probe_steps,
-            other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples)
+            other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples,
+            wargs.depth)
 
     with open(wargs.output_path, "wb") as f:
         pickle.dump({"label": job["label"], "step_results": step_results}, f)
@@ -634,7 +640,8 @@ def main():
     with open(run_dir / "config.json") as f:
         cfg = json.load(f)
 
-    bcfg = cfg["base_cfg"]
+    rc = parse_run_config(cfg)
+    bcfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
     total_steps = bcfg["total_steps"]
     reversion_steps = bcfg["reversion_steps"]
     seq_len = bcfg["seq_len"]
@@ -651,25 +658,21 @@ def main():
                        else run_dir / "next_token_regime_probes")
     base_output_dir.mkdir(parents=True, exist_ok=True)
 
+    f3_pos = get_final_output_positions(seq_len, depth)
     print(f"Run dir: {run_dir}")
     print(f"Probe steps: {probe_steps}")
     print(f"Output: {base_output_dir}")
     print(f"Device: {DEVICE}")
     print(f"Methods: {PROBE_METHODS}")
-
-    f3_pos = get_f3_positions(seq_len)
-    print(f"F3 model-input positions: {f3_pos}")
-
-    depth = cfg.get("depth", cfg.get("task_info", {}).get("depth", 3))
-    burst_pos = cfg.get("burst_pos", cfg.get("task_info", {}).get("burst_pos", depth))
+    print(f"Final-output model-input positions: {f3_pos}")
 
     print(f"\nRebuilding data (seed={DATA_SEED})...")
-    tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos)
+    tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
     doc_len = ti["doc_len"]
     print(f"  doc_len={doc_len}  seq_len={seq_len}")
 
     set_seed(DATA_SEED)
-    d = DepthNData(bcfg["n_alphabets"], seq_len, N_A, depth, burst_pos, DATA_SEED)
+    d = DepthNData(bcfg["n_alphabets"], seq_len, n_a, depth, burst_pos, DATA_SEED)
     other_docs, burst_docs = build_regime_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
     print(f"  Other docs: {other_docs.shape}  Burst docs: {burst_docs.shape}")
 
@@ -712,7 +715,8 @@ def main():
                  "--probe-steps"] + step_args +
                 ["--n-layers", str(n_layers),
                  "--seq-len", str(seq_len),
-                 "--max-samples", str(args.probe_max_samples)])
+                 "--max-samples", str(args.probe_max_samples),
+                 "--depth", str(depth)])
 
     all_step_results: dict[int, dict] = {step: {} for step in probe_steps}
 
@@ -757,7 +761,8 @@ def main():
             "methods": PROBE_METHODS,
             "n_layers": n_layers,
             "seq_len": seq_len,
-            "f3_positions": f3_pos,
+            "final_output_positions": f3_pos,
+            "depth": depth,
         }
         torch.save(save_data, step_dir / "results.pt")
         print(f"Saved results to {step_dir / 'results.pt'}")

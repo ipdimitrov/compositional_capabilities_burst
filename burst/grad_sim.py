@@ -21,7 +21,7 @@ from omegaconf import OmegaConf
 
 from net.nanogpt import nanoGPT
 from burst.parallel import run_job_pool
-from burst.config import PHASE_BURST, PHASE_REVERSION
+from burst.config import PHASE_BURST, PHASE_REVERSION, parse_run_config
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 GPU_UTILIZATION_TARGET = 0.95
@@ -116,6 +116,8 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
             continue
         if task[0] == CLASS_BURST:
             group_docs["BURST"].append(docs)
+        elif burst_pos_idx >= len(task):
+            continue
         else:
             fn_at_bp = task[burst_pos_idx]
             key = f"O_F{fn_at_bp}"
@@ -227,15 +229,11 @@ def main():
     with open(run_dir / "config.json") as f:
         run_cfg = json.load(f)
 
-    base_cfg = run_cfg["base_cfg"]
+    rc = parse_run_config(run_cfg)
+    base_cfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
     gs_bs = args.grad_sim_batch_size or base_cfg.get("grad_sim_batch_size", 2048)
     T = base_cfg["total_steps"]
     U = base_cfg["reversion_steps"]
-
-    task_info = run_cfg.get("task_info", {})
-    depth = run_cfg.get("depth", task_info.get("depth", 3))
-    burst_pos = run_cfg.get("burst_pos", task_info.get("burst_pos", depth))
-    n_a = run_cfg.get("n_a", task_info.get("n_a", 4))
 
     pairwise_global_steps = {0, T // 2, T - 1, T + U // 2, T + U - 1}
 
