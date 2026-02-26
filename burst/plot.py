@@ -19,6 +19,7 @@ from burst.config import (
     PHASE_FOUNDATION, PHASE_BURST, PHASE_REVERSION,
     ordered_schedules, sched_sort_key,
     TrainConfig, reversion_life_key, reversion_life_label,
+    parse_run_config,
 )
 
 W, H = 297, 210
@@ -100,15 +101,14 @@ def plot_lr_schedule(cfg, plots_dir):
     plt.close(fig)
 
 
-def plot_per_run(result, plots_dir, run_cfg=None):
+def plot_per_run(result, plots_dir, run_cfg):
     log, sched, seed, cfg = result["log"], result["schedule"], result["seed"], result["config"]
     steps = np.array(log["step"])
     loss = np.array(log["loss"])
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p = cfg["batch_size"], cfg["p_target"]
 
-    _ti = (run_cfg or {}).get("task_info", {})
-    _depth = (run_cfg or {}).get("depth", _ti.get("depth", 3))
+    _depth = run_cfg["depth"]
 
     train_m = np.array([ph == "burst" for ph in log["phase"]])
     reversion_m = np.array([ph == "reversion" for ph in log["phase"]])
@@ -479,8 +479,8 @@ class ReportPDF(FPDF):
 
 def make_report(run_dir, results, cfg, per_run_fnames):
     plots_dir = run_dir / "plots"
-    bcfg = cfg.get("base_cfg", cfg)
-    n_a = cfg.get("n_a", 4)
+    rc = parse_run_config(cfg)
+    bcfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
 
     n_layer = bcfg['n_layer']
     n_embd = bcfg['n_embd']
@@ -489,8 +489,6 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     reversion_steps = bcfg['reversion_steps']
     batch_size = bcfg['batch_size']
     p_target = bcfg['p_target']
-    depth = cfg.get("depth", cfg.get("task_info", {}).get("depth", 3))
-    burst_pos = cfg.get("burst_pos", cfg.get("task_info", {}).get("burst_pos", depth))
 
     pdf = ReportPDF(orientation="L", format="A4")
     pdf._header_title = f"Depth-{depth} Bijection Burst (pos {burst_pos})  |  Free Generation"
@@ -516,14 +514,14 @@ def make_report(run_dir, results, cfg, per_run_fnames):
 
     pdf.sub("The Task")
     pdf.body(
-        "The model learns to apply chains of 3 functions to a sequence of numbers. "
+        f"The model learns to apply chains of {depth} functions to a sequence of numbers. "
         "Each function is a bijection -- a lookup table that remaps each digit "
-        "(0-9) to a different digit. Every sequence has the same format: three "
+        f"(0-9) to a different digit. Every sequence has the same format: {depth} "
         "function slots followed by the input, then the result after each function.")
 
     pdf.sub("Complex Tasks")
     pdf.body(
-        "Complex (compositional) tasks: all three slots have real functions. "
+        f"Complex (compositional) tasks: all {depth} slots have real functions. "
         "The model must learn to compose multiple bijections together to produce "
         "the correct output sequence.")
 
@@ -1024,7 +1022,7 @@ def main():
     plot_overlay_all_schedules(results, plots_dir, sched_data=sched_data)
 
     print("LR schedule...")
-    plot_lr_schedule(cfg.get("base_cfg", cfg), plots_dir)
+    plot_lr_schedule(cfg["base_cfg"], plots_dir)
 
     print("Task distributions...")
     plot_task_distributions(run_dir)
