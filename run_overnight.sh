@@ -3,7 +3,7 @@
 # Excludes 2/3, 2/4, 2/5 which are in run.sh
 set -euo pipefail
 
-PYTHON="${PYTHON:-/venv/main/bin/python}"
+PYTHON="${PYTHON:-$(dirname "$0")/.venv/bin/python}"
 source "$(dirname "$0")/gpu_profile.sh"
 source "$(dirname "$0")/post_process.sh"
 
