@@ -183,11 +183,15 @@ def main():
     parser.add_argument("--schedules", nargs="+", default=None)
     parser.add_argument("--n-seeds", type=int, default=None)
     parser.add_argument("--n-workers", type=int, default=None)
+    parser.add_argument("--run-probes", action="store_true", default=False)
+    parser.add_argument("--run-next-token-probes", action="store_true", default=False)
     args = parser.parse_args()
 
     exp = ExperimentConfig(
         depth=args.depth,
         burst_pos=args.burst_pos,
+        run_probes=args.run_probes,
+        run_next_token_probes=args.run_next_token_probes,
     )
     if args.schedules:
         exp.schedules = args.schedules
@@ -234,6 +238,8 @@ def main():
             "base_cfg": base_cfg, "n_a": n_a, "seed_base": SEED_BASE,
             "n_seeds": exp.n_seeds, "schedules": exp.schedules, "n_jobs": len(jobs),
             "task_info": ti, "depth": exp.depth, "burst_pos": exp.burst_pos,
+            "run_probes": exp.run_probes,
+            "run_next_token_probes": exp.run_next_token_probes,
             "jobs": [{"label": j["label"], "schedule": j["schedule"],
                       "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)

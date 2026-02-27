@@ -21,25 +21,43 @@ post_process() {
     local q3=$(( 3 * T / 4 ))
     local ntp_steps="${q1} ${q2} ${q3} ${T}"
 
+    local run_probes run_ntp
+    run_probes=$("${PYTHON}" -c "import json; c=json.load(open('${run_dir}/config.json')); print(c.get('run_probes', False))")
+    run_ntp=$("${PYTHON}" -c "import json; c=json.load(open('${run_dir}/config.json')); print(c.get('run_next_token_probes', False))")
+
     local fail=0
 
     echo "  Running plots (background)..."
     "${PYTHON}" burst/plot.py "${run_dir}" &
     local pid_plot=$!
 
-    echo "  Running probes (checkpoint-loading, parallel)..."
-    "${PYTHON}" burst/probe.py "${run_dir}" \
-        --checkpoint-every 50 --probe-max-samples 512 &
-    local pid_probe=$!
+    local pid_probe=""
+    if [ "${run_probes}" = "True" ]; then
+        echo "  Running probes (checkpoint-loading, parallel)..."
+        "${PYTHON}" burst/probe.py "${run_dir}" \
+            --checkpoint-every 50 --probe-max-samples 512 &
+        pid_probe=$!
+    else
+        echo "  Skipping probes (run_probes=False)"
+    fi
 
-    echo "  Running next-token probes at steps: ${ntp_steps} ..."
-    "${PYTHON}" scripts/probe_next_token_regimes.py "${run_dir}" \
-        --probe-steps ${ntp_steps} --probe-max-samples 512 &
-    local pid_ntp=$!
+    local pid_ntp=""
+    if [ "${run_ntp}" = "True" ]; then
+        echo "  Running next-token probes at steps: ${ntp_steps} ..."
+        "${PYTHON}" scripts/probe_next_token_regimes.py "${run_dir}" \
+            --probe-steps ${ntp_steps} --probe-max-samples 512 &
+        pid_ntp=$!
+    else
+        echo "  Skipping next-token probes (run_next_token_probes=False)"
+    fi
 
-    wait "${pid_probe}" && "${PYTHON}" burst/plot_probes.py "${run_dir}" \
-        || { echo "FAIL: probe.py / plot_probes.py"; fail=1; }
-    wait "${pid_ntp}" || { echo "FAIL: probe_next_token_regimes.py"; fail=1; }
+    if [ -n "${pid_probe}" ]; then
+        wait "${pid_probe}" && "${PYTHON}" burst/plot_probes.py "${run_dir}" \
+            || { echo "FAIL: probe.py / plot_probes.py"; fail=1; }
+    fi
+    if [ -n "${pid_ntp}" ]; then
+        wait "${pid_ntp}" || { echo "FAIL: probe_next_token_regimes.py"; fail=1; }
+    fi
 
     echo "  Running grad-sim..."
     "${PYTHON}" burst/grad_sim.py "${run_dir}" \

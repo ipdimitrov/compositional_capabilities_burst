@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import torch
 
-CUDA_CONTEXT_MB = 400
+CUDA_CONTEXT_MB = 650
 MODEL_PLUS_ACTS_MB = 200
 GRADSIM_WORKER_MB = 600
 
@@ -97,13 +97,12 @@ class GpuConfig:
 
         Too many processes = SM contention + context overhead.
         Too few = GPU idles between sequential jobs within a process.
-        Sweet spot scales with both VRAM and compute.
         """
         if self.vram_gb == 0:
             return 1
         per_proc_mb = CUDA_CONTEXT_MB + MODEL_PLUS_ACTS_MB
         by_vram = self._cap_by_vram(per_proc_mb)
-        by_compute = max(4, self.tflops_bf16 // 2)
+        by_compute = max(4, min(64, int(math.sqrt(self.tflops_bf16))))
         return min(by_vram, by_compute)
 
     @property
@@ -113,7 +112,7 @@ class GpuConfig:
             return 1
         per_proc_mb = CUDA_CONTEXT_MB + MODEL_PLUS_ACTS_MB * 2
         by_vram = self._cap_by_vram(per_proc_mb)
-        by_compute = max(4, self.tflops_bf16 // 3)
+        by_compute = max(4, min(48, int(math.sqrt(self.tflops_bf16) * 0.75)))
         return min(by_vram, by_compute)
 
     @property
@@ -126,7 +125,7 @@ class GpuConfig:
             return 1
         per_proc_mb = CUDA_CONTEXT_MB + GRADSIM_WORKER_MB
         by_vram = self._cap_by_vram(per_proc_mb)
-        by_compute = max(2, self.tflops_bf16 // 5)
+        by_compute = max(2, min(32, int(math.sqrt(self.tflops_bf16) * 0.5)))
         return min(by_vram, by_compute)
 
     def summary(self) -> str:

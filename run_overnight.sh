@@ -20,16 +20,19 @@ run_experiment() {
 }
 
 # depth=3: positions 1/3 and 3/3
-run_experiment 3 1
-run_experiment 3 3
-
-# depth=4: positions 1/4, 3/4, 4/4
-run_experiment 4 1
-run_experiment 4 3
-run_experiment 4 4
+# run_experiment 3 1
+# run_experiment 3 3
 
 # depth=5: positions 1/5, 3/5, 4/5, 5/5
 run_experiment 5 1
+run_experiment 5 2
 run_experiment 5 3
 run_experiment 5 4
 run_experiment 5 5
+
+# depth=4: positions 1/4, 3/4, 4/4
+# run_experiment 4 1
+# run_experiment 4 2
+run_experiment 4 3
+run_experiment 4 4
+
