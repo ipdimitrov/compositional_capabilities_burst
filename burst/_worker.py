@@ -291,7 +291,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     peak_burst = max(burst_accs) if burst_accs else 0
     reversion_end_burst = reversion_accs[-1] if reversion_accs else peak_burst
-    reversion_auc = float(np.trapz(reversion_accs, reversion_steps)) if len(reversion_accs) > 1 else 0.0
+    reversion_auc = float(np.trapezoid(reversion_accs, reversion_steps)) if len(reversion_accs) > 1 else 0.0
 
     thresholds = TrainConfig().reversion_thresholds
     life_times: dict[str, int] = {}

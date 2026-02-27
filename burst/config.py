@@ -83,7 +83,7 @@ CURVE_STYLE = {
 # ---------------------------------------------------------------------------
 # Data parameters
 # ---------------------------------------------------------------------------
-N_A = 4
+N_A = 3
 SEED_BASE = 107
 DATA_SEED = 999
 
@@ -115,7 +115,7 @@ class TrainConfig:
     total_steps: int = 500
     p_target: float = 0.10
     reversion_steps: int = 500
-    eval_every: int = 10
+    eval_every: int = 25
     reversion_thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70)
 
     n_docs_per_task: int = 500
@@ -137,6 +137,8 @@ class ExperimentConfig:
     depth: int = 3
     burst_pos: int = 3
     schedules: list[str] = field(default_factory=lambda: list(SCHEDULE_ORDER))
+    run_probes: bool = False
+    run_next_token_probes: bool = False
 
     def __post_init__(self):
         if self.n_workers == 0:
