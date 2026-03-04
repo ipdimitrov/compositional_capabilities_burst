@@ -185,6 +185,7 @@ def main():
     parser.add_argument("--n-workers", type=int, default=None)
     parser.add_argument("--run-probes", action="store_true", default=False)
     parser.add_argument("--run-next-token-probes", action="store_true", default=False)
+    parser.add_argument("--run-adl", action="store_true", default=False)
     args = parser.parse_args()
 
     exp = ExperimentConfig(
@@ -192,6 +193,7 @@ def main():
         burst_pos=args.burst_pos,
         run_probes=args.run_probes,
         run_next_token_probes=args.run_next_token_probes,
+        run_adl=args.run_adl,
     )
     if args.schedules:
         exp.schedules = args.schedules
@@ -240,6 +242,7 @@ def main():
             "task_info": ti, "depth": exp.depth, "burst_pos": exp.burst_pos,
             "run_probes": exp.run_probes,
             "run_next_token_probes": exp.run_next_token_probes,
+            "run_adl": exp.run_adl,
             "jobs": [{"label": j["label"], "schedule": j["schedule"],
                       "seed": j["seed"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
@@ -249,13 +252,13 @@ def main():
     print(f"  {gpu_cfg.summary()}", flush=True)
     print(f"  Layout: {n_procs} processes x ~{jobs_per_proc} jobs/proc", flush=True)
 
-    steps_per_job = base_cfg["total_steps"] + base_cfg["reversion_steps"]
+    steps_per_job = base_cfg["pre_burst_steps"] + base_cfg["total_steps"] + base_cfg["reversion_steps"]
 
     tc = exp.train
     print(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H", flush=True)
     print(f"Jobs: {len(jobs)}, parallel processes: {n_procs}, "
           f"jobs/process: ~{jobs_per_proc}", flush=True)
-    print(f"Steps/job: {tc.total_steps} train + {tc.reversion_steps} reversion", flush=True)
+    print(f"Steps/job: {tc.pre_burst_steps} all-but-special + {tc.total_steps} special + {tc.reversion_steps} all-but-special", flush=True)
     print(f"Schedules: {exp.schedules}\n", flush=True)
 
     batched_script = str(Path(__file__).parent / "_worker_batched.py")

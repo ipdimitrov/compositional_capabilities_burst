@@ -9,13 +9,14 @@ from dataclasses import dataclass, field
 import colorsys
 
 # ---------------------------------------------------------------------------
-# Phase names (the 5 stages of the experiment)
+# Phase names (three-phase experiment)
 # ---------------------------------------------------------------------------
-PHASE_FOUNDATION = "foundation"
-PHASE_BURST = "burst"
-PHASE_REVERSION = "reversion"
-PHASE_UNIFORM = "uniform"
-PHASE_NAMES = [PHASE_FOUNDATION, PHASE_BURST, PHASE_REVERSION, PHASE_UNIFORM]
+PHASE_PRE_BURST = "all-but-special"
+PHASE_BURST = "special"
+PHASE_REVERSION = "all-but-special"
+PHASE_NAMES = [PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION]
+
+PHASE_FOUNDATION = PHASE_PRE_BURST
 
 # ---------------------------------------------------------------------------
 # Class names
@@ -77,7 +78,7 @@ EVAL_KEYS = ["acc_other", "acc_burst"]
 
 CURVE_STYLE = {
     "acc_other": {"color": "#2196F3", "ls": "-", "label": "Other Classes"},
-    "acc_burst": {"color": "#E91E63", "ls": "-", "label": "Burst Class"},
+    "acc_burst": {"color": "#E91E63", "ls": "-", "label": "Special Class"},
 }
 
 # ---------------------------------------------------------------------------
@@ -112,6 +113,7 @@ class TrainConfig:
 
     batch_size: int = 128
     grad_sim_batch_size: int = 2048
+    pre_burst_steps: int = 500
     total_steps: int = 500
     p_target: float = 0.10
     reversion_steps: int = 500
@@ -139,6 +141,7 @@ class ExperimentConfig:
     schedules: list[str] = field(default_factory=lambda: list(SCHEDULE_ORDER))
     run_probes: bool = False
     run_next_token_probes: bool = False
+    run_adl: bool = True
 
     def __post_init__(self):
         if self.n_workers == 0:

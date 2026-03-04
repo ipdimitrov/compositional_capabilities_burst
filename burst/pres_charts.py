@@ -71,10 +71,16 @@ def _style(ax, xl="", yl="", t=""):
     ax.spines["right"].set_visible(False)
 
 
+def _get_P(cfg):
+    bcfg = cfg.get("base_cfg", cfg)
+    return bcfg.get("pre_burst_steps", 0)
+
+
 def schedule_bars(pdir, results, cfg):
     bcfg = cfg.get("base_cfg", cfg)
+    P = bcfg.get("pre_burst_steps", 0)
     T, U, bs, p = bcfg["total_steps"], bcfg["reversion_steps"], bcfg["batch_size"], bcfg["p_target"]
-    total = T + U
+    total = P + T + U
     scheds = _ordered(set(r["schedule"] for r in results))
     n = len(scheds)
     fig, axes = plt.subplots(n, 1, figsize=(14, 1.8 * n), sharex=True)
@@ -85,9 +91,11 @@ def schedule_bars(pdir, results, cfg):
         fracs = np.zeros(total)
         for s in range(T):
             np.random.seed(107 * 10000 + s)
-            fracs[s] = n_target_for_step(s, T, sched, p, bs) / bs
+            fracs[P + s] = n_target_for_step(s, T, sched, p, bs) / bs
         ax.fill_between(range(total), fracs, color=PALETTE[sched], alpha=0.7)
-        ax.axvline(T, color="black", lw=2, ls="--")
+        if P > 0:
+            ax.axvline(P, color="black", lw=2, ls="--")
+        ax.axvline(P + T, color="black", lw=2, ls="--")
         ax.set_ylim(0, 1.05)
         ax.set_xlim(0, total)
         ax.set_ylabel(SCHED_SHORT[sched], fontsize=9, fontweight="bold",
@@ -99,10 +107,13 @@ def schedule_bars(pdir, results, cfg):
     axes[-1].set_xlabel("Global Step", fontsize=12, fontweight="bold")
     axes[0].set_title("Training Schedules: Fraction of Burst Data per Step",
                       fontsize=14, fontweight="bold", pad=10)
-    axes[0].annotate("FOUNDATION + BURST", xy=(T * 0.5, 1.15), fontsize=11, color="gray",
+    if P > 0:
+        axes[0].annotate("ALL-BUT-SPECIAL", xy=(P * 0.5, 1.15), fontsize=10, color="gray",
+                         fontweight="bold", ha="center", annotation_clip=False)
+    axes[0].annotate("SPECIAL", xy=(P + T * 0.5, 1.15), fontsize=11, color="gray",
                      fontweight="bold", ha="center", annotation_clip=False)
-    axes[0].annotate("REVERSION (Other Classes only)", xy=(T + U * 0.5, 1.15), fontsize=11,
-                     color="gray", fontweight="bold", ha="center", annotation_clip=False)
+    axes[0].annotate("ALL-BUT-SPECIAL", xy=(P + T + U * 0.5, 1.15), fontsize=10, color="gray",
+                     fontweight="bold", ha="center", annotation_clip=False)
     fig.tight_layout(rect=[0.15, 0, 1, 0.97])
     p_ = pdir / "schedule_bars.png"
     fig.savefig(p_, dpi=200, bbox_inches="tight")
@@ -110,8 +121,10 @@ def schedule_bars(pdir, results, cfg):
     return p_
 
 
-def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left", groups=None):
+def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left",
+            groups=None, align="absolute"):
     bcfg = cfg.get("base_cfg", cfg)
+    P = bcfg.get("pre_burst_steps", 0)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
     if groups is None:
         groups = _group(results)
@@ -123,16 +136,49 @@ def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left", groups
         m = np.mean(vals, axis=0)
         n_s = len(runs)
         ci = 1.96 * np.std(vals, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals, axis=0)
-        ax.plot(steps, m, color=PALETTE[sched], lw=2.5, label=SCHED_SHORT[sched])
-        ax.fill_between(steps, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
-    ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
-    ax.text(T * 0.5, -0.12, "FOUNDATION+BURST", ha="center", fontsize=12, color="gray",
-            fontweight="bold", transform=ax.get_xaxis_transform())
-    ax.text(T + U * 0.5, -0.12, "REVERSION", ha="center", fontsize=12, color="gray",
-            fontweight="bold", transform=ax.get_xaxis_transform())
-    ax.set_xlim(0, T + U)
+        if align == "start":
+            x = steps - P
+        elif align == "end":
+            x = steps - (P + T)
+        else:
+            x = steps
+        ax.plot(x, m, color=PALETTE[sched], lw=2.5, label=SCHED_SHORT[sched])
+        ax.fill_between(x, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
+
+    if align == "start":
+        ax.axvline(0, color="black", ls="--", lw=2, alpha=0.6)
+        ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
+        ax.text(T * 0.5, -0.12, "SPECIAL", ha="center", fontsize=12, color="gray",
+                fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.text(T + U * 0.5, -0.12, "ALL-BUT-SPECIAL", ha="center", fontsize=12, color="gray",
+                fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.set_xlim(0, T + U)
+        xl = "Steps from Burst Start"
+    elif align == "end":
+        ax.axvline(-T, color="black", ls="--", lw=2, alpha=0.6)
+        ax.axvline(0, color="black", ls="--", lw=2, alpha=0.6)
+        ax.text(-T * 0.5, -0.12, "SPECIAL", ha="center", fontsize=12, color="gray",
+                fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.text(U * 0.5, -0.12, "ALL-BUT-SPECIAL", ha="center", fontsize=12, color="gray",
+                fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.set_xlim(-T, U)
+        xl = "Steps from Burst End"
+    else:
+        if P > 0:
+            ax.axvline(P, color="black", ls="--", lw=2, alpha=0.6)
+        ax.axvline(P + T, color="black", ls="--", lw=2, alpha=0.6)
+        if P > 0:
+            ax.text(P * 0.5, -0.12, "ALL-BUT-SPECIAL", ha="center", fontsize=11, color="gray",
+                    fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.text(P + T * 0.5, -0.12, "SPECIAL", ha="center", fontsize=12, color="gray",
+                fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.text(P + T + U * 0.5, -0.12, "ALL-BUT-SPECIAL", ha="center", fontsize=12, color="gray",
+                fontweight="bold", transform=ax.get_xaxis_transform())
+        ax.set_xlim(0, P + T + U)
+        xl = "Step"
+
     ax.set_ylim(-0.05, 1.05)
-    _style(ax, "Step", yl, title)
+    _style(ax, xl, yl, title)
     ax.legend(fontsize=11, loc=loc, framealpha=0.9, edgecolor="gray")
     fig.tight_layout()
     p_ = pdir / fname
@@ -225,18 +271,24 @@ def auc_diff(pdir, results, cfg, groups=None):
 
 def lr_schedule(pdir, cfg):
     bcfg = cfg.get("base_cfg", cfg)
+    P = bcfg.get("pre_burst_steps", 0)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
-    total = T + U
+    total = P + T + U
     steps, lrs = _compute_lr(bcfg)
     fig, ax = plt.subplots(figsize=(14, 4))
     ax.plot(steps, lrs, color="#1565C0", lw=2.5)
-    ax.axvline(T, color="black", lw=2, ls="--")
+    if P > 0:
+        ax.axvline(P, color="black", lw=2, ls="--")
+    ax.axvline(P + T, color="black", lw=2, ls="--")
     ax.set_xlim(0, total)
     _style(ax, "Global Step", "Learning Rate",
            "Learning Rate Schedule (cosine decay with linear warmup)")
-    ax.text(T * 0.5, ax.get_ylim()[1] * 0.92, "TRAIN", ha="center", fontsize=11,
+    if P > 0:
+        ax.text(P * 0.5, ax.get_ylim()[1] * 0.92, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
+                color="gray", fontweight="bold")
+    ax.text(P + T * 0.5, ax.get_ylim()[1] * 0.92, "SPECIAL", ha="center", fontsize=11,
             color="gray", fontweight="bold")
-    ax.text(T + U * 0.5, ax.get_ylim()[1] * 0.92, "REVERSION", ha="center", fontsize=11,
+    ax.text(P + T + U * 0.5, ax.get_ylim()[1] * 0.92, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
             color="gray", fontweight="bold")
     fig.tight_layout()
     p_ = pdir / "lr_schedule.png"
@@ -245,9 +297,11 @@ def lr_schedule(pdir, cfg):
     return p_
 
 
-def reversion_zoom(pdir, results, cfg, groups=None):
+def reversion_zoom(pdir, results, cfg, groups=None, fname="reversion_zoom.png"):
     bcfg = cfg.get("base_cfg", cfg)
+    P = bcfg.get("pre_burst_steps", 0)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    burst_end = P + T
     if groups is None:
         groups = _group(results)
     fig, ax = plt.subplots(figsize=(14, 7))
@@ -256,8 +310,8 @@ def reversion_zoom(pdir, results, cfg, groups=None):
         runs = groups[sched]
         steps = np.array(runs[0]["log"]["step"])
         vals = np.array([np.array(r["log"][burst_log_key]) for r in runs])
-        mask = steps >= T
-        reversion_steps_arr = steps[mask] - T
+        mask = steps >= burst_end
+        reversion_steps_arr = steps[mask] - burst_end
         uv = vals[:, mask]
         m = np.mean(uv, axis=0)
         n_s = len(runs)
@@ -270,11 +324,12 @@ def reversion_zoom(pdir, results, cfg, groups=None):
         ax.text(U * 0.95, t + 0.015, f"{int(t*100)}%", fontsize=7, color="gray", ha="right")
     ax.set_xlim(0, U)
     ax.set_ylim(-0.05, 1.05)
-    _style(ax, "Reversion Steps (after Burst Class removal)", "Burst Class Accuracy",
-           "Forgetting Dynamics: Burst Class Accuracy During Reversion\n(mean +/- 95% CI, n=5 seeds)")
+    ns = len(next(iter(groups.values())))
+    _style(ax, "Reversion Steps (after Special Class removal)", "Special Class Accuracy",
+           f"Forgetting Dynamics: Special Class Accuracy During Reversion\n(mean +/- 95% CI, n={ns} seeds)")
     ax.legend(fontsize=11, loc="upper right", framealpha=0.9, edgecolor="gray")
     fig.tight_layout()
-    p_ = pdir / "reversion_zoom.png"
+    p_ = pdir / fname
     fig.savefig(p_, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return p_
@@ -290,7 +345,7 @@ def summary_table(pdir, results, cfg, groups=None):
     fig_w = max(14, 6 + 2.5 * len(thresholds))
     fig, ax = plt.subplots(figsize=(fig_w, 4))
     ax.axis("off")
-    cols = ["Schedule", "Peak Burst\n(mean +/- CI)"]
+    cols = ["Schedule", "Peak Special\n(mean +/- CI)"]
     for t in thresholds:
         cols.append(f"{reversion_life_label(t)}\n(mean +/- CI)")
     cols += ["Reversion AUC\n(mean +/- CI)", "Other Classes Acc\n(mean +/- CI)"]
@@ -335,8 +390,9 @@ def summary_table(pdir, results, cfg, groups=None):
     return p_
 
 
-def per_sched(pdir, results, cfg, groups=None):
+def per_sched(pdir, results, cfg, groups=None, align="absolute"):
     bcfg = cfg.get("base_cfg", cfg)
+    P = bcfg.get("pre_burst_steps", 0)
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
     if groups is None:
         groups = _group(results)
@@ -346,23 +402,41 @@ def per_sched(pdir, results, cfg, groups=None):
         steps = np.array(runs[0]["log"]["step"])
         fig, ax = plt.subplots(figsize=(14, 6))
         for k, (c, lbl) in [("acc_other", ("#1565C0", "Other Classes")),
-                              ("acc_burst", ("#D32F2F", "Burst Class"))]:
+                              ("acc_burst", ("#D32F2F", "Special Class"))]:
             log_key = k
             vals = np.array([np.array(r["log"][log_key]) for r in runs])
             m = np.mean(vals, axis=0)
             n_s = len(runs)
             ci = 1.96 * np.std(vals, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals, axis=0)
-            ax.plot(steps, m, color=c, lw=2.5, label=lbl)
-            ax.fill_between(steps, m - ci, m + ci, color=c, alpha=0.15)
-        ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
-        ax.set_xlim(0, T + U)
+            if align == "start":
+                xp = steps - P
+            elif align == "end":
+                xp = steps - (P + T)
+            else:
+                xp = steps
+            ax.plot(xp, m, color=c, lw=2.5, label=lbl)
+            ax.fill_between(xp, m - ci, m + ci, color=c, alpha=0.15)
+        if align == "start":
+            ax.axvline(0, color="black", ls="--", lw=2, alpha=0.6)
+            ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
+            ax.set_xlim(0, T + U)
+        elif align == "end":
+            ax.axvline(-T, color="black", ls="--", lw=2, alpha=0.6)
+            ax.axvline(0, color="black", ls="--", lw=2, alpha=0.6)
+            ax.set_xlim(-T, U)
+        else:
+            if P > 0:
+                ax.axvline(P, color="black", ls="--", lw=2, alpha=0.6)
+            ax.axvline(P + T, color="black", ls="--", lw=2, alpha=0.6)
+            ax.set_xlim(0, P + T + U)
         ax.set_ylim(-0.05, 1.05)
         n_s = len(runs)
         _style(ax, "Step", "Accuracy (free generation)",
-               f"{SCHED_SHORT[sched]}: Other Classes vs Burst Class (mean +/- 95% CI, n={n_s})")
+               f"{SCHED_SHORT[sched]}: Other Classes vs Special Class (mean +/- 95% CI, n={n_s})")
         ax.legend(fontsize=12, loc="center left", framealpha=0.9)
         fig.tight_layout()
-        p_ = pdir / f"per_sched_{sched}.png"
+        suffix = f"_{align}" if align != "absolute" else ""
+        p_ = pdir / f"per_sched_{sched}{suffix}.png"
         fig.savefig(p_, dpi=200, bbox_inches="tight")
         plt.close(fig)
         paths.append(p_)
@@ -414,13 +488,13 @@ def grad_cosine_sim_overlay(pdir, cfg, gs_records):
 
     ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
     ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
-    ax.text(T * 0.5, -0.12, "FOUNDATION+BURST", ha="center", fontsize=11, color="gray",
+    ax.text(T * 0.5, -0.12, "SPECIAL", ha="center", fontsize=11, color="gray",
             fontweight="bold", transform=ax.get_xaxis_transform())
-    ax.text(T + U * 0.5, -0.12, "REVERSION", ha="center", fontsize=11, color="gray",
+    ax.text(T + U * 0.5, -0.12, "ALL-BUT-SPECIAL", ha="center", fontsize=11, color="gray",
             fontweight="bold", transform=ax.get_xaxis_transform())
     ax.set_xlim(0, T + U)
     _style(ax, "Step", "Cosine Similarity",
-           "Gradient Cosine Similarity: Burst Class vs Other Classes\n(mean +/- 95% CI)")
+           "Gradient Cosine Similarity: Special Class vs Other Classes\n(mean +/- 95% CI)")
     ax.legend(fontsize=10, loc="best", framealpha=0.9, edgecolor="gray")
     fig.tight_layout()
     p_ = pdir / "grad_cosine_burst_vs_other.png"
@@ -470,7 +544,7 @@ def grad_cosine_sim_by_schedule(pdir, cfg, gs_records):
     ax.set_xticks(xs)
     ax.set_xticklabels([SCHED_SHORT[s] for s in scheds], fontsize=10, fontweight="bold")
     _style(ax, "", "Cosine Similarity (end of burst phase)",
-           "Gradient Cosine Similarity at End of Burst Phase\nBurst Class vs Other Classes (mean +/- 95% CI)")
+           "Gradient Cosine Similarity at End of Burst Phase\nSpecial Class vs Other Classes (mean +/- 95% CI)")
     fig.tight_layout()
     p_ = pdir / "grad_cosine_end_burst_bars.png"
     fig.savefig(p_, dpi=200, bbox_inches="tight")
@@ -539,7 +613,7 @@ def grad_cosine_rate_of_change(pdir, cfg, gs_records):
     ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
     ax.set_xlim(0, T + U)
     _style(ax, "Step", "d(Cosine Similarity)/d(Step)",
-           "Rate of Change of Gradient Cosine Similarity\nBurst vs Other Classes")
+           "Rate of Change of Gradient Cosine Similarity\nSpecial vs Other Classes")
     ax.legend(fontsize=10, loc="best", framealpha=0.9, edgecolor="gray")
     fig.tight_layout()
     p_ = pdir / "grad_cosine_rate_of_change.png"
@@ -963,7 +1037,7 @@ def pairwise_grad_cosine_evolution_by_metric(pdir, cfg, gs_records):
         ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.4)
         ax.text(T * 0.5, -0.12, "BURST", ha="center", fontsize=11, color="gray",
                 fontweight="bold", transform=ax.get_xaxis_transform())
-        ax.text(T + U * 0.5, -0.12, "REVERSION", ha="center", fontsize=11, color="gray",
+        ax.text(T + U * 0.5, -0.12, "ALL-BUT-SPECIAL", ha="center", fontsize=11, color="gray",
                 fontweight="bold", transform=ax.get_xaxis_transform())
         ax.set_xlim(0, T + U)
         _style(ax, "Step", "Cosine Similarity",
@@ -1112,7 +1186,7 @@ def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
             ax.set_xlabel("Token Position", fontsize=10)
             ax.set_ylabel("Layer", fontsize=10)
             ax.set_title(f"{SCHED_SHORT.get(sched, sched)} — step {actual_step} ({phase})\n"
-                         f"Probe accuracy (Other vs Burst), mean over {n_s} seeds",
+                         f"Probe accuracy (Other vs Special), mean over {n_s} seeds",
                          fontsize=12, fontweight="bold")
             for k in range(K):
                 for t in range(Tpos):
@@ -1121,7 +1195,7 @@ def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
                     ax.text(t, k, f"{val:.2f}", ha="center", va="center",
                             fontsize=5, color=color)
             cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-            cbar.set_label("Probe Accuracy (Other vs Burst)", fontsize=9)
+            cbar.set_label("Probe Accuracy (Other vs Special)", fontsize=9)
             fig.tight_layout()
             p_ = pdir / f"probe_heatmap_{sched}_step{actual_step}.png"
             fig.savefig(p_, dpi=150, bbox_inches="tight")
@@ -1176,7 +1250,7 @@ def probe_dynamics_aggregated(pdir, probe_results, meta, cfg):
     ax.axhline(0.5, color="gray", ls=":", alpha=0.3)
     ns = len(set(r["seed"] for r in probe_results))
     _style(ax, "Step", "Mean Probe Accuracy (all layers & tokens)",
-           f"Probe Accuracy Over Training (Other vs Burst)\n(mean +/- 95% CI, n={ns} seeds)")
+           f"Probe Accuracy Over Training (Other vs Special)\n(mean +/- 95% CI, n={ns} seeds)")
     ax.set_ylim(0.35, 1.05)
     ax.legend(fontsize=10, loc="best", framealpha=0.9, edgecolor="gray")
     fig.tight_layout()
@@ -1256,6 +1330,592 @@ def probe_layer_schedule_heatmap(pdir, probe_results, meta, cfg):
     return paths
 
 
+def _load_per_layer_data(gs_records) -> tuple[list[str], dict]:
+    """Extract per-layer cossim data from gs_records.
+
+    Returns (layer_names, {sched: {layer: (steps_arr, vals_SxT)}}).
+    """
+    layer_names: list[str] = []
+    for r in gs_records:
+        names = r.get("layer_names") or r.get("grad_sim_log", {}).get("layer_names", [])
+        if names:
+            layer_names = names
+            break
+
+    gs_groups = _group_gs(gs_records)
+    out: dict[str, dict[str, tuple]] = {}
+
+    for sched, records in gs_groups.items():
+        layer_data: dict[str, tuple] = {}
+        for layer in layer_names:
+            runs_with_layer = [
+                r for r in records
+                if r["grad_sim_log"].get("per_layer", {}).get(layer)
+            ]
+            if not runs_with_layer:
+                continue
+            steps_list = [np.array(r["grad_sim_log"]["step"]) for r in runs_with_layer]
+            vals_list = [np.array(r["grad_sim_log"]["per_layer"][layer])
+                         for r in runs_with_layer]
+            steps_ref = steps_list[0]
+            interp_vals = []
+            for s, v in zip(steps_list, vals_list):
+                if len(s) > 1 and len(v) == len(s):
+                    interp_vals.append(np.interp(steps_ref, s, v))
+            if interp_vals:
+                layer_data[layer] = (steps_ref, np.array(interp_vals))
+        if layer_data:
+            out[sched] = layer_data
+
+    return layer_names, out
+
+
+def grad_cosine_per_layer_overlay(pdir, cfg, gs_records):
+    """One chart per schedule: all layers overlaid as lines over time."""
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    if not layer_names or not sched_layer_data:
+        return []
+
+    cmap = plt.get_cmap("tab20")
+    layer_colors = {ln: cmap(i / max(len(layer_names) - 1, 1))
+                    for i, ln in enumerate(layer_names)}
+
+    paths = []
+    for sched, layer_data in sched_layer_data.items():
+        fig, ax = plt.subplots(figsize=(14, 7))
+        for layer in layer_names:
+            if layer not in layer_data:
+                continue
+            steps_ref, vals_arr = layer_data[layer]
+            m = np.mean(vals_arr, axis=0)
+            n_s = len(vals_arr)
+            ci = 1.96 * np.std(vals_arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals_arr, axis=0)
+            c = layer_colors[layer]
+            ax.plot(steps_ref, m, color=c, lw=1.8, label=layer)
+            ax.fill_between(steps_ref, m - ci, m + ci, color=c, alpha=0.1)
+        ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
+        ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
+        ax.set_xlim(0, T + U)
+        sched_label = SCHED_SHORT.get(sched, sched)
+        _style(ax, "Step", "Cosine Similarity",
+               f"{sched_label}: Per-Layer Gradient Cosine Similarity\n(Special vs Other, mean +/- 95% CI)")
+        ax.legend(fontsize=8, loc="best", framealpha=0.9, ncol=2)
+        fig.tight_layout()
+        p_ = pdir / f"layer_cossim_overlay_{sched}.png"
+        fig.savefig(p_, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        paths.append(p_)
+    return paths
+
+
+def grad_cosine_per_layer_all_scheds(pdir, cfg, gs_records):
+    """One chart per layer: all schedules overlaid — easy cross-schedule comparison."""
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    if not layer_names or not sched_layer_data:
+        return []
+
+    scheds = _ordered(sched_layer_data.keys())
+    paths = []
+    for layer in layer_names:
+        fig, ax = plt.subplots(figsize=(14, 6))
+        for sched in scheds:
+            if sched not in sched_layer_data or layer not in sched_layer_data[sched]:
+                continue
+            steps_ref, vals_arr = sched_layer_data[sched][layer]
+            m = np.mean(vals_arr, axis=0)
+            n_s = len(vals_arr)
+            ci = 1.96 * np.std(vals_arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals_arr, axis=0)
+            c = PALETTE.get(sched, "gray")
+            ax.plot(steps_ref, m, color=c, lw=2, label=SCHED_SHORT.get(sched, sched))
+            ax.fill_between(steps_ref, m - ci, m + ci, color=c, alpha=0.12)
+        ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
+        ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
+        ax.set_xlim(0, T + U)
+        _style(ax, "Step", "Cosine Similarity",
+               f"Layer {layer}: Gradient Cosine Similarity — All Schedules\n(Special vs Other, mean +/- 95% CI)")
+        ax.legend(fontsize=10, loc="best", framealpha=0.9)
+        fig.tight_layout()
+        p_ = pdir / f"layer_cossim_all_scheds_{layer}.png"
+        fig.savefig(p_, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        paths.append(p_)
+    return paths
+
+
+def grad_cosine_layer_step_heatmap(pdir, cfg, gs_records):
+    """Heatmap: rows=layers, cols=steps, one chart per schedule.
+
+    Shows how cossim evolves over time for every layer simultaneously.
+    """
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    if not layer_names or not sched_layer_data:
+        return []
+
+    paths = []
+    for sched, layer_data in sched_layer_data.items():
+        layers_present = [ln for ln in layer_names if ln in layer_data]
+        if not layers_present:
+            continue
+        steps_ref = layer_data[layers_present[0]][0]
+        n_layers = len(layers_present)
+        n_steps = len(steps_ref)
+
+        grid = np.full((n_layers, n_steps), np.nan)
+        for ri, layer in enumerate(layers_present):
+            steps_l, vals_arr = layer_data[layer]
+            m = np.mean(vals_arr, axis=0)
+            grid[ri] = np.interp(steps_ref, steps_l, m)
+
+        fig_w = max(14, n_steps * 0.15)
+        fig_h = max(4, n_layers * 0.55)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        im = ax.imshow(grid, aspect="auto", cmap="RdBu_r", vmin=-1.0, vmax=1.0,
+                       interpolation="nearest")
+
+        burst_col = np.searchsorted(steps_ref, T)
+        if 0 < burst_col < n_steps:
+            ax.axvline(burst_col - 0.5, color="black", lw=2, alpha=0.8)
+
+        tick_stride = max(1, n_steps // 12)
+        tick_idxs = list(range(0, n_steps, tick_stride))
+        ax.set_xticks(tick_idxs)
+        ax.set_xticklabels([str(int(steps_ref[i])) for i in tick_idxs],
+                           rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(range(n_layers))
+        ax.set_yticklabels(layers_present, fontsize=9)
+        ax.set_xlabel("Step", fontsize=11)
+        ax.set_ylabel("Layer", fontsize=11)
+        sched_label = SCHED_SHORT.get(sched, sched)
+        ax.set_title(f"{sched_label}: Per-Layer Gradient Cosine Similarity Over Time\n"
+                     f"(Special vs Other, mean across seeds)",
+                     fontsize=12, fontweight="bold")
+        fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02, label="Cosine Similarity")
+        fig.tight_layout()
+        p_ = pdir / f"layer_cossim_heatmap_{sched}.png"
+        fig.savefig(p_, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        paths.append(p_)
+    return paths
+
+
+def grad_cosine_layer_schedule_heatmap(pdir, cfg, gs_records):
+    """Heatmap: rows=layers, cols=schedules, at key training phases.
+
+    Best for comparing which layers differ most across schedules.
+    """
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    if not layer_names or not sched_layer_data:
+        return []
+
+    scheds = _ordered(sched_layer_data.keys())
+    phase_windows = [
+        ("End-Burst", int(3 * T / 4), T),
+        ("End-Rev", T + int(U / 2), T + U),
+    ]
+
+    paths = []
+    for phase_label, lo, hi in phase_windows:
+        grid = np.full((len(layer_names), len(scheds)), np.nan)
+        for ci_idx, sched in enumerate(scheds):
+            if sched not in sched_layer_data:
+                continue
+            for ri, layer in enumerate(layer_names):
+                if layer not in sched_layer_data[sched]:
+                    continue
+                steps_ref, vals_arr = sched_layer_data[sched][layer]
+                mask = (steps_ref >= lo) & (steps_ref < hi)
+                if mask.any():
+                    grid[ri, ci_idx] = np.mean(vals_arr[:, mask])
+
+        fig_w = max(6, len(scheds) * 1.3)
+        fig_h = max(4, len(layer_names) * 0.55)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        im = ax.imshow(grid, aspect="auto", cmap="RdBu_r", vmin=-1.0, vmax=1.0,
+                       interpolation="nearest")
+        ax.set_xticks(range(len(scheds)))
+        ax.set_xticklabels([SCHED_SHORT.get(s, s) for s in scheds],
+                           rotation=30, ha="right", fontsize=10)
+        ax.set_yticks(range(len(layer_names)))
+        ax.set_yticklabels(layer_names, fontsize=9)
+        ax.set_xlabel("Schedule", fontsize=11)
+        ax.set_ylabel("Layer", fontsize=11)
+        ax.set_title(f"Layer x Schedule: Gradient Cosine Similarity ({phase_label})\n"
+                     f"(Special vs Other, mean across seeds & steps in window)",
+                     fontsize=12, fontweight="bold")
+        for ri in range(len(layer_names)):
+            for ci_idx in range(len(scheds)):
+                val = grid[ri, ci_idx]
+                if not np.isnan(val):
+                    txt_color = "white" if abs(val) > 0.55 else "black"
+                    ax.text(ci_idx, ri, f"{val:.2f}", ha="center", va="center",
+                            fontsize=8, fontweight="bold", color=txt_color)
+        fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02, label="Cosine Similarity")
+        fig.tight_layout()
+        p_ = pdir / f"layer_cossim_layer_sched_{phase_label.lower().replace('-', '_')}.png"
+        fig.savefig(p_, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        paths.append(p_)
+    return paths
+
+
+def grad_cosine_layer_change_heatmap(pdir, cfg, gs_records):
+    """Heatmap: rows=layers, cols=steps, showing rate-of-change of cossim.
+
+    Highlights where and when gradient alignment shifts fastest per layer.
+    """
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    if not layer_names or not sched_layer_data:
+        return []
+
+    paths = []
+    for sched, layer_data in sched_layer_data.items():
+        layers_present = [ln for ln in layer_names if ln in layer_data]
+        if not layers_present:
+            continue
+        steps_ref = layer_data[layers_present[0]][0]
+        if len(steps_ref) < 3:
+            continue
+        n_layers = len(layers_present)
+        n_steps = len(steps_ref) - 1
+
+        rate_grid = np.full((n_layers, n_steps), np.nan)
+        for ri, layer in enumerate(layers_present):
+            steps_l, vals_arr = layer_data[layer]
+            m = np.mean(vals_arr, axis=0)
+            interp_m = np.interp(steps_ref, steps_l, m)
+            dt = np.diff(steps_ref)
+            rate_grid[ri] = np.diff(interp_m) / np.maximum(dt, 1)
+
+        mid_steps = (steps_ref[:-1] + steps_ref[1:]) / 2
+        vmax = np.nanpercentile(np.abs(rate_grid), 95)
+        vmax = max(vmax, 1e-6)
+
+        fig_w = max(14, n_steps * 0.15)
+        fig_h = max(4, n_layers * 0.55)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        im = ax.imshow(rate_grid, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax,
+                       interpolation="nearest")
+
+        burst_col = np.searchsorted(mid_steps, T)
+        if 0 < burst_col < n_steps:
+            ax.axvline(burst_col - 0.5, color="black", lw=2, alpha=0.8)
+
+        tick_stride = max(1, n_steps // 12)
+        tick_idxs = list(range(0, n_steps, tick_stride))
+        ax.set_xticks(tick_idxs)
+        ax.set_xticklabels([str(int(mid_steps[i])) for i in tick_idxs],
+                           rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(range(n_layers))
+        ax.set_yticklabels(layers_present, fontsize=9)
+        ax.set_xlabel("Step", fontsize=11)
+        ax.set_ylabel("Layer", fontsize=11)
+        sched_label = SCHED_SHORT.get(sched, sched)
+        ax.set_title(f"{sched_label}: Rate of Change of Per-Layer Cosine Similarity\n"
+                     f"(d(cossim)/d(step), mean across seeds)",
+                     fontsize=12, fontweight="bold")
+        fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02, label="d(cossim)/d(step)")
+        fig.tight_layout()
+        p_ = pdir / f"layer_cossim_change_{sched}.png"
+        fig.savefig(p_, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        paths.append(p_)
+    return paths
+
+
+def grad_cosine_layer_end_burst_bars(pdir, cfg, gs_records):
+    """Grouped bar chart: one group per layer, bars per schedule — end-of-burst snapshot."""
+    bcfg = cfg.get("base_cfg", cfg)
+    T = bcfg["total_steps"]
+    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    if not layer_names or not sched_layer_data:
+        return None
+
+    scheds = _ordered(sched_layer_data.keys())
+    n_layers = len(layer_names)
+    n_scheds = len(scheds)
+
+    means_LS = np.full((n_layers, n_scheds), np.nan)
+    for ci_idx, sched in enumerate(scheds):
+        if sched not in sched_layer_data:
+            continue
+        for ri, layer in enumerate(layer_names):
+            if layer not in sched_layer_data[sched]:
+                continue
+            steps_ref, vals_arr = sched_layer_data[sched][layer]
+            burst_mask = steps_ref <= T
+            if burst_mask.any():
+                means_LS[ri, ci_idx] = np.mean(vals_arr[:, burst_mask][:, -1])
+
+    fig_w = max(14, n_layers * 0.9)
+    fig, ax = plt.subplots(figsize=(fig_w, 7))
+    w = 0.8 / n_scheds
+    xs = np.arange(n_layers)
+    for ci_idx, sched in enumerate(scheds):
+        vals = means_LS[:, ci_idx]
+        c = PALETTE.get(sched, "gray")
+        ax.bar(xs + ci_idx * w - 0.4 + w / 2, vals, w,
+               color=c, alpha=0.85, edgecolor="black", lw=0.4,
+               label=SCHED_SHORT.get(sched, sched))
+    ax.axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(layer_names, fontsize=9, fontweight="bold", rotation=30, ha="right")
+    _style(ax, "Layer", "Cosine Similarity (end of burst)",
+           "Per-Layer Gradient Cosine Similarity at End of Burst\n(Special vs Other, mean across seeds)")
+    ax.legend(fontsize=9, loc="best", framealpha=0.9, ncol=min(n_scheds, 4))
+    fig.tight_layout()
+    p_ = pdir / "layer_cossim_end_burst_bars.png"
+    fig.savefig(p_, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return p_
+
+
+def load_adl_data(run_dir) -> list[dict]:
+    """Load ADL records from the adl/ folder."""
+    adl_dir = Path(run_dir) / "adl"
+    records = []
+    if adl_dir.is_dir():
+        for fp in sorted(adl_dir.glob("*.json")):
+            with open(fp) as f:
+                records.append(json.load(f))
+    return records
+
+
+def _group_adl(records):
+    g = defaultdict(list)
+    for r in records:
+        g[r["schedule"]].append(r)
+    return g
+
+
+def adl_delta_norm_overlay(pdir, cfg, adl_records):
+    """Mean delta norm (summed over layers) over training steps, one line per schedule."""
+    if not adl_records:
+        return None
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    groups = _group_adl(adl_records)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for sched in _ordered(groups.keys()):
+        runs = groups[sched]
+        steps_list = [np.array(r["adl_log"]["step"]) for r in runs]
+        norm_list = [np.sum(r["adl_log"]["delta_norm_K"], axis=-1) for r in runs]
+        steps_ref = steps_list[0]
+        interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(steps_list, norm_list)
+                       if len(s) > 1]
+        if not interp_vals:
+            continue
+        arr = np.array(interp_vals)
+        m = arr.mean(axis=0)
+        n_s = len(arr)
+        ci = 1.96 * arr.std(axis=0) / np.sqrt(n_s) if n_s > 1 else arr.std(axis=0)
+        ax.plot(steps_ref, m, color=PALETTE[sched], lw=2.5, label=SCHED_SHORT[sched])
+        ax.fill_between(steps_ref, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
+    ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
+    ax.set_xlim(0, T + U)
+    _style(ax, "Step", "||delta|| (sum over layers)",
+           "ADL: Activation Bias Magnitude Over Training\n(mean +/- 95% CI)")
+    ax.legend(fontsize=11, loc="upper left", framealpha=0.9)
+    fig.tight_layout()
+    p_ = pdir / "adl_delta_norm.png"
+    fig.savefig(p_, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return p_
+
+
+def adl_readability_overlay(pdir, cfg, adl_records):
+    """Mean readability (averaged over layers and token positions) over steps."""
+    if not adl_records:
+        return None
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    groups = _group_adl(adl_records)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for sched in _ordered(groups.keys()):
+        runs = groups[sched]
+        steps_list = [np.array(r["adl_log"]["step"]) for r in runs]
+        read_list = [np.mean(r["adl_log"]["readability_KT"], axis=(-1, -2))
+                     for r in runs]
+        steps_ref = steps_list[0]
+        interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(steps_list, read_list)
+                       if len(s) > 1]
+        if not interp_vals:
+            continue
+        arr = np.array(interp_vals)
+        m = arr.mean(axis=0)
+        n_s = len(arr)
+        ci = 1.96 * arr.std(axis=0) / np.sqrt(n_s) if n_s > 1 else arr.std(axis=0)
+        ax.plot(steps_ref, m, color=PALETTE[sched], lw=2.5, label=SCHED_SHORT[sched])
+        ax.fill_between(steps_ref, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
+    ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
+    ax.set_xlim(0, T + U)
+    ax.set_ylim(-0.02, None)
+    _style(ax, "Step", "Burst-token readability (frac. top-10)",
+           "ADL: Logit Lens Readability of Activation Bias\n(mean +/- 95% CI)")
+    ax.legend(fontsize=11, loc="upper left", framealpha=0.9)
+    fig.tight_layout()
+    p_ = pdir / "adl_readability.png"
+    fig.savefig(p_, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return p_
+
+
+def adl_causal_ablation_overlay(pdir, cfg, adl_records):
+    """Mean accuracy drop from ablating the delta direction, over steps."""
+    if not adl_records:
+        return None
+    bcfg = cfg.get("base_cfg", cfg)
+    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
+    groups = _group_adl(adl_records)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for sched in _ordered(groups.keys()):
+        runs = groups[sched]
+        steps_list = [np.array(r["adl_log"]["step"]) for r in runs]
+        drop_list = [np.mean(r["adl_log"]["acc_drop_K"], axis=-1) for r in runs]
+        steps_ref = steps_list[0]
+        interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(steps_list, drop_list)
+                       if len(s) > 1]
+        if not interp_vals:
+            continue
+        arr = np.array(interp_vals)
+        m = arr.mean(axis=0)
+        n_s = len(arr)
+        ci = 1.96 * arr.std(axis=0) / np.sqrt(n_s) if n_s > 1 else arr.std(axis=0)
+        ax.plot(steps_ref, m, color=PALETTE[sched], lw=2.5, label=SCHED_SHORT[sched])
+        ax.fill_between(steps_ref, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
+    ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
+    ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
+    ax.set_xlim(0, T + U)
+    _style(ax, "Step", "Accuracy drop (baseline - ablated)",
+           "ADL: Causal Ablation — Accuracy Drop When delta Projected Out\n(mean +/- 95% CI)")
+    ax.legend(fontsize=11, loc="upper left", framealpha=0.9)
+    fig.tight_layout()
+    p_ = pdir / "adl_causal_ablation.png"
+    fig.savefig(p_, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return p_
+
+
+def adl_end_burst_bars(pdir, cfg, adl_records):
+    """Bar chart: readability and ablation drop at end-of-burst, one bar per schedule."""
+    if not adl_records:
+        return None
+    bcfg = cfg.get("base_cfg", cfg)
+    T = bcfg["total_steps"]
+    groups = _group_adl(adl_records)
+    scheds = _ordered(groups.keys())
+
+    readability_means, readability_cis = [], []
+    ablation_means, ablation_cis = [], []
+
+    for sched in scheds:
+        runs = groups[sched]
+        r_vals, a_vals = [], []
+        for r in runs:
+            steps = np.array(r["adl_log"]["step"])
+            burst_mask = steps <= T
+            if not burst_mask.any():
+                continue
+            last_burst_idx = np.where(burst_mask)[0][-1]
+            r_vals.append(np.mean(r["adl_log"]["readability_KT"][last_burst_idx]))
+            a_vals.append(np.mean(r["adl_log"]["acc_drop_K"][last_burst_idx]))
+        if not r_vals:
+            readability_means.append(0.0)
+            readability_cis.append(0.0)
+            ablation_means.append(0.0)
+            ablation_cis.append(0.0)
+        else:
+            rv = np.array(r_vals)
+            av = np.array(a_vals)
+            readability_means.append(rv.mean())
+            readability_cis.append(1.96 * rv.std() / np.sqrt(len(rv)) if len(rv) > 1 else 0.0)
+            ablation_means.append(av.mean())
+            ablation_cis.append(1.96 * av.std() / np.sqrt(len(av)) if len(av) > 1 else 0.0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    xs = np.arange(len(scheds))
+    colors = [PALETTE[s] for s in scheds]
+    labels = [SCHED_SHORT[s] for s in scheds]
+
+    axes[0].bar(xs, readability_means, yerr=readability_cis, color=colors,
+                edgecolor="black", lw=0.8, capsize=5, alpha=0.85)
+    axes[0].set_xticks(xs)
+    axes[0].set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
+    _style(axes[0], "", "Burst-token readability (frac. top-10)",
+           "ADL Readability at End of Burst")
+
+    axes[1].bar(xs, ablation_means, yerr=ablation_cis, color=colors,
+                edgecolor="black", lw=0.8, capsize=5, alpha=0.85)
+    axes[1].axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
+    axes[1].set_xticks(xs)
+    axes[1].set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
+    _style(axes[1], "", "Accuracy drop",
+           "Causal Ablation Drop at End of Burst")
+
+    fig.suptitle("ADL End-of-Burst Summary (mean +/- 95% CI)", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    p_ = pdir / "adl_end_burst_bars.png"
+    fig.savefig(p_, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return p_
+
+
+def adl_readability_vs_auc(pdir, cfg, adl_records, results):
+    """Scatter: end-of-burst ADL readability vs reversion AUC (one dot per seed x schedule)."""
+    if not adl_records:
+        return None
+    bcfg = cfg.get("base_cfg", cfg)
+    T = bcfg["total_steps"]
+    groups = _group_adl(adl_records)
+    res_by_label = {r["label"]: r for r in results}
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    for sched in _ordered(groups.keys()):
+        runs = groups[sched]
+        for r in runs:
+            steps = np.array(r["adl_log"]["step"])
+            burst_mask = steps <= T
+            if not burst_mask.any():
+                continue
+            last_idx = np.where(burst_mask)[0][-1]
+            readability = float(np.mean(r["adl_log"]["readability_KT"][last_idx]))
+            parent_label = r["label"]
+            if parent_label not in res_by_label:
+                continue
+            auc = res_by_label[parent_label].get("reversion_auc", None)
+            if auc is None:
+                continue
+            ax.scatter(readability, auc, color=PALETTE[sched], s=60, alpha=0.75,
+                       edgecolor="white", lw=0.5, label=SCHED_SHORT[sched]
+                       if sched not in [s for s in groups if s < sched] else "")
+
+    handles, labels_leg = ax.get_legend_handles_labels()
+    seen = {}
+    for h, l in zip(handles, labels_leg):
+        if l not in seen:
+            seen[l] = h
+    ax.legend(seen.values(), seen.keys(), fontsize=10, loc="best", framealpha=0.9)
+    _style(ax, "ADL Readability (end of burst)", "Reversion AUC",
+           "ADL Readability vs Forgetting Resistance\n(each dot = one seed x schedule)")
+    fig.tight_layout()
+    p_ = pdir / "adl_readability_vs_auc.png"
+    fig.savefig(p_, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return p_
+
+
 def generate_all(run_dir, results, cfg):
     pdir = Path(run_dir) / "presentation"
     pdir.mkdir(exist_ok=True)
@@ -1270,16 +1930,17 @@ def generate_all(run_dir, results, cfg):
 
     print("  Schedule bars...")
     cp["schedule_bars"] = schedule_bars(pdir, results, cfg)
-    print("  Burst class overlay...")
-    cp["overlay_burst"] = overlay(pdir, results, cfg, burst_key,
-                              "Burst Class Accuracy (free generation)",
-                              f"Burst Class Accuracy Over Foundation+Burst & Reversion\n(mean +/- 95% CI, n={ns} seeds)",
-                              "overlay_burst.png", groups=gr)
-    print("  Other classes overlay...")
-    cp["overlay_other"] = overlay(pdir, results, cfg, other_key,
-                              "Other Classes Accuracy (free generation)",
-                              f"Other Classes Accuracy Over Foundation+Burst & Reversion\n(mean +/- 95% CI, n={ns} seeds)",
-                              "overlay_other.png", loc="lower right", groups=gr)
+    for al, al_suffix in [("absolute", ""), ("start", "_aligned_start"), ("end", "_aligned_end")]:
+        print(f"  Special class overlay ({al})...")
+        cp[f"overlay_burst{al_suffix}"] = overlay(pdir, results, cfg, burst_key,
+                                  "Special Class Accuracy (free generation)",
+                                  f"Special Class Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
+                                  f"overlay_burst{al_suffix}.png", groups=gr, align=al)
+        print(f"  Other classes overlay ({al})...")
+        cp[f"overlay_other{al_suffix}"] = overlay(pdir, results, cfg, other_key,
+                                  "Other Classes Accuracy (free generation)",
+                                  f"Other Classes Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
+                                  f"overlay_other{al_suffix}.png", loc="lower right", groups=gr, align=al)
     print("  Reversion AUC bars...")
     cp["auc_bars"] = bar_chart(pdir, results, cfg, auc_metric,
                                "Reversion AUC (higher = slower forgetting)",
@@ -1302,8 +1963,8 @@ def generate_all(run_dir, results, cfg):
             cp["life_bars"][t] = chart
     print("  Peak burst bars...")
     cp["peak_bars"] = bar_chart(pdir, results, cfg, peak_metric,
-                                "Peak Burst Class Accuracy at End of Training",
-                                "Peak Burst Class Accuracy by Schedule\n(mean +/- 95% CI, individual seeds shown)",
+                                "Peak Special Class Accuracy at End of Training",
+                                "Peak Special Class Accuracy by Schedule\n(mean +/- 95% CI, individual seeds shown)",
                                 "peak_b_bars.png", fmt_dec=3, groups=gr)
     print("  AUC diff heatmap...")
     cp["auc_diff"] = auc_diff(pdir, results, cfg, groups=gr)
@@ -1314,7 +1975,11 @@ def generate_all(run_dir, results, cfg):
     print("  Summary table...")
     cp["summary_table"] = summary_table(pdir, results, cfg, groups=gr)
     print("  Per-schedule overlays...")
-    cp["per_sched"] = per_sched(pdir, results, cfg, groups=gr)
+    cp["per_sched"] = per_sched(pdir, results, cfg, groups=gr, align="absolute")
+    print("  Per-schedule overlays (aligned start)...")
+    cp["per_sched_start"] = per_sched(pdir, results, cfg, groups=gr, align="start")
+    print("  Per-schedule overlays (aligned end)...")
+    cp["per_sched_end"] = per_sched(pdir, results, cfg, groups=gr, align="end")
 
     gs_records = load_grad_sim_data(run_dir)
     gs_dir = pdir / "grad_cosine_sim"
@@ -1341,6 +2006,21 @@ def generate_all(run_dir, results, cfg):
     print("  Pairwise gradient cosine evolution (per schedule)...")
     cp["pairwise_evo_per_schedule"] = pairwise_grad_cosine_evolution_per_schedule(gs_dir, cfg, gs_records)
 
+    layer_gs_dir = pdir / "grad_cosine_sim" / "per_layer"
+    layer_gs_dir.mkdir(exist_ok=True)
+    print("  Per-layer cossim overlay (per schedule)...")
+    cp["layer_cossim_overlay"] = grad_cosine_per_layer_overlay(layer_gs_dir, cfg, gs_records)
+    print("  Per-layer cossim all-schedules (per layer)...")
+    cp["layer_cossim_all_scheds"] = grad_cosine_per_layer_all_scheds(layer_gs_dir, cfg, gs_records)
+    print("  Per-layer cossim heatmap (layer x step)...")
+    cp["layer_cossim_heatmap"] = grad_cosine_layer_step_heatmap(layer_gs_dir, cfg, gs_records)
+    print("  Per-layer cossim layer x schedule heatmap...")
+    cp["layer_cossim_layer_sched"] = grad_cosine_layer_schedule_heatmap(layer_gs_dir, cfg, gs_records)
+    print("  Per-layer cossim rate-of-change heatmap...")
+    cp["layer_cossim_change"] = grad_cosine_layer_change_heatmap(layer_gs_dir, cfg, gs_records)
+    print("  Per-layer cossim end-of-burst bars...")
+    cp["layer_cossim_end_burst_bars"] = grad_cosine_layer_end_burst_bars(layer_gs_dir, cfg, gs_records)
+
     probe_data, probe_meta = _load_probe_data(run_dir)
     if probe_data:
         probe_dir = pdir / "probes"
@@ -1355,5 +2035,26 @@ def generate_all(run_dir, results, cfg):
         cp["probe_heatmaps"] = []
         cp["probe_dynamics"] = None
         cp["probe_layer_schedule"] = []
+
+    adl_records = load_adl_data(run_dir)
+    if adl_records:
+        adl_dir = pdir / "adl"
+        adl_dir.mkdir(exist_ok=True)
+        print("  ADL delta norm overlay...")
+        cp["adl_delta_norm"] = adl_delta_norm_overlay(adl_dir, cfg, adl_records)
+        print("  ADL readability overlay...")
+        cp["adl_readability"] = adl_readability_overlay(adl_dir, cfg, adl_records)
+        print("  ADL causal ablation overlay...")
+        cp["adl_causal_ablation"] = adl_causal_ablation_overlay(adl_dir, cfg, adl_records)
+        print("  ADL end-of-burst bars...")
+        cp["adl_end_burst_bars"] = adl_end_burst_bars(adl_dir, cfg, adl_records)
+        print("  ADL readability vs AUC scatter...")
+        cp["adl_readability_vs_auc"] = adl_readability_vs_auc(adl_dir, cfg, adl_records, results)
+    else:
+        cp["adl_delta_norm"] = None
+        cp["adl_readability"] = None
+        cp["adl_causal_ablation"] = None
+        cp["adl_end_burst_bars"] = None
+        cp["adl_readability_vs_auc"] = None
 
     return cp
