@@ -21,7 +21,7 @@ from omegaconf import OmegaConf
 
 from net.nanogpt import nanoGPT
 from burst.parallel import run_job_pool
-from burst.config import PHASE_BURST, PHASE_REVERSION, parse_run_config
+from burst.config import PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION, parse_run_config
 from burst.gpu import gpu_cfg
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -30,6 +30,69 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def _flat_grad(net) -> torch.Tensor:
     grads = [p.grad.detach().view(-1) for p in net.parameters() if p.grad is not None]
     return torch.cat(grads) if grads else torch.zeros(1, device=DEVICE)
+
+
+def _layer_groups(net) -> list[tuple[str, list[str]]]:
+    """Return ordered (short_name, [param_name, ...]) groups for per-layer grad-sim.
+
+    Groups:
+      emb       -- wte + wpe embeddings
+      L{i}_ln   -- block i layernorms (ln_1, ln_2)
+      L{i}_attn -- block i attention (c_attn, c_proj)
+      L{i}_mlp  -- block i MLP (c_fc, c_proj)
+      ln_f      -- final layernorm
+    LM_head is weight-tied to wte so it is omitted to avoid double-counting.
+    """
+    groups: list[tuple[str, list[str]]] = []
+    all_param_names = {n for n, _ in net.named_parameters()}
+
+    emb_params = [n for n in all_param_names
+                  if n in ("transformer.wte.weight", "transformer.wpe.weight")]
+    if emb_params:
+        groups.append(("emb", sorted(emb_params)))
+
+    n_layer = net.config.n_layer
+    for i in range(n_layer):
+        prefix = f"transformer.h.{i}"
+        ln_params = [n for n in all_param_names if n.startswith(f"{prefix}.ln_")]
+        attn_params = [n for n in all_param_names if n.startswith(f"{prefix}.attn.")]
+        mlp_params = [n for n in all_param_names if n.startswith(f"{prefix}.mlp.")]
+        if ln_params:
+            groups.append((f"L{i}_ln", sorted(ln_params)))
+        if attn_params:
+            groups.append((f"L{i}_attn", sorted(attn_params)))
+        if mlp_params:
+            groups.append((f"L{i}_mlp", sorted(mlp_params)))
+
+    lnf_params = [n for n in all_param_names if n.startswith("transformer.ln_f")]
+    if lnf_params:
+        groups.append(("ln_f", sorted(lnf_params)))
+
+    return groups
+
+
+def _grad_vecs_per_layer(net, docs_np: np.ndarray, n_samples: int,
+                          layer_groups: list[tuple[str, list[str]]]) -> dict[str, torch.Tensor]:
+    """Run one backward pass and extract per-layer gradient vectors."""
+    n = min(n_samples, docs_np.shape[0])
+    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
+    inp, tgt = dat[:, :-1], dat[:, 1:]
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        logits = net(inp)
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+    loss.backward()
+
+    param_map = dict(net.named_parameters())
+    result: dict[str, torch.Tensor] = {}
+    for name, pnames in layer_groups:
+        grads = []
+        for pn in pnames:
+            p = param_map.get(pn)
+            if p is not None and p.grad is not None:
+                grads.append(p.grad.detach().view(-1).float())
+        result[name] = torch.cat(grads) if grads else torch.zeros(1, device=DEVICE)
+    return result
 
 
 def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int) -> torch.Tensor:
@@ -54,6 +117,29 @@ def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL,
     cos_sim = F.cosine_similarity(g_burst.unsqueeze(0), g_other.unsqueeze(0)).item()
     net.zero_grad(set_to_none=True)
     return {"burst_vs_other": cos_sim}
+
+
+def compute_grad_cosine_sim_per_layer(net, docs_burst_BL, docs_other_BL,
+                                       n_samples: int) -> dict:
+    """Compute burst-vs-other cosine similarity separately for each layer group."""
+    layer_groups = _layer_groups(net)
+    net.train()
+
+    net.zero_grad(set_to_none=True)
+    burst_vecs = _grad_vecs_per_layer(net, docs_burst_BL, n_samples, layer_groups)
+    net.zero_grad(set_to_none=True)
+    other_vecs = _grad_vecs_per_layer(net, docs_other_BL, n_samples, layer_groups)
+    net.zero_grad(set_to_none=True)
+
+    per_layer: dict[str, float] = {}
+    for name, _ in layer_groups:
+        g_b = burst_vecs[name]
+        g_o = other_vecs[name]
+        sim = F.cosine_similarity(g_b.unsqueeze(0), g_o.unsqueeze(0)).item()
+        per_layer[name] = sim
+
+    layer_names = [name for name, _ in layer_groups]
+    return {"per_layer": per_layer, "layer_names": layer_names}
 
 
 def compute_pairwise_grad_sim(net, task_docs: dict,
@@ -168,6 +254,10 @@ def _worker_main():
     if burst_docs_all is not None and other_docs_all is not None:
         sim = compute_grad_cosine_sim(net, burst_docs_all, other_docs_all, n_samples=gs_bs)
         result["burst_vs_other"] = sim["burst_vs_other"]
+        layer_sim = compute_grad_cosine_sim_per_layer(
+            net, burst_docs_all, other_docs_all, n_samples=gs_bs)
+        result["per_layer_sim"] = layer_sim["per_layer"]
+        result["layer_names"] = layer_sim["layer_names"]
 
     if is_pairwise:
         task_docs = {**target_pool, **bg_pool}
@@ -198,10 +288,11 @@ def main():
     rc = parse_run_config(run_cfg)
     base_cfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
     gs_bs = args.grad_sim_batch_size or base_cfg.get("grad_sim_batch_size", 2048)
+    P = base_cfg.get("pre_burst_steps", 0)
     T = base_cfg["total_steps"]
     U = base_cfg["reversion_steps"]
 
-    pairwise_global_steps = {0, T // 2, T - 1, T + U // 2, T + U - 1}
+    pairwise_global_steps = {P, P + T // 2, P + T - 1, P + T + U // 2, P + T + U - 1}
 
     ckpt_root = run_dir / "checkpoints"
     if not ckpt_root.exists():
@@ -243,7 +334,12 @@ def main():
 
         for pt_file in sorted(ckpt_dir.glob("step_*.pt")):
             step = int(pt_file.stem.split("_")[1])
-            phase = PHASE_BURST if step < T else PHASE_REVERSION
+            if step < P:
+                phase = PHASE_PRE_BURST
+            elif step < P + T:
+                phase = PHASE_BURST
+            else:
+                phase = PHASE_REVERSION
             is_pairwise = step in pairwise_global_steps
             jobs.append({
                 "label": f"{label}_step{step}",
@@ -298,13 +394,23 @@ def main():
         d = jr.data
         parent = d["parent_label"]
         if parent not in per_label:
-            per_label[parent] = {"grad_sim_log": {"step": [], "phase": [], "burst_vs_other": []},
-                                 "pairwise_snapshots": []}
+            per_label[parent] = {
+                "grad_sim_log": {"step": [], "phase": [], "burst_vs_other": [],
+                                 "per_layer": {}},
+                "pairwise_snapshots": [],
+            }
         entry = per_label[parent]
         if "burst_vs_other" in d:
             entry["grad_sim_log"]["step"].append(d["step"])
             entry["grad_sim_log"]["phase"].append(d["phase"])
             entry["grad_sim_log"]["burst_vs_other"].append(d["burst_vs_other"])
+        if "per_layer_sim" in d:
+            for layer_name, sim_val in d["per_layer_sim"].items():
+                if layer_name not in entry["grad_sim_log"]["per_layer"]:
+                    entry["grad_sim_log"]["per_layer"][layer_name] = []
+                entry["grad_sim_log"]["per_layer"][layer_name].append(sim_val)
+            if "layer_names" not in entry["grad_sim_log"]:
+                entry["grad_sim_log"]["layer_names"] = d.get("layer_names", [])
         if "pairwise" in d:
             snap = d["pairwise"]
             snap["step"] = d["step"]
@@ -317,6 +423,10 @@ def main():
         gs_log["step"] = [gs_log["step"][i] for i in order]
         gs_log["phase"] = [gs_log["phase"][i] for i in order]
         gs_log["burst_vs_other"] = [gs_log["burst_vs_other"][i] for i in order]
+        for layer_name in gs_log["per_layer"]:
+            vals = gs_log["per_layer"][layer_name]
+            if len(vals) == len(order):
+                gs_log["per_layer"][layer_name] = [vals[i] for i in order]
         entry["pairwise_snapshots"].sort(key=lambda s: s["step"])
 
     gs_dir = run_dir / "grad_cosine_sim"
@@ -327,10 +437,12 @@ def main():
         if label not in per_label:
             continue
         entry = per_label[label]
+        gs_log = entry["grad_sim_log"]
         record = {
             "schedule": j["schedule"], "seed": j["seed"], "label": label,
             "grad_sim_batch_size": gs_bs,
-            "grad_sim_log": entry["grad_sim_log"],
+            "grad_sim_log": gs_log,
+            "layer_names": gs_log.get("layer_names", []),
             "pairwise_snapshots": entry["pairwise_snapshots"],
         }
         with open(gs_dir / f"{label}.json", "w") as f:

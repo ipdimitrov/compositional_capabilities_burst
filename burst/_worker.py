@@ -22,12 +22,12 @@ from net.runner import configure_optimizers, update_cosine_warmup_lr
 from burst.data import BurstDataset
 from burst.config import (
     EVAL_KEYS, MIXED_FRACTIONS, UNIFORM_SCHEDULE,
-    PHASE_FOUNDATION, PHASE_BURST, PHASE_REVERSION,
+    PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION,
     TrainConfig, reversion_life_key,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-CHECKPOINT_EVERY = 50
+CHECKPOINT_EVERY = 10
 PAIRWISE_STEP_NAMES = {"begin", "mid_burst", "end_burst", "mid_reversion", "end_reversion"}
 
 
@@ -49,14 +49,16 @@ def n_target_for_step(step, total_steps, schedule, p, batch_size):
     if schedule in MIXED_FRACTIONS:
         frac = MIXED_FRACTIONS[schedule]
         window = min(int(burst_len / frac), T)
-        return int(round(batch_size * frac)) if step >= T - window else 0
+        if step >= T - window:
+            return int(np.random.binomial(batch_size, frac))
+        return 0
 
     if schedule == "ramp_up":
         max_frac = 0.20
         ramp_len = min(int(2 * burst_len / max_frac), T)
         if step >= T - ramp_len:
             progress = (step - (T - ramp_len)) / max(ramp_len - 1, 1)
-            return int(round(batch_size * progress * max_frac))
+            return int(np.random.binomial(batch_size, progress * max_frac))
         return 0
 
     if schedule == "reversion_only":
@@ -116,18 +118,31 @@ def eval_free_gen(net, docs_BL, prompt_len: int):
     return correct_t.item() / max(total, 1)
 
 
-def checkpoint_steps(T: int, U: int) -> dict[int, str]:
-    """Return {global_step: phase} for all steps that need a checkpoint."""
-    steps = {}
-    for s in range(T):
-        if s % CHECKPOINT_EVERY == 0 or s == T - 1:
-            steps[s] = PHASE_BURST
-    for s in range(U):
-        if s % CHECKPOINT_EVERY == 0 or s == U - 1:
-            steps[T + s] = PHASE_REVERSION
+def checkpoint_steps(P: int, T: int, U: int) -> dict[int, str]:
+    """Return {global_step: phase} for all steps that need a checkpoint.
 
-    pairwise = {0: PHASE_BURST, T // 2: PHASE_BURST, T - 1: PHASE_BURST,
-                T + U // 2: PHASE_REVERSION, T + U - 1: PHASE_REVERSION}
+    P = pre_burst_steps, T = total_steps (burst), U = reversion_steps.
+    Global steps: [0, P) = pre-burst, [P, P+T) = burst, [P+T, P+T+U) = reversion.
+    """
+    steps = {}
+    for s in range(P):
+        if s % CHECKPOINT_EVERY == 0 or s == P - 1:
+            steps[s] = PHASE_PRE_BURST
+    for s in range(T):
+        gs = P + s
+        if s % CHECKPOINT_EVERY == 0 or s == T - 1:
+            steps[gs] = PHASE_BURST
+    for s in range(U):
+        gs = P + T + s
+        if s % CHECKPOINT_EVERY == 0 or s == U - 1:
+            steps[gs] = PHASE_REVERSION
+
+    pairwise = {
+        0: PHASE_PRE_BURST,
+        P - 1: PHASE_PRE_BURST,
+        P: PHASE_BURST, P + T // 2: PHASE_BURST, P + T - 1: PHASE_BURST,
+        P + T + U // 2: PHASE_REVERSION, P + T + U - 1: PHASE_REVERSION,
+    }
     steps.update(pairwise)
     return steps
 
@@ -158,8 +173,10 @@ def run(job, shared_data_path, run_dir, progress_dir):
     optimizer = configure_optimizers(net, optim_cfg)
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE == "cuda")
 
+    P = cfg.get("pre_burst_steps", 0)
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p, ev = cfg["batch_size"], cfg["p_target"], cfg["eval_every"]
+    total_lr_steps = P + T + U
 
     log = {"step": [], "loss": [], "phase": []}
     for k in EVAL_KEYS:
@@ -167,7 +184,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     ckpt_dir = Path(run_dir) / "checkpoints" / label
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_steps = checkpoint_steps(T, U)
+    ckpt_steps = checkpoint_steps(P, T, U)
 
     def do_eval(phase, loss_val):
         log["step"].append(it)
@@ -177,11 +194,11 @@ def run(job, shared_data_path, run_dir, progress_dir):
             log[k].append(eval_free_gen(net, eval_docs[k.removeprefix("acc_")], prompt_len))
         net.train()
 
-    def train_step(batch_np, tasks_sampled):
+    def do_train_step(batch_np):
         nonlocal it
         dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
-        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, T + U)
+        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_lr_steps)
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
             logits = net(inp)
@@ -197,53 +214,51 @@ def run(job, shared_data_path, run_dir, progress_dir):
     net.train()
     it = 0
 
-    task_counts_foundation = Counter()
+    task_counts_pre_burst = Counter()
     task_counts_burst = Counter()
     task_counts_reversion = Counter()
 
-    burst_len = max(int(p * T), 1)
-    if schedule == UNIFORM_SCHEDULE:
-        foundation_end = T
-    elif schedule == "burst_100":
-        foundation_end = T - burst_len
-    elif schedule in MIXED_FRACTIONS:
-        frac = MIXED_FRACTIONS[schedule]
-        window = min(int(burst_len / frac), T)
-        foundation_end = T - window
-    else:
-        foundation_end = T // 2
-
-    for s in range(T):
-        nt = n_target_for_step(s, T, schedule, p, bs)
-        batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, nt, bs)
-
-        if s < foundation_end:
-            task_counts_foundation.update(sampled_tasks)
-        else:
-            task_counts_burst.update(sampled_tasks)
-
-        loss_val = train_step(batch_np, sampled_tasks)
-        if s % ev == 0 or s == T - 1:
-            do_eval(PHASE_BURST, loss_val)
-        if s in ckpt_steps:
-            torch.save(net.state_dict(), ckpt_dir / f"step_{s}.pt")
+    # --- Phase 1: All-But-Special (pre-burst) ---
+    for s in range(P):
+        batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, 0, bs)
+        task_counts_pre_burst.update(sampled_tasks)
+        loss_val = do_train_step(batch_np)
+        gs = s
+        if s % ev == 0 or s == P - 1:
+            do_eval(PHASE_PRE_BURST, loss_val)
+        if gs in ckpt_steps:
+            torch.save(net.state_dict(), ckpt_dir / f"step_{gs}.pt")
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(s + 1))
 
+    # --- Phase 2: Special (burst) ---
+    for s in range(T):
+        nt = n_target_for_step(s, T, schedule, p, bs)
+        batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, nt, bs)
+        task_counts_burst.update(sampled_tasks)
+        loss_val = do_train_step(batch_np)
+        gs = P + s
+        if s % ev == 0 or s == T - 1:
+            do_eval(PHASE_BURST, loss_val)
+        if gs in ckpt_steps:
+            torch.save(net.state_dict(), ckpt_dir / f"step_{gs}.pt")
+        if (s + 1) % 50 == 0:
+            progress_file.write_text(str(P + s + 1))
+
+    # --- Phase 3: All-But-Special (reversion) ---
     for s in range(U):
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, 0, bs)
         task_counts_reversion.update(sampled_tasks)
-
-        loss_val = train_step(batch_np, sampled_tasks)
-        global_s = T + s
+        loss_val = do_train_step(batch_np)
+        gs = P + T + s
         if s % ev == 0 or s == U - 1:
             do_eval(PHASE_REVERSION, loss_val)
-        if global_s in ckpt_steps:
-            torch.save(net.state_dict(), ckpt_dir / f"step_{global_s}.pt")
+        if gs in ckpt_steps:
+            torch.save(net.state_dict(), ckpt_dir / f"step_{gs}.pt")
         if (s + 1) % 50 == 0:
-            progress_file.write_text(str(T + s + 1))
+            progress_file.write_text(str(P + T + s + 1))
 
-    progress_file.write_text(str(T + U))
+    progress_file.write_text(str(P + T + U))
 
     stats_dir = Path(run_dir) / "task_distributions"
     stats_dir.mkdir(exist_ok=True)
@@ -278,26 +293,28 @@ def run(job, shared_data_path, run_dir, progress_dir):
                 writer.writeheader()
                 writer.writerows(rows)
 
-    if task_counts_foundation:
-        save_task_distribution_stats(PHASE_FOUNDATION, task_counts_foundation)
+    if task_counts_pre_burst:
+        save_task_distribution_stats(PHASE_PRE_BURST, task_counts_pre_burst)
     if task_counts_burst:
         save_task_distribution_stats(PHASE_BURST, task_counts_burst)
     if task_counts_reversion:
         save_task_distribution_stats(PHASE_REVERSION, task_counts_reversion)
 
+    burst_end_step = P + T
     reversion_accs = [log["acc_burst"][i] for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
-    reversion_steps = [log["step"][i] - T for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
+    reversion_steps_rel = [log["step"][i] - burst_end_step for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
     burst_accs = [log["acc_burst"][i] for i, ph in enumerate(log["phase"]) if ph == PHASE_BURST]
 
     peak_burst = max(burst_accs) if burst_accs else 0
     reversion_end_burst = reversion_accs[-1] if reversion_accs else peak_burst
-    reversion_auc = float(np.trapezoid(reversion_accs, reversion_steps)) if len(reversion_accs) > 1 else 0.0
+    _trapz = getattr(np, "trapezoid", np.trapz)
+    reversion_auc = float(_trapz(reversion_accs, reversion_steps_rel)) if len(reversion_accs) > 1 else 0.0
 
     thresholds = TrainConfig().reversion_thresholds
     life_times: dict[str, int] = {}
     if peak_burst > 1e-6:
         remaining = {t: True for t in thresholds}
-        for acc_val, us in zip(reversion_accs, reversion_steps):
+        for acc_val, us in zip(reversion_accs, reversion_steps_rel):
             for t in list(remaining):
                 if acc_val <= peak_burst * t:
                     life_times[reversion_life_key(t)] = us
@@ -315,6 +332,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
     result = {
         "schedule": schedule, "seed": seed,
         "label": label, "log": log, "config": dict(cfg),
+        "pre_burst_steps": P, "burst_end_step": burst_end_step,
         "peak_burst": peak_burst, "reversion_end_burst": reversion_end_burst,
         "dropoff_abs": dropoff_abs, "dropoff_pct": dropoff_pct,
         "reversion_auc": reversion_auc,

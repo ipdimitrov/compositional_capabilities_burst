@@ -13,17 +13,20 @@ post_process() {
     export MKL_NUM_THREADS=1
     echo "=== post-processing ${run_dir} ==="
 
-    local T U
+    local P T U
+    P=$("${PYTHON}" -c "import json,sys; c=json.load(open('${run_dir}/config.json')); print(c['base_cfg'].get('pre_burst_steps', 0))")
     T=$("${PYTHON}" -c "import json,sys; c=json.load(open('${run_dir}/config.json')); print(c['base_cfg']['total_steps'])")
     U=$("${PYTHON}" -c "import json,sys; c=json.load(open('${run_dir}/config.json')); print(c['base_cfg']['reversion_steps'])")
-    local q1=$(( T / 4 ))
-    local q2=$(( T / 2 ))
-    local q3=$(( 3 * T / 4 ))
-    local ntp_steps="${q1} ${q2} ${q3} ${T}"
+    local q1=$(( P + T / 4 ))
+    local q2=$(( P + T / 2 ))
+    local q3=$(( P + 3 * T / 4 ))
+    local burst_end=$(( P + T ))
+    local ntp_steps="${q1} ${q2} ${q3} ${burst_end}"
 
-    local run_probes run_ntp
+    local run_probes run_ntp run_adl
     run_probes=$("${PYTHON}" -c "import json; c=json.load(open('${run_dir}/config.json')); print(c.get('run_probes', False))")
     run_ntp=$("${PYTHON}" -c "import json; c=json.load(open('${run_dir}/config.json')); print(c.get('run_next_token_probes', False))")
+    run_adl=$("${PYTHON}" -c "import json; c=json.load(open('${run_dir}/config.json')); print(c.get('run_adl', True))")
 
     local fail=0
 
@@ -62,6 +65,14 @@ post_process() {
     echo "  Running grad-sim..."
     "${PYTHON}" burst/grad_sim.py "${run_dir}" \
         || { echo "FAIL: grad_sim.py"; fail=1; }
+
+    if [ "${run_adl}" = "True" ]; then
+        echo "  Running ADL (Activation Difference Lens)..."
+        "${PYTHON}" burst/adl.py "${run_dir}" \
+            || { echo "FAIL: adl.py"; fail=1; }
+    else
+        echo "  Skipping ADL (run_adl=False)"
+    fi
 
     wait "${pid_plot}" || { echo "FAIL: plot.py"; fail=1; }
 

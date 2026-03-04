@@ -86,13 +86,14 @@ def build(rd, res, cfg, cp):
 
     parts.append("<h1 style='text-align:center;border:none;'>Compositional Learning &amp; Forgetting<br>in Transformers</h1>")
     parts.append(f'<p class="subtitle">Depth-{depth} Bijection Burst Experiment (burst at position {burst_pos})</p>')
-    parts.append(f'<p class="meta">{nl}L/{ne}d/{nh}H | {T} foundation+burst + {U} reversion | batch {bs} | {len(sc)} schedules x {ns} seeds = {len(res)} runs</p>')
+    P = bcfg.get("pre_burst_steps", 0)
+    parts.append(f'<p class="meta">{nl}L/{ne}d/{nh}H | {P} pre-burst + {T} special + {U} all-but-special | batch {bs} | {len(sc)} schedules x {ns} seeds = {len(res)} runs</p>')
     parts.append('<p class="meta">Free generation evaluation</p>')
 
     def _research_q():
         parts.append(_section("Research Question"))
         parts.append("<p>How does the training schedule for introducing novel compositional knowledge affect a Transformer's ability to (a) acquire that knowledge and (b) retain it when the novel data is removed?</p>")
-        parts.append("<p>Does interleaving other classes with the burst class during the burst window produce more robust representations than presenting the burst class in isolation?</p>")
+        parts.append("<p>Does interleaving other classes with the special class during the burst window produce more robust representations than presenting the special class in isolation?</p>")
         parts.append("<h3>Why This Matters</h3>")
         parts.append("<p>Understanding how neural networks acquire and forget compositional skills is fundamental to continual learning, curriculum design, and knowledge editing.</p>")
     _try(_research_q, "Research Question")
@@ -103,7 +104,7 @@ def build(rd, res, cfg, cp):
         parts.append(f"<p>Model applies chains of {depth} bijection functions to 6 digits. Eval: free generation.</p>")
         parts.append("<h3>Data Split</h3><ul>")
         parts.append(f"<li><b>Other Classes:</b> {n_a} bijections x {depth} positions = {n_a**depth} other-class compositions</li>")
-        parts.append(f"<li><b>Burst Class:</b> 1 new bijection b* at pos {burst_pos}, all {n_a**(depth-1)} combos for other positions</li>")
+        parts.append(f"<li><b>Special Class:</b> 1 new bijection b* at pos {burst_pos}, all {n_a**(depth-1)} combos for other positions</li>")
         parts.append("</ul><h3>Model &amp; Training</h3><ul>")
         parts.append(f"<li>{nl}L Transformer, {ne}d, {nh}H, SwiGLU, no dropout</li>")
         parts.append(f"<li>AdamW lr={bcfg['lr']}, cosine decay, batch {bs}, bfloat16</li>")
@@ -112,10 +113,13 @@ def build(rd, res, cfg, cp):
 
     def _protocol():
         parts.append(_section("Training Protocol"))
-        parts.append(f"<h3>Foundation + Burst (0-{T-1})</h3>")
-        parts.append(f"<p>Other classes + Burst class mixed per schedule. ~{int(p*100)}% burst class exposure.</p>")
-        parts.append(f"<h3>Reversion ({T}-{T+U-1})</h3>")
-        parts.append("<p>Burst class removed. Other classes only. LR continues decaying.</p>")
+        if P > 0:
+            parts.append(f"<h3>All-but-special (0-{P-1})</h3>")
+            parts.append("<p>Other classes only. Shared across all schedules.</p>")
+        parts.append(f"<h3>Special ({P}-{P+T-1})</h3>")
+        parts.append(f"<p>Other classes + Special class mixed per schedule. ~{int(p*100)}% special class exposure.</p>")
+        parts.append(f"<h3>All-but-special ({P+T}-{P+T+U-1})</h3>")
+        parts.append("<p>Special class removed. Other classes only. LR continues decaying.</p>")
         parts.append("<h3>Evaluation</h3><ul><li>Every 10 steps, free generation, last 6 tokens</li></ul>")
     _try(_protocol, "Training Protocol")
 
@@ -128,14 +132,14 @@ def build(rd, res, cfg, cp):
         parts.append(_section(f"The {len(sc)} Training Schedules"))
         parts.append(_chart(cp.get("schedule_bars")))
         parts.append("<ul>")
-        parts.append(f"<li><b>burst_100:</b> Pure burst class for last {bl} steps</li>")
+        parts.append(f"<li><b>burst_100:</b> Pure special class for last {bl} steps</li>")
         for pct, frac in [(98, 0.98), (95, 0.95), (90, 0.90), (85, 0.85),
                           (75, 0.75), (50, 0.50), (25, 0.25)]:
             if f"burst_{pct}" in sc:
                 win = min(int(bl / frac), T)
-                parts.append(f"<li><b>burst_{pct}:</b> {pct}% burst class + {100-pct}% other classes for last {win} steps</li>")
+                parts.append(f"<li><b>burst_{pct}:</b> {pct}% special class + {100-pct}% other classes for last {win} steps</li>")
         if "burst_10" in sc:
-            parts.append(f"<li><b>burst_10:</b> ~{int(p*100)}% burst class randomly throughout (uniform control)</li>")
+            parts.append(f"<li><b>burst_10:</b> ~{int(p*100)}% special class randomly throughout (uniform control)</li>")
         parts.append("</ul>")
     _try(_schedules, "Training Schedules")
 
@@ -143,21 +147,21 @@ def build(rd, res, cfg, cp):
         thresholds = TrainConfig().reversion_thresholds
         parts.append(_section("Metrics"))
         parts.append("<ul>")
-        parts.append("<li><b>Peak Burst:</b> Burst class accuracy at end of training</li>")
+        parts.append("<li><b>Peak Special:</b> Special class accuracy at end of training</li>")
         for t in thresholds:
             pct = int(t * 100)
             parts.append(f"<li><b>{reversion_life_label(t)}:</b> Reversion steps to {pct}% of peak (cap {U})</li>")
-        parts.append("<li><b>Reversion AUC:</b> Area under burst class curve during reversion</li>")
+        parts.append("<li><b>Reversion AUC:</b> Area under special class curve during reversion</li>")
         parts.append("</ul>")
     _try(_metrics, "Metrics")
 
     def _hypotheses():
         parts.append(_section("Hypotheses"))
         for hid, txt, expl in [
-            (1, "All schedules achieve peak burst class ~ 1.0", f"Sufficient capacity for {n_a**(depth-1)} compositions."),
-            (2, "burst_10 (uniform) = most forgetting-resistant", "Distributed burst class integrates with other classes knowledge."),
-            (3, "burst_100 = fastest forgetting", "Isolated burst class creates fragile representations."),
-            (4, "Mixed schedules ordered by other-classes content", "More other-classes mixing = more robust burst class."),
+            (1, "All schedules achieve peak special class ~ 1.0", f"Sufficient capacity for {n_a**(depth-1)} compositions."),
+            (2, "burst_10 (uniform) = most forgetting-resistant", "Distributed special class integrates with other classes knowledge."),
+            (3, "burst_100 = fastest forgetting", "Isolated special class creates fragile representations."),
+            (4, "Mixed schedules ordered by other-classes content", "More other-classes mixing = more robust special class."),
             (5, "Other classes preserved regardless of schedule", "Other classes are majority of training."),
         ]:
             parts.append(f'<div class="hbox">H{hid}: {txt}</div><p>{expl}</p>')
@@ -173,9 +177,9 @@ def build(rd, res, cfg, cp):
     ae = {s: np.mean([r["log"][other_log_key][-1] for r in gr[s]]) for s in sc}
 
     def _result1():
-        parts.append(_section("Result 1: Peak Burst Class Accuracy"))
+        parts.append(_section("Result 1: Peak Special Class Accuracy"))
         parts.append(_chart(cp.get("peak_bars")))
-        parts.append('<div class="hbox">H1: All schedules achieve peak burst class ~ 1.0</div>')
+        parts.append('<div class="hbox">H1: All schedules achieve peak special class ~ 1.0</div>')
         if all(m >= 0.998 for m in pv.values()):
             parts.append(_verdict_html("SUPPORTED", f"All >= 0.998. Range: {min(pv.values()):.3f}-{max(pv.values()):.3f}.", "supported"))
         else:
@@ -183,9 +187,11 @@ def build(rd, res, cfg, cp):
     _try(_result1, "Result 1")
 
     def _result2():
-        parts.append(_section("Result 2: Burst Class Accuracy Over Time"))
+        parts.append(_section("Result 2: Special Class Accuracy Over Time"))
         parts.append(_chart(cp.get("overlay_burst")))
-        parts.append(f"<p>All reach ~100% by step {T}. Forgetting speed varies dramatically.</p>")
+        parts.append(_chart(cp.get("overlay_burst_aligned_start")))
+        parts.append(_chart(cp.get("overlay_burst_aligned_end")))
+        parts.append(f"<p>All reach ~100% by step {P+T}. Forgetting speed varies dramatically.</p>")
     _try(_result2, "Result 2")
 
     def _result3():
@@ -235,6 +241,8 @@ def build(rd, res, cfg, cp):
     def _result7():
         parts.append(_section("Result 7: Other Classes Preservation"))
         parts.append(_chart(cp.get("overlay_other")))
+        parts.append(_chart(cp.get("overlay_other_aligned_start")))
+        parts.append(_chart(cp.get("overlay_other_aligned_end")))
         parts.append('<div class="hbox">H5: Other classes preserved regardless of schedule</div>')
         if all(m >= 0.95 for m in ae.values()):
             parts.append(_verdict_html("SUPPORTED", "All other classes >= 0.95 at end.", "supported"))
@@ -251,13 +259,17 @@ def build(rd, res, cfg, cp):
         parts.append(_section("Per-Schedule Detail"))
         for path in (cp.get("per_sched") or []):
             parts.append(_chart(path))
+        for path in (cp.get("per_sched_start") or []):
+            parts.append(_chart(path))
+        for path in (cp.get("per_sched_end") or []):
+            parts.append(_chart(path))
     _try(_per_sched, "Per-Schedule Detail")
 
     def _probes():
         has_probes = cp.get("probe_dynamics") or cp.get("probe_heatmaps") or cp.get("probe_layer_schedule")
         if not has_probes:
             return
-        parts.append(_section("Linear Probes: Other vs Burst Representations"))
+        parts.append(_section("Linear Probes: Other vs Special Representations"))
         parts.append(
             "<p>Logistic regression probes trained on residual-stream activations at every "
             "(layer, token position) pair to classify Other-class vs Burst-class representations. "
@@ -308,7 +320,7 @@ def build(rd, res, cfg, cp):
         ])
         if not has_gs:
             return
-        parts.append(_section("Gradient Cosine Similarity: Burst vs Other Classes"))
+        parts.append(_section("Gradient Cosine Similarity: Special vs Other Classes"))
         parts.append("<h3>How It Works (Autoregressive Regime)</h3>")
         parts.append(
             "<p>The model is trained autoregressively: given a sequence "
@@ -333,7 +345,7 @@ def build(rd, res, cfg, cp):
         grad_sim_every = cfg.get("grad_sim_every", 50)
         parts.append(
             f"<p>Computed every {grad_sim_every} steps throughout training. "
-            "High similarity means the burst class is pulling the model in the same direction "
+            "High similarity means the special class is pulling the model in the same direction "
             "as the other classes -- suggesting integrated, durable representations. "
             "Low or negative similarity indicates conflicting gradient directions, "
             "which predicts faster forgetting during reversion.</p>"
@@ -361,6 +373,82 @@ def build(rd, res, cfg, cp):
             for p_ in cp["grad_cosine_per_seed"]:
                 parts.append(_chart(p_))
     _try(_grad_sim, "Gradient Cosine Similarity")
+
+    def _layer_grad_sim():
+        has_layer = any(cp.get(k) for k in [
+            "layer_cossim_heatmap", "layer_cossim_layer_sched",
+            "layer_cossim_end_burst_bars", "layer_cossim_overlay",
+            "layer_cossim_change", "layer_cossim_all_scheds",
+        ])
+        if not has_layer:
+            return
+        parts.append(_section("Per-Layer Gradient Cosine Similarity"))
+        parts.append(
+            "<p>The same burst-vs-other gradient cosine similarity, computed independently "
+            "for each named layer group: <b>emb</b> (token + position embeddings), "
+            "<b>L{i}_ln</b> (layernorms in block i), <b>L{i}_attn</b> (attention projections "
+            "in block i), <b>L{i}_mlp</b> (MLP in block i), and <b>ln_f</b> (final layernorm). "
+            "This reveals which parts of the network show the strongest gradient alignment "
+            "between burst and other classes, and how that changes over training.</p>"
+        )
+
+        if cp.get("layer_cossim_end_burst_bars"):
+            parts.append("<h3>End-of-Burst Snapshot: All Layers x All Schedules</h3>")
+            parts.append(
+                "<p>Grouped bars: each group is one layer, each bar is one schedule. "
+                "Layers with high cossim at end of burst are pulling burst and other classes "
+                "in the same direction — predicting durable representations.</p>"
+            )
+            parts.append(_chart(cp["layer_cossim_end_burst_bars"], 1000))
+
+        if cp.get("layer_cossim_layer_sched"):
+            parts.append("<h3>Layer x Schedule Heatmaps (End-Burst &amp; End-Reversion)</h3>")
+            parts.append(
+                "<p>Rows = layers, columns = schedules. Color = mean cosine similarity "
+                "in that phase window. Compare across schedules to see which layers "
+                "are most schedule-sensitive.</p>"
+            )
+            for p_ in (cp["layer_cossim_layer_sched"] or []):
+                parts.append(_chart(p_, 900))
+
+        if cp.get("layer_cossim_heatmap"):
+            parts.append("<h3>Layer x Step Heatmaps (Per Schedule)</h3>")
+            parts.append(
+                "<p>Rows = layers, columns = training steps. Vertical line = start of "
+                "reversion. Shows the full temporal trajectory of gradient alignment "
+                "for every layer simultaneously.</p>"
+            )
+            for p_ in (cp["layer_cossim_heatmap"] or []):
+                parts.append(_chart(p_, 1000))
+
+        if cp.get("layer_cossim_change"):
+            parts.append("<h3>Rate-of-Change Heatmaps (Per Schedule)</h3>")
+            parts.append(
+                "<p>d(cossim)/d(step) per layer. Red = cossim rising, blue = falling. "
+                "Highlights where gradient alignment shifts fastest — often at the "
+                "burst onset and at the start of reversion.</p>"
+            )
+            for p_ in (cp["layer_cossim_change"] or []):
+                parts.append(_chart(p_, 1000))
+
+        if cp.get("layer_cossim_overlay"):
+            parts.append("<h3>Per-Schedule Layer Overlays</h3>")
+            parts.append(
+                "<p>All layers as lines on one chart per schedule. "
+                "Useful for seeing which layers diverge from the mean.</p>"
+            )
+            for p_ in (cp["layer_cossim_overlay"] or []):
+                parts.append(_chart(p_, 900))
+
+        if cp.get("layer_cossim_all_scheds"):
+            parts.append("<h3>Per-Layer Schedule Comparisons</h3>")
+            parts.append(
+                "<p>One chart per layer, all schedules overlaid. "
+                "Best for comparing how a specific layer responds to different schedules.</p>"
+            )
+            for p_ in (cp["layer_cossim_all_scheds"] or []):
+                parts.append(_chart(p_, 900))
+    _try(_layer_grad_sim, "Per-Layer Gradient Cosine Similarity")
 
     def _pairwise_evo():
         if cp.get("pairwise_evo_by_metric"):
@@ -392,11 +480,75 @@ def build(rd, res, cfg, cp):
                 parts.append(_chart(p_, 700))
     _try(_pairwise_evo, "Pairwise Gradient Similarity")
 
+    def _adl():
+        has_adl = any(cp.get(k) for k in [
+            "adl_delta_norm", "adl_readability", "adl_causal_ablation",
+            "adl_end_burst_bars", "adl_readability_vs_auc",
+        ])
+        if not has_adl:
+            return
+        parts.append(_section("Activation Difference Lens (ADL)"))
+        parts.append(
+            "<p>The ADL metric measures the global activation bias introduced by the burst phase. "
+            "For each checkpoint, we compute the mean activation difference on <em>other-class</em> "
+            "inputs between the checkpoint model and the pre-burst model:</p>"
+            "<p style='text-align:center;font-family:monospace;'>"
+            "&delta;<sub>l</sub> = mean<sub>x &isin; other</sub>[ h<sup>checkpoint</sup><sub>l</sub>(x) "
+            "&minus; h<sup>pre-burst</sup><sub>l</sub>(x) ]</p>"
+            "<p>Applying the unembedding matrix (Logit Lens) to &delta;<sub>l</sub> reveals whether "
+            "the bias encodes burst-relevant tokens &mdash; a direct test of the wrapper hypothesis. "
+            "The causal ablation projects &delta; out of activations and measures the accuracy drop "
+            "on burst-class data: a large drop means the model relies on the global bias (wrapper); "
+            "a small drop means deeper, entangled representations.</p>"
+        )
+        parts.append(
+            "<p><b>Prediction:</b> burst_100 should show high readability and large ablation drop "
+            "(pure wrapper); burst_10 should show near-zero readability and small ablation drop "
+            "(deeper representations).</p>"
+        )
+        if cp.get("adl_delta_norm"):
+            parts.append("<h3>Activation Bias Magnitude (&Vert;&delta;&Vert;) Over Training</h3>")
+            parts.append(
+                "<p>Sum of delta norms across layers on other-class inputs. "
+                "A rising norm during the burst window indicates the model is learning a global "
+                "activation shift. Higher burstiness should produce a larger, faster-rising norm.</p>"
+            )
+            parts.append(_chart(cp["adl_delta_norm"]))
+        if cp.get("adl_readability"):
+            parts.append("<h3>Logit Lens Readability of Activation Bias</h3>")
+            parts.append(
+                "<p>Fraction of top-10 tokens (when applying the unembedding to &delta;) that are "
+                "burst-relevant (b* function token or output value tokens). "
+                "High readability = the bias directly encodes burst semantics = wrapper. "
+                "Low readability = the bias is not burst-specific = deeper representation.</p>"
+            )
+            parts.append(_chart(cp["adl_readability"]))
+        if cp.get("adl_causal_ablation"):
+            parts.append("<h3>Causal Ablation: Accuracy Drop When &delta; Projected Out</h3>")
+            parts.append(
+                "<p>Burst-class accuracy before minus after projecting &delta; out of activations "
+                "(mean over layers). Positive = the model relied on the global bias for burst accuracy. "
+                "Zero = the capability is encoded in directions orthogonal to &delta; (deeper).</p>"
+            )
+            parts.append(_chart(cp["adl_causal_ablation"]))
+        if cp.get("adl_end_burst_bars"):
+            parts.append("<h3>End-of-Burst Summary: Readability and Ablation Drop by Schedule</h3>")
+            parts.append(_chart(cp["adl_end_burst_bars"]))
+        if cp.get("adl_readability_vs_auc"):
+            parts.append("<h3>ADL Readability vs Forgetting Resistance</h3>")
+            parts.append(
+                "<p>Each dot is one seed &times; schedule. "
+                "If the wrapper hypothesis holds, higher readability (more wrapper-like) should "
+                "predict lower reversion AUC (faster forgetting).</p>"
+            )
+            parts.append(_chart(cp["adl_readability_vs_auc"], 800))
+    _try(_adl, "ADL")
+
     def _conclusions():
         parts.append(_section("Conclusions"))
         parts.append("<ul>")
         for b, t in [
-            ("Acquisition:", "All schedules acquire burst class (peak ~ 1.0)."),
+            ("Acquisition:", "All schedules acquire special class (peak ~ 1.0)."),
             ("Retention:", "burst_10 (uniform) is most forgetting-resistant."),
             ("Mixing:", "More other classes during burst = slower forgetting."),
             ("Variance:", "burst_100: fastest forgetting, high variance."),
@@ -405,7 +557,7 @@ def build(rd, res, cfg, cp):
             parts.append(f"<li><b>{b}</b> {t}</li>")
         parts.append("</ul>")
         parts.append("<h3>Interpretation</h3>")
-        parts.append("<p>Interleaving other classes with novel burst class creates integrated, durable representations. Isolated bursts create fragile shortcuts. Many small exposures > concentrated bursts.</p>")
+        parts.append("<p>Interleaving other classes with novel special class creates integrated, durable representations. Isolated bursts create fragile shortcuts. Many small exposures > concentrated bursts.</p>")
     _try(_conclusions, "Conclusions")
 
     def _followup():
@@ -416,8 +568,8 @@ def build(rd, res, cfg, cp):
             ("Capacity:", "Multiple novel functions"),
             ("Architecture:", "Different model sizes"),
             ("Duration:", "Longer reversion phases"),
-            ("Mechanistic:", "Activation patching for burst class localization"),
-            ("Recovery:", "Can burst class be recovered after forgetting?"),
+            ("Mechanistic:", "Activation patching for special class localization"),
+            ("Recovery:", "Can special class be recovered after forgetting?"),
         ]:
             parts.append(f"<li><b>{b}</b> {t}</li>")
         parts.append("</ul><h3>Open Questions</h3><ul>")
