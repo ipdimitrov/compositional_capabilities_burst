@@ -18,15 +18,30 @@ from burst._worker import n_target_for_step, sample_batch
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+_NET_OMEGACONF_KEYS = ("vocab_size", "context_size", "n_layer", "n_head", "n_embd")
+
+
+def _net_cfg(cfg: dict) -> OmegaConf:
+    return OmegaConf.create({
+        "compile": False, **{k: cfg[k] for k in _NET_OMEGACONF_KEYS},
+        "dropout": 0.0, "bias": False, "mlp": True,
+    })
+
+
+def make_net_bare(cfg: dict) -> nanoGPT:
+    return nanoGPT(_net_cfg(cfg)).to(DEVICE)
+
+
 def make_net(cfg: dict) -> nanoGPT:
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
+    net = make_net_bare(cfg)
     if DEVICE == "cuda":
         net = torch.compile(net)
+    return net
+
+
+def load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
+    net = nanoGPT(_net_cfg(cfg)).to(DEVICE)
+    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
     return net
 
 

@@ -48,26 +48,16 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from net.nanogpt import nanoGPT
-from burst.config import PHASE_BURST, PHASE_REVERSION, parse_run_config
+from burst.config import (
+    PHASE_BURST, PHASE_REVERSION, SCHEDULE_ORDER, SCHED_COLORS, parse_run_config,
+)
+from burst.train_utils import load_net
 from burst.probe import collect_activations_KPTN
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-SCHEDULES_ORDERED = [
-    "burst_100", "burst_98", "burst_95", "burst_90", "burst_85",
-    "burst_75", "burst_50", "burst_25", "burst_10",
-]
-SCHEDULE_COLORS = {
-    "burst_100": "#d62728",
-    "burst_98":  "#e05c1a",
-    "burst_95":  "#e07b1a",
-    "burst_90":  "#e0a01a",
-    "burst_85":  "#c5b800",
-    "burst_75":  "#6ab187",
-    "burst_50":  "#2196f3",
-    "burst_25":  "#1565c0",
-    "burst_10":  "#0d47a1",
-}
+SCHEDULES_ORDERED = SCHEDULE_ORDER
+SCHEDULE_COLORS = SCHED_COLORS
 
 KEY_STEPS = [0, 499, 749, 999]
 
@@ -75,17 +65,6 @@ KEY_STEPS = [0, 499, 749, 999]
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
-
-def _load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
-    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
-    return net
-
 
 def _burst_token_ids(cfg: dict, n_a: int) -> list[int]:
     n_alphabets = cfg.get("n_alphabets", 10)
@@ -146,7 +125,6 @@ def _logit_lens_readability(
     return {"readability_KT": readability_KT, "mean_rank_KT": mean_rank_KT}
 
 
-@torch.no_grad()
 @torch.no_grad()
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
@@ -229,12 +207,12 @@ def compute_adl_for_label(
     steps_to_run.sort()
 
     pre_burst_step = steps_to_run[0]
-    net_pre = _load_net(cfg, str(ckpt_files[pre_burst_step]))
+    net_pre = load_net(cfg, str(ckpt_files[pre_burst_step]))
     burst_ids = _burst_token_ids(cfg, n_a)
 
     results = []
     for step in steps_to_run:
-        net_ckpt = _load_net(cfg, str(ckpt_files[step]))
+        net_ckpt = load_net(cfg, str(ckpt_files[step]))
         delta_KTN = _compute_delta_KTN(net_ckpt, net_pre, other_docs_BL, n_samples)
         readability = _logit_lens_readability(net_ckpt, delta_KTN, burst_ids)
         delta_norm_K = delta_KTN.norm(dim=(1, 2)).tolist()
@@ -339,12 +317,12 @@ def ema_interpolation_probe(
     if alphas is None:
         alphas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
-    net_peak = _load_net(cfg, ckpt_peak)
-    net_rev = _load_net(cfg, ckpt_reverted)
+    net_peak = load_net(cfg, ckpt_peak)
+    net_rev = load_net(cfg, ckpt_reverted)
     peak_sd = {k: v.clone().float() for k, v in net_peak.state_dict().items()}
     rev_sd = {k: v.clone().float() for k, v in net_rev.state_dict().items()}
 
-    net_interp = _load_net(cfg, ckpt_peak)
+    net_interp = load_net(cfg, ckpt_peak)
 
     n = min(n_samples, burst_docs_BL.shape[0])
     idx = np.random.choice(burst_docs_BL.shape[0], n, replace=False)
@@ -372,8 +350,8 @@ def compute_task_vector_norms(
     cfg: dict,
 ) -> dict:
     """Compute ||W_post - W_pre|| per layer group."""
-    net_pre = _load_net(cfg, ckpt_pre)
-    net_post = _load_net(cfg, ckpt_post)
+    net_pre = load_net(cfg, ckpt_pre)
+    net_post = load_net(cfg, ckpt_post)
     layer_groups: dict[str, list[torch.Tensor]] = {}
     for name, p_post in net_post.named_parameters():
         p_pre = dict(net_pre.named_parameters())[name]
@@ -421,7 +399,7 @@ def compute_critical_sharpness(
 
     Returns the mean Hessian trace (scalar).
     """
-    net = _load_net(cfg, ckpt_path)
+    net = load_net(cfg, ckpt_path)
     net.train()
 
     n = min(n_samples, burst_docs_BL.shape[0])
@@ -433,12 +411,7 @@ def compute_critical_sharpness(
 
     traces = []
     # Disable flash attention — it doesn't support double backward (Hessian)
-    sdpa_ctx = torch.backends.cuda.sdp_kernel(
-        enable_flash=False, enable_math=True, enable_mem_efficient=False
-    ) if DEVICE == "cuda" else torch.backends.cuda.sdp_kernel.__new__(
-        torch.backends.cuda.sdp_kernel)
-
-    with sdpa_ctx:
+    with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
         for _ in range(n_hutchinson):
             net.zero_grad()
             logits = net(inp).float()
@@ -473,8 +446,8 @@ def compute_weight_delta_rank(
     Effective rank = number of singular values needed to explain
     `threshold` fraction of total variance.
     """
-    net_pre = _load_net(cfg, ckpt_pre)
-    net_post = _load_net(cfg, ckpt_post)
+    net_pre = load_net(cfg, ckpt_pre)
+    net_post = load_net(cfg, ckpt_post)
 
     ranks = {}
     total_norms = {}
@@ -783,72 +756,7 @@ def analyse_run(
 # Plotting
 # ---------------------------------------------------------------------------
 
-def _plotly_to_png_matplotlib(fig_plotly, path: str, width: int = 1200, height: int = 600) -> None:
-    """Export a Plotly figure to PNG using matplotlib as fallback (no Chrome needed)."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-
-    fig_data = fig_plotly.to_dict()
-    traces = fig_data.get("data", [])
-    layout = fig_data.get("layout", {})
-    title = layout.get("title", {})
-    title_text = title.get("text", "") if isinstance(title, dict) else str(title)
-    # Strip HTML tags from title
-    import re
-    title_text = re.sub(r"<[^>]+>", "", title_text).strip()
-
-    dpi = 100
-    fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
-
-    for trace in traces:
-        trace_type = trace.get("type", "scatter")
-        x = trace.get("x", [])
-        y = trace.get("y", [])
-        name = trace.get("name", "")
-        color = None
-        line_info = trace.get("line", {})
-        marker_info = trace.get("marker", {})
-        if isinstance(line_info, dict) and "color" in line_info:
-            color = line_info["color"]
-        elif isinstance(marker_info, dict) and "color" in marker_info:
-            mc = marker_info["color"]
-            if isinstance(mc, str):
-                color = mc
-
-        if trace_type in ("scatter", "scattergl"):
-            mode = trace.get("mode", "lines")
-            kwargs = dict(label=name)
-            if color:
-                kwargs["color"] = color
-            if "lines" in mode:
-                ax.plot(x, y, **kwargs)
-            if "markers" in mode:
-                ax.scatter(x, y, color=color, s=30, zorder=5)
-        elif trace_type == "bar":
-            if color:
-                ax.bar(x, y, label=name, color=color, alpha=0.8)
-            else:
-                ax.bar(x, y, label=name, alpha=0.8)
-
-    xaxis = layout.get("xaxis", {})
-    yaxis = layout.get("yaxis", {})
-    if isinstance(xaxis, dict):
-        ax.set_xlabel(xaxis.get("title", {}).get("text", "") if isinstance(xaxis.get("title"), dict) else "")
-    if isinstance(yaxis, dict):
-        ax.set_ylabel(yaxis.get("title", {}).get("text", "") if isinstance(yaxis.get("title"), dict) else "")
-
-    ax.set_title(title_text[:100], fontsize=10, wrap=True)
-    if traces:
-        handles, labels = ax.get_legend_handles_labels()
-        if labels:
-            ax.legend(handles[:15], labels[:15], fontsize=7, loc="best")
-
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
+from burst.plot_utils import plotly_to_png_matplotlib as _plotly_to_png_matplotlib
 
 
 def make_dashboard(analyses: list[dict], out_dir: Path) -> None:

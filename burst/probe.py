@@ -26,7 +26,7 @@ from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
 from burst.experiment import DepthNData, build_data
 from burst.train_utils import (
-    DEVICE, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK,
+    DEVICE, load_net, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK,
 )
 from burst.config import DATA_SEED, parse_run_config
 from burst.parallel import run_job_pool
@@ -178,19 +178,6 @@ def fit_probes_at_checkpoint(
     return {"train_acc_KT": train_acc_KT}
 
 
-def _load_checkpoint(cfg: dict, ckpt_path: str) -> nanoGPT:
-    """Load a model from a saved checkpoint file."""
-    from omegaconf import OmegaConf
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
-    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
-    return net
-
-
 def probe_from_checkpoints(
     job: dict,
     ckpt_dir: Path,
@@ -213,7 +200,7 @@ def probe_from_checkpoints(
         if step not in available_ckpts:
             continue
         print(f"    Loading ckpt step {step}...", flush=True)
-        net = _load_checkpoint(cfg, available_ckpts[step])
+        net = load_net(cfg, available_ckpts[step])
         probe_results[step] = fit_probes_at_checkpoint(
             net, other_docs_BL, burst_docs_BL, probe_max_samples)
         del net

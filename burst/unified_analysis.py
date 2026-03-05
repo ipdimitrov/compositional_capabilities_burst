@@ -34,6 +34,7 @@ from omegaconf import OmegaConf
 
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
+from burst.train_utils import load_net, make_net_bare
 from burst.config import (
     PHASE_BURST, PHASE_REVERSION, SCHEDULE_ORDER, SCHED_COLORS,
     parse_run_config,
@@ -65,22 +66,6 @@ class SeedCheckpoints:
     rev_step: int
 
 
-def _make_net(cfg: dict) -> nanoGPT:
-    return nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
-
-
-def _load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
-    net = _make_net(cfg)
-    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
-    return net
-
-
-@torch.no_grad()
 @torch.no_grad()
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
@@ -254,7 +239,7 @@ def compute_frankenstein(
     for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
         for sc in seeds[:n_seeds]:
-            net = _make_net(sc.cfg)
+            net = make_net_bare(sc.cfg)
             all_hybrids: list[tuple[str, dict]] = []
             for k in cut_points:
                 all_hybrids.append(("pre_bottom", _build_hybrid_sd(sc.sd_pre, sc.sd_peak, k)))
@@ -304,7 +289,7 @@ def compute_cross_burst_frankenstein(
         for sc_a, sc_b in zip(seeds_a, seeds_b):
             if len(per_seed) >= n_seeds:
                 break
-            net = _make_net(sc_a.cfg)
+            net = make_net_bare(sc_a.cfg)
             all_hybrids: list[tuple[str, dict]] = []
             for k in cut_points:
                 all_hybrids.append(("a_bottom", _build_hybrid_sd(sc_a.sd_peak, sc_b.sd_peak, k)))
@@ -356,7 +341,7 @@ def compute_lmc_dual(
         per_seed: list[dict] = []
         for sc in seeds[:n_seeds]:
             V = sc.cfg["vocab_size"]
-            net = _make_net(sc.cfg)
+            net = make_net_bare(sc.cfg)
 
             all_interps_pre_peak = [
                 {k: (1 - a) * sc.sd_pre_cpu[k] + a * sc.sd_peak_cpu[k] for k in sc.sd_pre_cpu}
@@ -424,7 +409,7 @@ def compute_ema_dual(
     for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
         for sc in seeds[:n_seeds]:
-            net = _make_net(sc.cfg)
+            net = make_net_bare(sc.cfg)
 
             all_pre_peak = [
                 {k: (1 - a) * sc.sd_pre_cpu[k] + a * sc.sd_peak_cpu[k] for k in sc.sd_pre_cpu}
@@ -485,7 +470,7 @@ def compute_pruning_dual(
         per_seed: list[dict] = []
         for sc in seeds[:n_seeds]:
             sd_orig = sc.sd_peak
-            net = _make_net(sc.cfg)
+            net = make_net_bare(sc.cfg)
             all_w = torch.cat([v.view(-1).abs() for v in sd_orig.values()])
 
             thresholds = [torch.quantile(all_w, s) if s > 0 else None for s in sparsities]
@@ -534,7 +519,7 @@ def compute_transfer_dual(
             tau = {k: sc_src.sd_peak_cpu[k] - sc_src.sd_pre_cpu[k] for k in sc_src.sd_peak_cpu}
             transferred = {k: sc_tgt.sd_pre_cpu[k] + tau[k] for k in sc_tgt.sd_pre_cpu}
 
-            net = _make_net(sc_src.cfg)
+            net = make_net_bare(sc_src.cfg)
             net.load_state_dict(transferred)
             burst_acc = _free_gen_acc(net, burst_sub, prompt_len)
             other_acc = _free_gen_acc(net, other_sub, prompt_len)
@@ -566,7 +551,7 @@ def compute_relearning_dual(
         per_seed: list[dict] = []
         for sc in seeds[:n_seeds]:
             cfg = sc.cfg
-            net = _make_net(cfg)
+            net = make_net_bare(cfg)
             net.load_state_dict(sc.sd_rev)
 
             optim_cfg = OmegaConf.create({
@@ -1005,7 +990,7 @@ def compute_forgetting_grad_alignment(
     for sched, seeds in preloaded.items():
         per_seed: list[float] = []
         for sc in seeds[:n_seeds]:
-            net = _make_net(sc.cfg)
+            net = make_net_bare(sc.cfg)
             net.load_state_dict(sc.sd_peak)
             net.train()
             net.zero_grad()
@@ -1064,7 +1049,7 @@ def compute_sharpness(
     for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
         for sc in seeds[:n_seeds]:
-            net = _make_net(sc.cfg)
+            net = make_net_bare(sc.cfg)
             net.load_state_dict(sc.sd_peak)
             net.train()
 
@@ -1083,12 +1068,7 @@ def compute_sharpness(
                 global_traces = []
                 layer_traces: dict[str, list[float]] = {g: [] for g in layer_group_names}
 
-                sdpa_ctx = torch.backends.cuda.sdp_kernel(
-                    enable_flash=False, enable_math=True, enable_mem_efficient=False
-                ) if DEVICE == "cuda" else torch.backends.cuda.sdp_kernel.__new__(
-                    torch.backends.cuda.sdp_kernel)
-
-                with sdpa_ctx:
+                with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
                     for _ in range(n_hutchinson):
                         net.zero_grad()
                         logits = net(inp_t).float()
@@ -1135,81 +1115,7 @@ def compute_sharpness(
 # Dashboard generation
 # ---------------------------------------------------------------------------
 
-def _plotly_to_mpl_color(c):
-    if not isinstance(c, str):
-        return c
-    m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", c)
-    if m:
-        r, g, b = int(m.group(1)) / 255, int(m.group(2)) / 255, int(m.group(3)) / 255
-        a = float(m.group(4)) if m.group(4) else 1.0
-        return (r, g, b, a)
-    return c
-
-
-def _save_png(fig, path: str, width: int = 1200, height: int = 600) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig_data = fig.to_dict()
-    traces = fig_data.get("data", [])
-    layout = fig_data.get("layout", {})
-    title = layout.get("title", {})
-    title_text = title.get("text", "") if isinstance(title, dict) else str(title)
-    title_text = re.sub(r"<[^>]+>", "", title_text).strip()
-
-    dpi = 100
-    mfig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
-
-    for trace in traces:
-        trace_type = trace.get("type", "scatter")
-        x = trace.get("x", [])
-        y = trace.get("y", [])
-        name = trace.get("name", "")
-        color = None
-        line_info = trace.get("line", {})
-        marker_info = trace.get("marker", {})
-        if isinstance(line_info, dict) and "color" in line_info:
-            color = _plotly_to_mpl_color(line_info["color"])
-        elif isinstance(marker_info, dict) and "color" in marker_info:
-            mc = marker_info["color"]
-            if isinstance(mc, str):
-                color = _plotly_to_mpl_color(mc)
-
-        kwargs = dict(label=name)
-        if color and isinstance(color, (str, tuple)):
-            kwargs["color"] = color
-
-        if trace_type in ("scatter", "scattergl"):
-            mode = trace.get("mode", "lines")
-            if "lines" in mode:
-                ax.plot(x, y, **kwargs)
-            elif "markers" in mode:
-                ax.scatter(x, y, s=30, zorder=5, **kwargs)
-        elif trace_type == "bar":
-            bar_colors = marker_info.get("color") if isinstance(marker_info, dict) else None
-            if isinstance(bar_colors, list):
-                kwargs.pop("color", None)
-                kwargs["color"] = [_plotly_to_mpl_color(c) for c in bar_colors[:len(x)]]
-            ax.bar(x, y, alpha=0.8, **kwargs)
-        elif trace_type == "heatmap":
-            pass
-
-    xaxis = layout.get("xaxis", {})
-    yaxis = layout.get("yaxis", {})
-    if isinstance(xaxis, dict):
-        ax.set_xlabel(xaxis.get("title", {}).get("text", "") if isinstance(xaxis.get("title"), dict) else "")
-    if isinstance(yaxis, dict):
-        ax.set_ylabel(yaxis.get("title", {}).get("text", "") if isinstance(yaxis.get("title"), dict) else "")
-
-    ax.set_title(title_text[:120], fontsize=10, wrap=True)
-    handles, labels = ax.get_legend_handles_labels()
-    if labels:
-        ax.legend(handles[:15], labels[:15], fontsize=7, loc="best")
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=dpi, bbox_inches="tight")
-    plt.close(mfig)
+from burst.plot_utils import save_png as _save_png
 
 
 def _bar_with_seeds(
