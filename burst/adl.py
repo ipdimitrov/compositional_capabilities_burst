@@ -35,23 +35,13 @@ from omegaconf import OmegaConf
 from net.nanogpt import nanoGPT
 from burst.parallel import run_job_pool
 from burst.config import PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION, parse_run_config
+from burst.train_utils import load_net
 from burst.gpu import gpu_cfg
 from burst.probe import collect_activations_KPTN
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 ADL_ENABLED = False
-
-
-def _load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
-    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
-    return net
 
 
 @torch.no_grad()
@@ -281,8 +271,8 @@ def _worker_main():
     phase = job["phase"]
     bs = args.adl_batch_size
 
-    net_checkpoint = _load_net(cfg, ckpt_path)
-    net_pre_burst = _load_net(cfg, pre_burst_ckpt)
+    net_checkpoint = load_net(cfg, ckpt_path)
+    net_pre_burst = load_net(cfg, pre_burst_ckpt)
 
     delta_KTN = compute_delta_KTN(net_checkpoint, net_pre_burst, other_docs_BL, n_samples=bs)
 

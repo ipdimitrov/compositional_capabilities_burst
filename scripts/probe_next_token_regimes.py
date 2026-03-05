@@ -33,7 +33,7 @@ from itertools import combinations
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
 from burst.experiment import DepthNData, build_data
-from burst.train_utils import DEVICE, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK
+from burst.train_utils import DEVICE, load_net, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK
 from burst.config import DATA_SEED, SCHED_COLORS, SCHEDULE_ORDER, parse_run_config
 from burst.parallel import run_job_pool
 from burst.gpu import gpu_cfg
@@ -223,18 +223,6 @@ def learned_probe_accuracy_K(
     return acc_K
 
 
-def _load_checkpoint(cfg: dict, ckpt_path: str) -> nanoGPT:
-    from omegaconf import OmegaConf
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
-    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
-    return net
-
-
 def probe_from_checkpoints_at_steps(
     job: dict,
     ckpt_dir: Path,
@@ -261,7 +249,7 @@ def probe_from_checkpoints_at_steps(
             print(f"    WARNING: no checkpoint for step {step}, skipping", flush=True)
             continue
         print(f"    Loading ckpt step {step}...", flush=True)
-        net = _load_checkpoint(cfg, available_ckpts[step])
+        net = load_net(cfg, available_ckpts[step])
         net.eval()
         results_by_step[step] = probe_all_layers(
             net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth)
@@ -591,6 +579,9 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir, step_diffs_per
 
 def _worker_main():
     """Subprocess entry: load pickled args, run single probe job, save results."""
+    import warnings
+    warnings.filterwarnings("ignore", message=".*backward hook.*")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-path", required=True)
     parser.add_argument("--data-path", required=True)

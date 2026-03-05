@@ -27,8 +27,12 @@ def run_job_pool(
     data_payload: Any,
     poll_interval: float,
     tmp_prefix: str,
+    max_retries: int = 2,
 ) -> list[JobResult]:
-    """Run jobs in parallel via subprocess pool."""
+    """Run jobs in parallel via subprocess pool.
+
+    Failed jobs are retried up to max_retries times (handles transient CUDA OOM).
+    """
     n_workers = min(len(jobs), n_workers)
     tmp_dir = Path(tempfile.mkdtemp(prefix=tmp_prefix))
 
@@ -38,15 +42,16 @@ def run_job_pool(
             pickle.dump(data_payload, f)
 
     t0 = time.time()
+    retry_counts: dict[int, int] = {}
 
-    def launch(idx, max_retries=5):
+    def launch(idx, max_popen_retries=5):
         job = jobs[idx]
         job_path = str(tmp_dir / f"_job_{idx}.pkl")
         out_path = str(tmp_dir / f"_result_{idx}.pkl")
         with open(job_path, "wb") as f:
             pickle.dump(job, f)
         cmd = build_cmd(worker_script, job_path, data_path, out_path)
-        for attempt in range(max_retries):
+        for attempt in range(max_popen_retries):
             try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 return proc, out_path
@@ -64,30 +69,47 @@ def run_job_pool(
 
     results: list[JobResult] = []
     n_done = 0
+    retry_queue: list[int] = []
 
     while n_done < len(jobs):
         time.sleep(poll_interval)
         for label in [l for l, (_, proc, _) in active.items() if proc.poll() is not None]:
             idx, proc, out_path = active.pop(label)
-            n_done += 1
             elapsed = time.time() - t0
 
             if proc.returncode == 0 and Path(out_path).exists():
                 with open(out_path, "rb") as f:
                     data = pickle.load(f)
                 jr = JobResult(label=label, success=True, data=data, elapsed=elapsed)
+                n_done += 1
+                results.append(jr)
+                if on_done:
+                    on_done(jr, n_done, len(jobs))
             else:
-                se = proc.stderr.read().decode() if proc.stderr else ""
-                jr = JobResult(label=label, success=False, error=se[:500], elapsed=elapsed)
+                attempt = retry_counts.get(idx, 0)
+                if attempt < max_retries:
+                    retry_counts[idx] = attempt + 1
+                    retry_queue.append(idx)
+                    se = proc.stderr.read().decode() if proc.stderr else ""
+                    print(f"  [{label}] failed (attempt {attempt + 1}/{max_retries + 1}), "
+                          f"retrying... stderr: {se[:200]}", flush=True)
+                else:
+                    se = proc.stderr.read().decode() if proc.stderr else ""
+                    jr = JobResult(label=label, success=False, error=se[-1500:], elapsed=elapsed)
+                    n_done += 1
+                    results.append(jr)
+                    if on_done:
+                        on_done(jr, n_done, len(jobs))
 
-            results.append(jr)
-            if on_done:
-                on_done(jr, n_done, len(jobs))
+        while retry_queue and len(active) < n_workers:
+            ridx = retry_queue.pop(0)
+            p, op = launch(ridx)
+            active[jobs[ridx]["label"]] = (ridx, p, op)
 
-            if next_idx < len(jobs):
-                p, op = launch(next_idx)
-                active[jobs[next_idx]["label"]] = (next_idx, p, op)
-                next_idx += 1
+        while next_idx < len(jobs) and len(active) < n_workers:
+            p, op = launch(next_idx)
+            active[jobs[next_idx]["label"]] = (next_idx, p, op)
+            next_idx += 1
 
     for f in tmp_dir.glob("*"):
         f.unlink()

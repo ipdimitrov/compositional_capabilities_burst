@@ -88,14 +88,6 @@ class CausalSelfAttention(nn.Module):
             return y, (k, v)
         return y
 
-    def get_attention(self, Q, K, B, T, C):
-        bias = torch.tril(torch.ones(C, C)).view(1, 1, C, C)
-        att = (Q @ K.transpose(-2, -1)) * (1.0 / math.sqrt(K.size(-1)))
-        att = att.masked_fill(bias[:,:,:T,:T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-
-        return att
-
 
 class MLP(nn.Module):
     def __init__(self, config):
@@ -219,7 +211,9 @@ class nanoGPT(nn.Module):
         device = prompt_BT.device
         B, T_prompt = prompt_BT.shape
 
-        # --- Prefill: full forward pass over the prompt, collect KV caches ---
+        generated = torch.empty(B, T_prompt + n_new, dtype=torch.long, device=device)
+        generated[:, :T_prompt] = prompt_BT
+
         tok_emb = self.transformer.wte(prompt_BT)
         pos = torch.arange(0, T_prompt, dtype=torch.long, device=device)
         pos_emb = self.transformer.wpe(pos)
@@ -231,13 +225,12 @@ class nanoGPT(nn.Module):
             kv_caches.append(kv)
 
         x = self.transformer.ln_f(x)
-        next_tok = self.LM_head(x)[:, -1, :].argmax(dim=-1, keepdim=True)
+        next_tok = self.LM_head(x)[:, -1, :].argmax(dim=-1)
+        generated[:, T_prompt] = next_tok
+        next_tok = next_tok.unsqueeze(-1)
 
-        generated = torch.cat([prompt_BT, next_tok], dim=1)
-
-        # --- Decode: single-token steps using the growing KV cache ---
-        for _ in range(n_new - 1):
-            t_cur = generated.shape[1]
+        for i in range(1, n_new):
+            t_cur = T_prompt + i
             tok_emb = self.transformer.wte(next_tok)
             pos = torch.tensor([t_cur - 1], dtype=torch.long, device=device)
             pos_emb = self.transformer.wpe(pos)
@@ -250,7 +243,8 @@ class nanoGPT(nn.Module):
             kv_caches = new_kv_caches
 
             x = self.transformer.ln_f(x)
-            next_tok = self.LM_head(x)[:, -1, :].argmax(dim=-1, keepdim=True)
-            generated = torch.cat([generated, next_tok], dim=1)
+            next_tok = self.LM_head(x)[:, -1, :].argmax(dim=-1)
+            generated[:, t_cur] = next_tok
+            next_tok = next_tok.unsqueeze(-1)
 
         return generated

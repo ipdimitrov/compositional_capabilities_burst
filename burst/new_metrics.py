@@ -54,6 +54,7 @@ from omegaconf import OmegaConf
 
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
+from burst.train_utils import load_net
 from burst.config import (
     PHASE_BURST, PHASE_REVERSION, SCHEDULE_ORDER, SCHED_COLORS,
     parse_run_config,
@@ -69,22 +70,10 @@ SCHEDULE_COLORS = SCHED_COLORS
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
-    net = nanoGPT(OmegaConf.create({
-        "compile": False, "vocab_size": cfg["vocab_size"],
-        "context_size": cfg["context_size"],
-        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
-        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
-    })).to(DEVICE)
-    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
-    return net
-
-
 def _flat_params(net: nanoGPT) -> torch.Tensor:
     return torch.cat([p.detach().float().cpu().view(-1) for p in net.parameters()])
 
 
-@torch.no_grad()
 @torch.no_grad()
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
@@ -189,7 +178,7 @@ def compute_task_vector_transfer(
 
             # Apply τ to target pre-burst model and evaluate
             transferred_sd = {k: tgt_sd[k] + tau[k] for k in tgt_sd}
-            net_pre_tgt = _load_net(cfg, str(files_tgt[pre_step_tgt]))
+            net_pre_tgt = load_net(cfg, str(files_tgt[pre_step_tgt]))
             net_pre_tgt.load_state_dict(transferred_sd)
 
             n = min(256, burst_docs_BL.shape[0])
@@ -341,7 +330,7 @@ def compute_relearning_efficiency(
 
             rev_step = max(files.keys())
             cfg = r["config"]
-            net = _load_net(cfg, str(files[rev_step]))
+            net = load_net(cfg, str(files[rev_step]))
 
             optim_cfg = OmegaConf.create({
                 "learning_rate": cfg["lr"] * 0.3,
@@ -462,7 +451,7 @@ def compute_linear_mode_connectivity(
             rev_sd = {k: v.float() for k, v in torch.load(
                 str(files[rev_step]), map_location="cpu", weights_only=True).items()}
 
-            net_interp = _load_net(cfg, str(files[peak_step]))
+            net_interp = load_net(cfg, str(files[peak_step]))
             loss_curve = []
             for alpha in alphas:
                 interp_sd = {k: (1 - alpha) * peak_sd[k] + alpha * rev_sd[k] for k in peak_sd}
@@ -551,18 +540,16 @@ def compute_pruning_robustness(
             peak_step = min(available, key=lambda x: abs(x - (T - 1)))
             cfg = r["config"]
 
+            base_sd = torch.load(str(files[peak_step]), map_location=DEVICE, weights_only=True)
+            all_weights = torch.cat([v.view(-1).abs() for v in base_sd.values()])
+            net = load_net(cfg, str(files[peak_step]))
+
             acc_curve = []
             for sparsity in sparsities:
-                net = _load_net(cfg, str(files[peak_step]))
                 if sparsity > 0:
-                    sd = net.state_dict()
-                    all_weights = torch.cat([p.view(-1).abs() for p in net.parameters()])
                     threshold = torch.quantile(all_weights, sparsity)
-                    new_sd = {}
-                    for name, param in sd.items():
-                        mask = param.abs() >= threshold
-                        new_sd[name] = param * mask.to(param.dtype)
-                    net.load_state_dict(new_sd)
+                    pruned_sd = {k: v * (v.abs() >= threshold).to(v.dtype) for k, v in base_sd.items()}
+                    net.load_state_dict(pruned_sd)
                 acc = _free_gen_acc(net, docs, prompt_len)
                 acc_curve.append(acc)
 
@@ -898,72 +885,7 @@ def compute_burst_position_comparison(existing_analyses: list[dict]) -> dict:
 # Dashboard generation
 # ---------------------------------------------------------------------------
 
-def _save_png(fig, path: str, width: int = 1200, height: int = 600) -> None:
-    try:
-        fig.write_image(path, width=width, height=height, scale=2)
-    except Exception:
-        _plotly_to_png_matplotlib(fig, path, width=width, height=height)
-
-
-def _plotly_to_png_matplotlib(fig_plotly, path: str, width: int = 1200, height: int = 600) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import re
-
-    fig_data = fig_plotly.to_dict()
-    traces = fig_data.get("data", [])
-    layout = fig_data.get("layout", {})
-    title = layout.get("title", {})
-    title_text = title.get("text", "") if isinstance(title, dict) else str(title)
-    title_text = re.sub(r"<[^>]+>", "", title_text).strip()
-
-    dpi = 100
-    fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
-
-    for trace in traces:
-        trace_type = trace.get("type", "scatter")
-        x = trace.get("x", [])
-        y = trace.get("y", [])
-        name = trace.get("name", "")
-        color = None
-        line_info = trace.get("line", {})
-        marker_info = trace.get("marker", {})
-        if isinstance(line_info, dict) and "color" in line_info:
-            color = line_info["color"]
-        elif isinstance(marker_info, dict) and "color" in marker_info:
-            mc = marker_info["color"]
-            if isinstance(mc, str):
-                color = mc
-
-        kwargs = dict(label=name)
-        if color:
-            kwargs["color"] = color
-
-        if trace_type in ("scatter", "scattergl"):
-            mode = trace.get("mode", "lines")
-            if "lines" in mode:
-                ax.plot(x, y, **kwargs)
-            elif "markers" in mode:
-                ax.scatter(x, y, s=30, zorder=5, **kwargs)
-        elif trace_type == "bar":
-            ax.bar(x, y, alpha=0.8, **kwargs)
-
-    xaxis = layout.get("xaxis", {})
-    yaxis = layout.get("yaxis", {})
-    if isinstance(xaxis, dict):
-        ax.set_xlabel(xaxis.get("title", {}).get("text", "") if isinstance(xaxis.get("title"), dict) else "")
-    if isinstance(yaxis, dict):
-        ax.set_ylabel(yaxis.get("title", {}).get("text", "") if isinstance(yaxis.get("title"), dict) else "")
-
-    ax.set_title(title_text[:100], fontsize=10, wrap=True)
-    handles, labels = ax.get_legend_handles_labels()
-    if labels:
-        ax.legend(handles[:15], labels[:15], fontsize=7, loc="best")
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
+from burst.plot_utils import save_png as _save_png
 
 
 _METRIC_DESCRIPTIONS = {

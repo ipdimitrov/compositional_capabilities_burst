@@ -20,7 +20,7 @@ Dimension key:
     E: number of per-example gradient samples (for SNR)
     T: number of token positions
 """
-import sys, os, argparse, pickle, json, contextlib
+import sys, os, argparse, pickle, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -214,11 +214,7 @@ def _grad_snr_per_layer(net, docs_np: np.ndarray, n_examples: int,
     buffers = {k: v.detach() for k, v in net.named_buffers()}
 
     def loss_fn(params, inp_1L, tgt_1L):
-        # Math attention is required: flash attention lacks a vmap batching rule
-        # for its backward pass and falls back to a slow path.
-        with torch.backends.cuda.sdp_kernel(
-            enable_flash=False, enable_math=True, enable_mem_efficient=False
-        ) if DEVICE == "cuda" else contextlib.nullcontext():
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
             logits = functional_call(net, (params, buffers), (inp_1L.unsqueeze(0),))
         return F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt_1L.reshape(-1))
 
