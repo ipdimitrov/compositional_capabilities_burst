@@ -4,6 +4,11 @@ Change any parameter here and it propagates everywhere.
 
 To add/remove a schedule, edit BURST_FRACTIONS below — everything else
 (names, ordering, display labels, colours) is derived automatically.
+
+Burst phase length scales inversely with burst concentration so that all
+schedules see the same total number of special-class examples:
+    burst_steps = BURST_BASE_STEPS * (100 / pct)
+e.g. burst_100 → 500 steps, burst_50 → 1000 steps, burst_25 → 2000 steps.
 """
 from dataclasses import dataclass, field
 import colorsys
@@ -26,10 +31,11 @@ CLASS_BURST = "burst"
 
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
+# burst_10 removed: use 25–100% only (sampling-based, variable-length burst)
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 98, 95, 90, 85, 75, 50, 25, 10]
+BURST_FRACTIONS = [100, 98, 95, 90, 85, 75, 50, 25]
 
-UNIFORM_PCT = 10
+UNIFORM_PCT = 25
 
 # ---------------------------------------------------------------------------
 # Everything below is derived from BURST_FRACTIONS
@@ -63,7 +69,7 @@ UNIFORM_SCHEDULE: str = _sched_name(UNIFORM_PCT)
 MIXED_FRACTIONS: dict[str, float] = {
     _sched_name(p): p / 100.0
     for p in _sorted_pcts
-    if p != 100 and _sched_name(p) != UNIFORM_SCHEDULE
+    if p != 100
 }
 
 SCHED_COLORS: dict[str, str] = {
@@ -92,6 +98,24 @@ DATA_SEED = 999
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
+BURST_BASE_STEPS = 500
+
+
+def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) -> int:
+    """Burst phase length for a given schedule.
+
+    All schedules see the same total special-class examples:
+        burst_steps * frac = base_steps * 1.0
+    So burst_100 → base_steps, burst_50 → 2×base_steps, burst_25 → 4×base_steps.
+    """
+    if schedule == "burst_100":
+        return base_steps
+    if schedule in MIXED_FRACTIONS:
+        frac = MIXED_FRACTIONS[schedule]
+        return max(base_steps, int(round(base_steps / frac)))
+    return base_steps
+
+
 @dataclass
 class TrainConfig:
     n_alphabets: int = 10
@@ -114,8 +138,8 @@ class TrainConfig:
     batch_size: int = 128
     grad_sim_batch_size: int = 2048
     pre_burst_steps: int = 500
-    total_steps: int = 500
-    p_target: float = 0.10
+    total_steps: int = BURST_BASE_STEPS
+    p_target: float = 0.25
     reversion_steps: int = 500
     eval_every: int = 25
     reversion_thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70)

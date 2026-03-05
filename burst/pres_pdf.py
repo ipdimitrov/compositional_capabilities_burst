@@ -601,9 +601,11 @@ def build(rd, res, cfg, cp):
 def main():
     rd = Path(sys.argv[1]) if len(sys.argv) > 1 else sorted(Path("data").glob("burst_d*"))[-1]
     print(f"Loading from {rd}...")
-    with open(rd / "all_results.pkl", "rb") as f:
+    from burst.train_utils import resolve_run_paths
+    cfg_path, logs_dir, _ = resolve_run_paths(rd)
+    with open(logs_dir / "all_results.pkl", "rb") as f:
         results = pickle.load(f)
-    with open(rd / "config.json") as f:
+    with open(cfg_path) as f:
         cfg = json.load(f)
     print(f"  {len(results)} results\nGenerating charts...")
     cp = generate_all(rd, results, cfg)

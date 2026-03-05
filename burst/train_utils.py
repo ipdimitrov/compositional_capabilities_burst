@@ -120,11 +120,36 @@ def retrain_with_callbacks(
     return net
 
 
-def load_results(run_dir):
+def resolve_run_paths(run_dir) -> tuple[Path, Path, Path]:
+    """Return (config_path, logs_dir, results_dir) for both old and new layouts."""
     run_dir = Path(run_dir)
-    with open(run_dir / "all_results.pkl", "rb") as f:
+    results_dir = run_dir / "results"
+    logs_dir = run_dir / "logs"
+
+    if (results_dir / "config.json").exists():
+        cfg_path = results_dir / "config.json"
+    else:
+        cfg_path = run_dir / "config.json"
+
+    ld = logs_dir if logs_dir.exists() else run_dir
+    rd = results_dir if results_dir.exists() else run_dir
+    return cfg_path, ld, rd
+
+
+def load_results(run_dir):
+    """Load all_results.pkl and config.json from a run directory.
+
+    Supports both old layout (flat) and new layout (results/ + logs/).
+    """
+    cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
+
+    pkl_path = logs_dir / "all_results.pkl"
+    if not pkl_path.exists():
+        pkl_path = Path(run_dir) / "all_results.pkl"
+
+    with open(pkl_path, "rb") as f:
         results = pickle.load(f)
-    with open(run_dir / "config.json") as f:
+    with open(cfg_path) as f:
         cfg = json.load(f)
     return results, cfg
 

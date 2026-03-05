@@ -23,7 +23,8 @@ from burst.config import SCHED_COLORS, SCHEDULE_ORDER, ordered_schedules, sched_
 
 
 def _load_steps_from_config(run_dir: Path) -> tuple[int, int] | None:
-    cfg_path = run_dir / "config.json"
+    from burst.train_utils import resolve_run_paths
+    cfg_path, _, _ = resolve_run_paths(run_dir)
     if not cfg_path.exists():
         return None
     with open(cfg_path) as f:

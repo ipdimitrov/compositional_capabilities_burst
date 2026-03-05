@@ -9,8 +9,18 @@ Usage:
     python burst/grad_sim.py <run_dir>
     python burst/grad_sim.py <run_dir> --n-workers 8 --grad-sim-batch-size 2048
     python burst/grad_sim.py <run_dir> --delete-checkpoints
+
+Dimension key:
+    B: batch_size
+    L: sequence_length (doc_len)
+    N: n_embd (model dimension)
+    V: vocab_size
+    P: n_params (total parameters, flattened)
+    G: gradient vector dimension (same as P)
+    E: number of per-example gradient samples (for SNR)
+    T: number of token positions
 """
-import sys, os, argparse, pickle, json
+import sys, os, argparse, pickle, json, contextlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -26,6 +36,30 @@ from burst.gpu import gpu_cfg
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# ---------------------------------------------------------------------------
+# Feature flags — comment out any key to skip that metric entirely.
+# This controls what is computed in each _worker_main() subprocess.
+# ---------------------------------------------------------------------------
+GRAD_METRICS: dict[str, bool] = {
+    "cosine_global":    True,   # burst-vs-other cosine similarity (aggregate)
+    "cosine_per_layer": True,   # per-layer burst-vs-other cosine heatmap
+    "pairwise":         True,   # pairwise task-group cosine sim matrix
+    "grad_norm_ratio":  True,   # per-layer ||g_burst|| / ||g_other||
+    "grad_rank":        True,   # effective rank of per-layer gradient matrix
+    "grad_snr":         True,   # per-layer gradient signal-to-noise ratio
+    "conflict_rate":    True,   # per-layer fraction of params with sign conflict
+    "token_pos_grad":   True,   # per-token-position embedding gradient norm
+    "grad_attribution": True,   # fraction of gradient from intermediate vs final outputs
+}
+
+# Number of per-example gradients to sample for SNR estimation.
+# Higher = more accurate but slower (each adds one backward pass).
+N_SNR_EXAMPLES: int = 16
+
+
+# ---------------------------------------------------------------------------
+# Layer group helpers
+# ---------------------------------------------------------------------------
 
 def _flat_grad(net) -> torch.Tensor:
     grads = [p.grad.detach().view(-1) for p in net.parameters() if p.grad is not None]
@@ -71,6 +105,10 @@ def _layer_groups(net) -> list[tuple[str, list[str]]]:
     return groups
 
 
+# ---------------------------------------------------------------------------
+# Core gradient extraction helpers
+# ---------------------------------------------------------------------------
+
 def _grad_vecs_per_layer(net, docs_np: np.ndarray, n_samples: int,
                           layer_groups: list[tuple[str, list[str]]]) -> dict[str, torch.Tensor]:
     """Run one backward pass and extract per-layer gradient vectors."""
@@ -107,6 +145,216 @@ def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int) -> torch.Tensor
     return _flat_grad(net).float()
 
 
+# ---------------------------------------------------------------------------
+# New metric helpers
+# ---------------------------------------------------------------------------
+
+def _effective_rank(g_vec: torch.Tensor, param_shape: tuple[int, int]) -> float:
+    """Effective rank of a gradient vector reshaped as a matrix.
+
+    Computes exp(H(sigma_hat)) where H is the entropy of the normalised
+    singular value distribution.  Range: [1, min(m, n)].
+    """
+    m, n = param_shape
+    g_mat = g_vec[:m * n].reshape(m, n).float()
+    try:
+        sv = torch.linalg.svdvals(g_mat)
+    except Exception:
+        return float("nan")
+    sv = sv[sv > 0]
+    if sv.numel() == 0:
+        return 1.0
+    s_hat = sv / sv.sum()
+    entropy = -(s_hat * torch.log(s_hat + 1e-12)).sum()
+    return float(torch.exp(entropy).item())
+
+
+def _grad_rank_per_layer(net, docs_np: np.ndarray, n_samples: int,
+                          layer_groups: list[tuple[str, list[str]]]) -> dict[str, float]:
+    """Effective rank of the gradient matrix for each layer group (burst data)."""
+    vecs = _grad_vecs_per_layer(net, docs_np, n_samples, layer_groups)
+    param_map = dict(net.named_parameters())
+
+    result: dict[str, float] = {}
+    for name, pnames in layer_groups:
+        g_vec = vecs.get(name)
+        if g_vec is None:
+            result[name] = float("nan")
+            continue
+        shapes = [param_map[pn].shape for pn in pnames if pn in param_map and len(param_map[pn].shape) == 2]
+        if shapes:
+            m, n = shapes[0]
+            result[name] = _effective_rank(g_vec, (m, n))
+        else:
+            result[name] = float("nan")
+    return result
+
+
+def _grad_snr_per_layer(net, docs_np: np.ndarray, n_examples: int,
+                         layer_groups: list[tuple[str, list[str]]]) -> dict[str, float]:
+    """Per-layer gradient signal-to-noise ratio across individual examples.
+
+    SNR_l = ||mean_g_l||^2 / mean(||g_i_l - mean_g_l||^2)
+
+    High SNR: all examples push the same direction (coherent, shortcut-like).
+    Low SNR: examples push in diverse directions (richer learning signal).
+
+    Uses torch.func.vmap + grad to compute all per-example gradients in one
+    vectorised call instead of n_examples sequential backward passes.
+    """
+    from torch.func import grad, vmap, functional_call
+
+    n = min(n_examples, docs_np.shape[0])
+    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
+    inp_EL = dat[:, :-1]
+    tgt_EL = dat[:, 1:]
+
+    params = {k: v.detach() for k, v in net.named_parameters()}
+    buffers = {k: v.detach() for k, v in net.named_buffers()}
+
+    def loss_fn(params, inp_1L, tgt_1L):
+        # Math attention is required: flash attention lacks a vmap batching rule
+        # for its backward pass and falls back to a slow path.
+        with torch.backends.cuda.sdp_kernel(
+            enable_flash=False, enable_math=True, enable_mem_efficient=False
+        ) if DEVICE == "cuda" else contextlib.nullcontext():
+            logits = functional_call(net, (params, buffers), (inp_1L.unsqueeze(0),))
+        return F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt_1L.reshape(-1))
+
+    grad_fn = grad(loss_fn)
+    per_example_grads = vmap(grad_fn, in_dims=(None, 0, 0))(params, inp_EL, tgt_EL)
+
+    result: dict[str, float] = {}
+    for name, pnames in layer_groups:
+        grads_list = []
+        for pn in pnames:
+            g = per_example_grads.get(pn)
+            if g is not None:
+                grads_list.append(g.float().reshape(n, -1))
+        if not grads_list:
+            result[name] = float("nan")
+            continue
+        gs = torch.cat(grads_list, dim=1)  # E x D
+        mean_g = gs.mean(dim=0)
+        signal = (mean_g.norm() ** 2).item()
+        noise = ((gs - mean_g).norm(dim=1) ** 2).mean().item()
+        result[name] = signal / (noise + 1e-12)
+    return result
+
+
+def _conflict_rate_per_layer(burst_vecs: dict[str, torch.Tensor],
+                              other_vecs: dict[str, torch.Tensor]) -> dict[str, float]:
+    """Fraction of parameters where burst and other gradients have opposite signs.
+
+    C_l = (1/|theta_l|) * sum_i 1[sign(g_burst_i) != sign(g_other_i)]
+
+    Range [0, 1].  0.5 = random; >0.5 = systematic conflict.
+    """
+    result: dict[str, float] = {}
+    for name in burst_vecs:
+        g_b = burst_vecs[name]
+        g_o = other_vecs.get(name)
+        if g_o is None or g_b.numel() == 0:
+            result[name] = float("nan")
+            continue
+        conflict = (torch.sign(g_b) != torch.sign(g_o)).float().mean().item()
+        result[name] = conflict
+    return result
+
+
+def _token_pos_grad_norms(net, docs_np: np.ndarray, n_samples: int) -> list[float]:
+    """Per-token-position gradient norm w.r.t. the embedding output.
+
+    Hooks the wte embedding output to capture d(loss)/d(h_t) for each
+    position t.  Returns a list of norms of length (doc_len - 1), one per
+    input token position.
+    """
+    n = min(n_samples, docs_np.shape[0])
+    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
+    inp, tgt = dat[:, :-1], dat[:, 1:]
+
+    emb_grad: list[torch.Tensor] = []
+
+    def _hook(module, grad_input, grad_output):
+        emb_grad.append(grad_output[0].detach().float())
+
+    handle = net.transformer.wte.register_full_backward_hook(_hook)
+    net.zero_grad(set_to_none=True)
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        logits = net(inp)
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+    loss.backward()
+    handle.remove()
+
+    if not emb_grad:
+        return []
+    # emb_grad[0]: B x T x N — average over batch, then take norm over N per position
+    g_BtN = emb_grad[0]  # B x T x N
+    norms_T = g_BtN.norm(dim=-1).mean(dim=0)  # T
+    net.zero_grad(set_to_none=True)
+    return norms_T.cpu().tolist()
+
+
+def _grad_attribution(net, docs_np: np.ndarray, n_samples: int,
+                       prompt_len: int, doc_len: int) -> dict:
+    """Decompose gradient norm by which output token position it comes from.
+
+    For each output position t in [prompt_len, doc_len-1], compute the
+    gradient of the per-position loss L_t w.r.t. all parameters, then
+    measure ||grad_theta L_t||.
+
+    Returns:
+        intermediate_frac: fraction of total grad norm from positions
+                           [prompt_len, doc_len-2] (intermediate outputs)
+        final_frac:        fraction from position doc_len-1 (final output)
+        per_pos:           list of grad norms for each output position
+    """
+    n = min(n_samples, docs_np.shape[0])
+    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
+    inp, tgt = dat[:, :-1], dat[:, 1:]
+
+    output_positions = list(range(prompt_len, doc_len - 1))
+    if not output_positions:
+        return {"intermediate_frac": float("nan"), "final_frac": float("nan"), "per_pos": []}
+
+    pos_norms: list[float] = []
+    params = [p for p in net.parameters() if p.requires_grad]
+
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        logits_BTV = net(inp).float()
+
+    for i, t in enumerate(output_positions):
+        net.zero_grad(set_to_none=True)
+        retain = i < len(output_positions) - 1
+        loss_t = F.cross_entropy(logits_BTV[:, t, :], tgt[:, t])
+        loss_t.backward(retain_graph=retain)
+        g_norm = sum(
+            p.grad.detach().norm().item() ** 2
+            for p in params if p.grad is not None
+        ) ** 0.5
+        pos_norms.append(g_norm)
+
+    net.zero_grad(set_to_none=True)
+
+    total = sum(pos_norms) + 1e-12
+    n_intermediate = len(output_positions) - 1
+    intermediate_norm = sum(pos_norms[:n_intermediate])
+    final_norm = pos_norms[-1] if pos_norms else 0.0
+
+    return {
+        "intermediate_frac": intermediate_norm / total,
+        "final_frac": final_norm / total,
+        "per_pos": pos_norms,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public metric computation functions
+# ---------------------------------------------------------------------------
+
 def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL,
                             n_samples: int) -> dict:
     net.train()
@@ -139,7 +387,8 @@ def compute_grad_cosine_sim_per_layer(net, docs_burst_BL, docs_other_BL,
         per_layer[name] = sim
 
     layer_names = [name for name, _ in layer_groups]
-    return {"per_layer": per_layer, "layer_names": layer_names}
+    return {"per_layer": per_layer, "layer_names": layer_names,
+            "burst_vecs": burst_vecs, "other_vecs": other_vecs}
 
 
 def compute_pairwise_grad_sim(net, task_docs: dict,
@@ -213,6 +462,10 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
             "n_other": 1, "n_all": 1}
 
 
+# ---------------------------------------------------------------------------
+# Worker subprocess
+# ---------------------------------------------------------------------------
+
 def _worker_main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
@@ -235,6 +488,8 @@ def _worker_main():
     depth = job["depth"]
     burst_pos_val = job["burst_pos"]
     n_a = job["n_a"]
+    prompt_len = job.get("prompt_len", 15)
+    doc_len = job.get("doc_len", cfg.get("context_size", 80))
     gs_bs = args.grad_sim_batch_size
 
     net = nanoGPT(OmegaConf.create({
@@ -251,15 +506,85 @@ def _worker_main():
     result = {"label": job["label"], "parent_label": job["parent_label"],
               "step": step, "phase": phase}
 
-    if burst_docs_all is not None and other_docs_all is not None:
-        sim = compute_grad_cosine_sim(net, burst_docs_all, other_docs_all, n_samples=gs_bs)
-        result["burst_vs_other"] = sim["burst_vs_other"]
-        layer_sim = compute_grad_cosine_sim_per_layer(
-            net, burst_docs_all, other_docs_all, n_samples=gs_bs)
-        result["per_layer_sim"] = layer_sim["per_layer"]
-        result["layer_names"] = layer_sim["layer_names"]
+    if burst_docs_all is None or other_docs_all is None:
+        with open(args.output_path, "wb") as f:
+            pickle.dump(result, f)
+        return
 
-    if is_pairwise:
+    layer_groups = _layer_groups(net)
+    net.train()
+
+    # --- cosine_global ---
+    if GRAD_METRICS.get("cosine_global", True):
+        net.zero_grad(set_to_none=True)
+        g_burst_flat = _grad_vec_for_docs(net, burst_docs_all, n_samples=gs_bs)
+        net.zero_grad(set_to_none=True)
+        g_other_flat = _grad_vec_for_docs(net, other_docs_all, n_samples=gs_bs)
+        result["burst_vs_other"] = F.cosine_similarity(
+            g_burst_flat.unsqueeze(0), g_other_flat.unsqueeze(0)).item()
+        net.zero_grad(set_to_none=True)
+
+    # --- cosine_per_layer + grad_norm_ratio + conflict_rate ---
+    # These all share the same two backward passes, so we compute together.
+    need_layer_vecs = (
+        GRAD_METRICS.get("cosine_per_layer", True) or
+        GRAD_METRICS.get("grad_norm_ratio", True) or
+        GRAD_METRICS.get("conflict_rate", True)
+    )
+    if need_layer_vecs:
+        net.zero_grad(set_to_none=True)
+        burst_vecs = _grad_vecs_per_layer(net, burst_docs_all, gs_bs, layer_groups)
+        net.zero_grad(set_to_none=True)
+        other_vecs = _grad_vecs_per_layer(net, other_docs_all, gs_bs, layer_groups)
+        net.zero_grad(set_to_none=True)
+
+        if GRAD_METRICS.get("cosine_per_layer", True):
+            per_layer: dict[str, float] = {}
+            for name, _ in layer_groups:
+                g_b = burst_vecs[name]
+                g_o = other_vecs[name]
+                per_layer[name] = F.cosine_similarity(
+                    g_b.unsqueeze(0), g_o.unsqueeze(0)).item()
+            result["per_layer_sim"] = per_layer
+            result["layer_names"] = [n for n, _ in layer_groups]
+
+        if GRAD_METRICS.get("grad_norm_ratio", True):
+            ratio: dict[str, float] = {}
+            for name, _ in layer_groups:
+                norm_b = burst_vecs[name].norm().item()
+                norm_o = other_vecs[name].norm().item()
+                ratio[name] = norm_b / (norm_o + 1e-12)
+            result["grad_norm_ratio"] = ratio
+
+        if GRAD_METRICS.get("conflict_rate", True):
+            result["conflict_rate"] = _conflict_rate_per_layer(burst_vecs, other_vecs)
+
+    # --- grad_rank ---
+    if GRAD_METRICS.get("grad_rank", True):
+        net.zero_grad(set_to_none=True)
+        result["grad_rank"] = _grad_rank_per_layer(net, burst_docs_all, gs_bs, layer_groups)
+
+    # --- grad_snr ---
+    if GRAD_METRICS.get("grad_snr", True):
+        net.zero_grad(set_to_none=True)
+        result["grad_snr"] = _grad_snr_per_layer(
+            net, burst_docs_all, N_SNR_EXAMPLES, layer_groups)
+
+    # --- token_pos_grad ---
+    if GRAD_METRICS.get("token_pos_grad", True):
+        net.zero_grad(set_to_none=True)
+        result["token_pos_grad_norms"] = _token_pos_grad_norms(
+            net, burst_docs_all, n_samples=gs_bs)
+
+    # --- grad_attribution ---
+    if GRAD_METRICS.get("grad_attribution", True):
+        net.zero_grad(set_to_none=True)
+        result["grad_attribution"] = _grad_attribution(
+            net, burst_docs_all, n_samples=gs_bs,
+            prompt_len=prompt_len, doc_len=doc_len)
+
+    # --- pairwise ---
+    if is_pairwise and GRAD_METRICS.get("pairwise", True):
         task_docs = {**target_pool, **bg_pool}
         burst_tasks = list(target_pool.keys())
         other_tasks = list(bg_pool.keys())
@@ -273,6 +598,31 @@ def _worker_main():
         pickle.dump(result, f)
 
 
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
+    """Return (config_path, data_path, ckpt_root, gs_out_dir) for a run directory."""
+    results_dir = run_dir / "results"
+    logs_dir = run_dir / "logs"
+
+    config_path = (results_dir / "config.json") if (results_dir / "config.json").exists() \
+        else (run_dir / "config.json")
+    data_path = (logs_dir / "_data.pkl") if (logs_dir / "_data.pkl").exists() \
+        else (run_dir / "_data.pkl")
+    ckpt_root = (logs_dir / "checkpoints") if (logs_dir / "checkpoints").exists() \
+        else (run_dir / "checkpoints")
+    gs_out_dir = (results_dir / "grad_cosine_sim") if results_dir.exists() \
+        else (run_dir / "grad_cosine_sim")
+    gs_out_dir.mkdir(parents=True, exist_ok=True)
+    return config_path, data_path, ckpt_root, gs_out_dir
+
+
+# ---------------------------------------------------------------------------
+# Main orchestrator
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -282,7 +632,8 @@ def main():
     args = parser.parse_args()
 
     run_dir = args.run_dir
-    with open(run_dir / "config.json") as f:
+    config_path, data_path, ckpt_root, gs_out_dir = _resolve_run_paths(run_dir)
+    with open(config_path) as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
@@ -291,13 +642,17 @@ def main():
     P = base_cfg.get("pre_burst_steps", 0)
     T = base_cfg["total_steps"]
     U = base_cfg["reversion_steps"]
+    prompt_len = run_cfg.get("task_info", {}).get("prompt_len", 15)
+    doc_len = run_cfg.get("task_info", {}).get("doc_len", base_cfg.get("context_size", 80))
 
     pairwise_global_steps = {P, P + T // 2, P + T - 1, P + T + U // 2, P + T + U - 1}
 
-    ckpt_root = run_dir / "checkpoints"
     if not ckpt_root.exists():
         print(f"No checkpoints directory in {run_dir}, nothing to do.", flush=True)
         return
+
+    logs_dir = run_dir / "logs"
+    pkl_root = logs_dir if logs_dir.exists() else run_dir
 
     job_entries = run_cfg["jobs"]
     sample_cfg = {**base_cfg,
@@ -307,7 +662,7 @@ def main():
         label = j["label"]
         ckpt_dir = ckpt_root / label
         if ckpt_dir.exists():
-            sample_cfg_path = run_dir / f"{label}.pkl"
+            sample_cfg_path = pkl_root / f"{label}.pkl"
             if sample_cfg_path.exists():
                 with open(sample_cfg_path, "rb") as f:
                     r = pickle.load(f)
@@ -317,6 +672,8 @@ def main():
     n_workers = args.n_workers or gpu_cfg.gradsim_workers
     print(f"{gpu_cfg.summary()}", flush=True)
     print(f"Grad-sim: batch_size={gs_bs}, workers={n_workers}", flush=True)
+    active = [k for k, v in GRAD_METRICS.items() if v]
+    print(f"Active metrics: {active}", flush=True)
 
     jobs = []
     for j in job_entries:
@@ -325,7 +682,7 @@ def main():
         if not ckpt_dir.exists():
             continue
 
-        result_path = run_dir / f"{label}.pkl"
+        result_path = pkl_root / f"{label}.pkl"
         if not result_path.exists():
             continue
         with open(result_path, "rb") as f:
@@ -352,6 +709,8 @@ def main():
                 "depth": depth,
                 "burst_pos": burst_pos,
                 "n_a": n_a,
+                "prompt_len": prompt_len,
+                "doc_len": doc_len,
             })
 
     if not jobs:
@@ -360,15 +719,14 @@ def main():
 
     print(f"Jobs: {len(jobs)} checkpoints across {len(job_entries)} labels", flush=True)
 
-    data_path = str(run_dir / "_data.pkl")
     with open(data_path, "rb") as f:
         target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     worker_script = str(Path(__file__))
 
-    def build_cmd(script, job_path, data_path, output_path):
+    def build_cmd(script, job_path, data_path_tmp, output_path):
         return [sys.executable, script, "--worker",
-                "--job-path", job_path, "--data-path", data_path,
+                "--job-path", job_path, "--data-path", data_path_tmp,
                 "--output-path", output_path,
                 "--grad-sim-batch-size", str(gs_bs)]
 
@@ -387,6 +745,13 @@ def main():
         tmp_prefix="grad_sim_",
     )
 
+    # Collect results per label, sorted by step
+    _LIST_KEYS = ("step", "phase", "burst_vs_other")
+    _LAYER_DICT_KEYS = ("per_layer_sim", "grad_norm_ratio", "grad_rank",
+                        "grad_snr", "conflict_rate")
+    _SEQ_KEYS = ("token_pos_grad_norms",)
+    _ATTR_KEYS = ("grad_attribution",)
+
     per_label: dict[str, dict] = {}
     for jr in results:
         if not jr.success:
@@ -395,60 +760,96 @@ def main():
         parent = d["parent_label"]
         if parent not in per_label:
             per_label[parent] = {
-                "grad_sim_log": {"step": [], "phase": [], "burst_vs_other": [],
-                                 "per_layer": {}},
+                "grad_sim_log": {
+                    "step": [], "phase": [], "burst_vs_other": [],
+                    "per_layer": {},
+                    "grad_norm_ratio": {}, "grad_rank": {},
+                    "grad_snr": {}, "conflict_rate": {},
+                    "token_pos_grad_norms": [],
+                    "grad_attribution": {"intermediate_frac": [], "final_frac": [], "per_pos": []},
+                },
                 "pairwise_snapshots": [],
             }
-        entry = per_label[parent]
+        gsl = per_label[parent]["grad_sim_log"]
+
         if "burst_vs_other" in d:
-            entry["grad_sim_log"]["step"].append(d["step"])
-            entry["grad_sim_log"]["phase"].append(d["phase"])
-            entry["grad_sim_log"]["burst_vs_other"].append(d["burst_vs_other"])
+            gsl["step"].append(d["step"])
+            gsl["phase"].append(d["phase"])
+            gsl["burst_vs_other"].append(d["burst_vs_other"])
+
         if "per_layer_sim" in d:
             for layer_name, sim_val in d["per_layer_sim"].items():
-                if layer_name not in entry["grad_sim_log"]["per_layer"]:
-                    entry["grad_sim_log"]["per_layer"][layer_name] = []
-                entry["grad_sim_log"]["per_layer"][layer_name].append(sim_val)
-            if "layer_names" not in entry["grad_sim_log"]:
-                entry["grad_sim_log"]["layer_names"] = d.get("layer_names", [])
+                gsl["per_layer"].setdefault(layer_name, []).append(sim_val)
+            if "layer_names" not in gsl:
+                gsl["layer_names"] = d.get("layer_names", [])
+
+        for key in ("grad_norm_ratio", "grad_rank", "grad_snr", "conflict_rate"):
+            if key in d:
+                for layer_name, val in d[key].items():
+                    gsl[key].setdefault(layer_name, []).append(val)
+
+        if "token_pos_grad_norms" in d:
+            gsl["token_pos_grad_norms"].append(d["token_pos_grad_norms"])
+
+        if "grad_attribution" in d:
+            attr = d["grad_attribution"]
+            gsl["grad_attribution"]["intermediate_frac"].append(attr.get("intermediate_frac", float("nan")))
+            gsl["grad_attribution"]["final_frac"].append(attr.get("final_frac", float("nan")))
+            gsl["grad_attribution"]["per_pos"].append(attr.get("per_pos", []))
+
         if "pairwise" in d:
             snap = d["pairwise"]
             snap["step"] = d["step"]
             snap["phase"] = d["phase"]
-            entry["pairwise_snapshots"].append(snap)
+            per_label[parent]["pairwise_snapshots"].append(snap)
 
+    # Sort all time-series by step
     for label, entry in per_label.items():
-        gs_log = entry["grad_sim_log"]
-        order = np.argsort(gs_log["step"])
-        gs_log["step"] = [gs_log["step"][i] for i in order]
-        gs_log["phase"] = [gs_log["phase"][i] for i in order]
-        gs_log["burst_vs_other"] = [gs_log["burst_vs_other"][i] for i in order]
-        for layer_name in gs_log["per_layer"]:
-            vals = gs_log["per_layer"][layer_name]
+        gsl = entry["grad_sim_log"]
+        if not gsl["step"]:
+            continue
+        order = np.argsort(gsl["step"])
+        gsl["step"] = np.array(gsl["step"])[order].tolist()
+        gsl["phase"] = np.array(gsl["phase"])[order].tolist()
+        gsl["burst_vs_other"] = np.array(gsl["burst_vs_other"])[order].tolist()
+
+        for key in ("per_layer", "grad_norm_ratio", "grad_rank", "grad_snr", "conflict_rate"):
+            for layer_name in gsl[key]:
+                vals = gsl[key][layer_name]
+                if len(vals) == len(order):
+                    gsl[key][layer_name] = np.array(vals)[order].tolist()
+
+        if gsl["token_pos_grad_norms"] and len(gsl["token_pos_grad_norms"]) == len(order):
+            gsl["token_pos_grad_norms"] = np.array(gsl["token_pos_grad_norms"], dtype=object)[order].tolist()
+
+        for sub_key in ("intermediate_frac", "final_frac", "per_pos"):
+            vals = gsl["grad_attribution"][sub_key]
             if len(vals) == len(order):
-                gs_log["per_layer"][layer_name] = [vals[i] for i in order]
+                gsl["grad_attribution"][sub_key] = np.array(vals, dtype=object)[order].tolist()
+
         entry["pairwise_snapshots"].sort(key=lambda s: s["step"])
 
-    gs_dir = run_dir / "grad_cosine_sim"
-    gs_dir.mkdir(exist_ok=True)
-
+    # Write per-label JSON files
     for j in job_entries:
         label = j["label"]
         if label not in per_label:
             continue
         entry = per_label[label]
-        gs_log = entry["grad_sim_log"]
+        gsl = entry["grad_sim_log"]
         record = {
             "schedule": j["schedule"], "seed": j["seed"], "label": label,
             "grad_sim_batch_size": gs_bs,
-            "grad_sim_log": gs_log,
-            "layer_names": gs_log.get("layer_names", []),
+            "grad_sim_log": gsl,
+            "layer_names": gsl.get("layer_names", []),
             "pairwise_snapshots": entry["pairwise_snapshots"],
         }
-        with open(gs_dir / f"{label}.json", "w") as f:
+        with open(gs_out_dir / f"{label}.json", "w") as f:
             json.dump(record, f)
 
-    all_results_path = run_dir / "all_results.pkl"
+    # Update all_results.pkl
+    logs_dir = run_dir / "logs"
+    all_results_path = (logs_dir / "all_results.pkl") if (logs_dir / "all_results.pkl").exists() \
+        else (run_dir / "all_results.pkl")
     if all_results_path.exists():
         with open(all_results_path, "rb") as f:
             all_results = pickle.load(f)

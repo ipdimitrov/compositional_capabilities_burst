@@ -4,9 +4,33 @@ Launches parallel worker processes for training, tracks progress, collects
 results.  Grad-sim is computed post-hoc by burst/grad_sim.py on the saved
 checkpoints.
 
+Training structure:
+  1. Pretrain: one shared model trained on all-but-special for pre_burst_steps.
+               The checkpoint is shared across all 10 seeds for a given schedule.
+  2. Burst:    10 runs per schedule, each starting from the shared pretrain ckpt.
+               Burst phase length varies inversely with burst concentration so
+               all schedules see the same total special-class examples.
+  3. Reversal: all-but-special, same length for all schedules.
+
+Output folder layout:
+  data/<date>_<time>_burst_d<depth>_pos<pos>/
+    results/
+      config.json
+      analysis_report.pdf
+      plots/
+      presentation/
+      grad_cosine_sim/
+    logs/
+      all_results.pkl
+      _data.pkl
+      pretrain_ckpt.pt
+      checkpoints/
+      task_distributions/
+      <label>.pkl  (per-run result pickles)
+
 Usage:
     python burst/experiment.py --depth 3 --burst-pos 2
-    python burst/experiment.py --depth 5 --burst-pos 3 --n-a 6 --schedules burst_100 burst_50 burst_10
+    python burst/experiment.py --depth 5 --burst-pos 3 --n-a 6 --schedules burst_100 burst_50 burst_25
 """
 import sys, os, time, pickle, json, subprocess, argparse, itertools
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -21,12 +45,14 @@ from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
+from net.runner import configure_optimizers, update_cosine_warmup_lr
 from burst.data import BurstDataset, pad_pools_to_same_length
 from burst.config import (
     N_A, SEED_BASE, DATA_SEED,
     CLASS_OTHER, CLASS_BURST,
     ExperimentConfig, TrainConfig,
     reversion_life_key, reversion_life_label,
+    burst_steps_for_schedule, BURST_BASE_STEPS,
 )
 from burst.gpu import gpu_cfg
 
@@ -174,6 +200,70 @@ def build_data(cfg: dict, depth: int, burst_pos: int, n_a: int):
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
 
 
+def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path):
+    """Train one model on all-but-special for pretrain_steps, save checkpoint.
+
+    Uses seed=DATA_SEED so the pretrained model is deterministic and shared
+    across all per-schedule seeds.
+    """
+    set_seed(DATA_SEED)
+    net = nanoGPT(OmegaConf.create({
+        "compile": False, "vocab_size": cfg["vocab_size"],
+        "context_size": cfg["context_size"],
+        "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
+        "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
+    })).to(DEVICE)
+    if DEVICE == "cuda":
+        net = torch.compile(net)
+
+    total_lr_steps = pretrain_steps
+    optim_cfg = OmegaConf.create({
+        "learning_rate": cfg["lr"], "weight_decay": cfg["weight_decay"],
+        "beta1": cfg["beta1"], "beta2": cfg["beta2"],
+        "grad_clip": cfg["grad_clip"], "decay_lr": True,
+        "warmup_iters": cfg["warmup_iters"], "min_lr": cfg["min_lr"],
+    })
+    optimizer = configure_optimizers(net, optim_cfg)
+    scaler = torch.amp.GradScaler('cuda', enabled=DEVICE == "cuda")
+
+    bg_ids = list(bg_pool.keys())
+    bs = cfg["batch_size"]
+
+    net.train()
+    it = 0
+    for s in range(pretrain_steps):
+        per = bs // len(bg_ids)
+        rem = bs % len(bg_ids)
+        parts = []
+        for i, tid in enumerate(bg_ids):
+            k = per + (1 if i < rem else 0)
+            if k > 0:
+                idx = np.random.randint(len(bg_pool[tid]), size=k)
+                parts.append(bg_pool[tid][idx])
+        batch_np = np.concatenate(parts)[np.random.permutation(bs)]
+
+        dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
+        inp, tgt = dat[:, :-1], dat[:, 1:]
+        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_lr_steps)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+            logits = net(inp)
+            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+        scaler.scale(loss).backward()
+        if cfg["grad_clip"] > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(net.parameters(), cfg["grad_clip"])
+        scaler.step(optimizer)
+        scaler.update()
+
+        if (s + 1) % 100 == 0 or s == pretrain_steps - 1:
+            print(f"  pretrain step {s+1}/{pretrain_steps}  loss={loss.item():.4f}", flush=True)
+
+    raw = getattr(net, "_orig_mod", net)
+    torch.save(raw.state_dict(), ckpt_path)
+    print(f"  Pretrain checkpoint saved: {ckpt_path}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-tag", default=None)
@@ -205,9 +295,18 @@ def main():
     base_cfg = exp.base_cfg
 
     tag = args.run_tag or datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = Path("data") / f"burst_d{exp.depth}_pos{exp.burst_pos}_{tag}"
+    run_dir = Path("data") / f"{tag}_burst_d{exp.depth}_pos{exp.burst_pos}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    progress_dir = run_dir / "_progress"
+
+    results_dir = run_dir / "results"
+    logs_dir = run_dir / "logs"
+    results_dir.mkdir(exist_ok=True)
+    logs_dir.mkdir(exist_ok=True)
+    (results_dir / "plots").mkdir(exist_ok=True)
+    (results_dir / "presentation").mkdir(exist_ok=True)
+    (results_dir / "grad_cosine_sim").mkdir(exist_ok=True)
+
+    progress_dir = logs_dir / "_progress"
     progress_dir.mkdir(exist_ok=True)
 
     print(f"Output: {run_dir}\nDevice: {DEVICE}", flush=True)
@@ -221,21 +320,35 @@ def main():
           f"Burst class: {ti['n_burst_train']}  "
           f"doc_len: {ti['doc_len']}  prompt: {ti['prompt_len']}", flush=True)
 
-    data_path = str(run_dir / "_data.pkl")
+    data_path = str(logs_dir / "_data.pkl")
     with open(data_path, "wb") as f:
         pickle.dump((tp, bp, ed, pl, None), f)
 
+    # --- Pretrain: one shared checkpoint for all seeds ---
+    pretrain_ckpt_path = logs_dir / "pretrain_ckpt.pt"
+    P = base_cfg["pre_burst_steps"]
+    pretrain_cfg = {**base_cfg,
+                    "vocab_size": cfg_out["vocab_size"],
+                    "context_size": cfg_out["context_size"]}
+    print(f"\nPretraining shared checkpoint ({P} steps on all-but-special)...", flush=True)
+    run_pretrain(pretrain_cfg, P, bp, pretrain_ckpt_path)
+
     jobs = []
     for sched in exp.schedules:
+        sched_total_steps = burst_steps_for_schedule(sched, BURST_BASE_STEPS)
         for seed_idx in range(exp.n_seeds):
             seed = SEED_BASE + seed_idx
             cfg = {**base_cfg, "seed": seed,
                    "vocab_size": cfg_out["vocab_size"],
-                   "context_size": cfg_out["context_size"]}
+                   "context_size": cfg_out["context_size"],
+                   "total_steps": sched_total_steps}
             label = f"{sched}_s{seed}"
-            jobs.append({"schedule": sched, "seed": seed, "cfg": cfg, "label": label})
+            jobs.append({
+                "schedule": sched, "seed": seed, "cfg": cfg, "label": label,
+                "pretrain_ckpt": str(pretrain_ckpt_path),
+            })
 
-    with open(run_dir / "config.json", "w") as f:
+    with open(results_dir / "config.json", "w") as f:
         json.dump({
             "base_cfg": base_cfg, "n_a": n_a, "seed_base": SEED_BASE,
             "n_seeds": exp.n_seeds, "schedules": exp.schedules, "n_jobs": len(jobs),
@@ -243,8 +356,11 @@ def main():
             "run_probes": exp.run_probes,
             "run_next_token_probes": exp.run_next_token_probes,
             "run_adl": exp.run_adl,
+            "burst_base_steps": BURST_BASE_STEPS,
+            "pretrain_ckpt": str(pretrain_ckpt_path),
             "jobs": [{"label": j["label"], "schedule": j["schedule"],
-                      "seed": j["seed"]} for j in jobs],
+                      "seed": j["seed"],
+                      "total_steps": j["cfg"]["total_steps"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
     n_procs = min(len(jobs), exp.n_workers)
@@ -252,14 +368,15 @@ def main():
     print(f"  {gpu_cfg.summary()}", flush=True)
     print(f"  Layout: {n_procs} processes x ~{jobs_per_proc} jobs/proc", flush=True)
 
-    steps_per_job = base_cfg["pre_burst_steps"] + base_cfg["total_steps"] + base_cfg["reversion_steps"]
-
     tc = exp.train
     print(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H", flush=True)
     print(f"Jobs: {len(jobs)}, parallel processes: {n_procs}, "
           f"jobs/process: ~{jobs_per_proc}", flush=True)
-    print(f"Steps/job: {tc.pre_burst_steps} all-but-special + {tc.total_steps} special + {tc.reversion_steps} all-but-special", flush=True)
-    print(f"Schedules: {exp.schedules}\n", flush=True)
+    print(f"Schedules: {exp.schedules}", flush=True)
+    for sched in exp.schedules:
+        T_s = burst_steps_for_schedule(sched, BURST_BASE_STEPS)
+        print(f"  {sched}: burst_steps={T_s}  reversion={tc.reversion_steps}", flush=True)
+    print()
 
     batched_script = str(Path(__file__).parent / "_worker_batched.py")
     t0 = time.time()
@@ -267,13 +384,13 @@ def main():
     job_chunks = [jobs[i:i + jobs_per_proc] for i in range(0, len(jobs), jobs_per_proc)]
 
     def launch_chunk(chunk_idx, chunk):
-        chunk_path = str(run_dir / f"_chunk_{chunk_idx}.pkl")
+        chunk_path = str(logs_dir / f"_chunk_{chunk_idx}.pkl")
         with open(chunk_path, "wb") as f:
             pickle.dump(chunk, f)
         return subprocess.Popen(
             [sys.executable, batched_script,
              "--jobs-path", chunk_path, "--data-path", data_path,
-             "--run-dir", str(run_dir), "--progress-dir", str(progress_dir)],
+             "--run-dir", str(logs_dir), "--progress-dir", str(progress_dir)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     active_chunks: dict[int, tuple[list, subprocess.Popen]] = {}
@@ -283,7 +400,11 @@ def main():
         active_chunks[next_chunk] = (chunk, launch_chunk(next_chunk, chunk))
         next_chunk += 1
 
-    pbar = tqdm(total=len(jobs) * steps_per_job, desc="All jobs", unit="step", ncols=120)
+    max_steps_per_job = max(
+        P + burst_steps_for_schedule(s, BURST_BASE_STEPS) + tc.reversion_steps
+        for s in exp.schedules
+    )
+    pbar = tqdm(total=len(jobs) * max_steps_per_job, desc="All jobs", unit="step", ncols=120)
     n_done, prev_steps = 0, 0
     reported_jobs: set[str] = set()
 
@@ -302,7 +423,7 @@ def main():
             label = job["label"]
             if label in reported_jobs:
                 continue
-            rp = run_dir / f"{label}.pkl"
+            rp = logs_dir / f"{label}.pkl"
             if rp.exists():
                 reported_jobs.add(label)
                 n_done += 1
@@ -342,19 +463,17 @@ def main():
 
     all_results = []
     for job in jobs:
-        rp = run_dir / f"{job['label']}.pkl"
+        rp = logs_dir / f"{job['label']}.pkl"
         if rp.exists():
             with open(rp, "rb") as f:
                 all_results.append(pickle.load(f))
-    with open(run_dir / "all_results.pkl", "wb") as f:
+    with open(logs_dir / "all_results.pkl", "wb") as f:
         pickle.dump(all_results, f)
 
     for f in progress_dir.glob("*"):
         f.unlink()
     if progress_dir.exists(): progress_dir.rmdir()
-    for f in run_dir.glob("_job_*.pkl"):
-        f.unlink()
-    for f in run_dir.glob("_chunk_*.pkl"):
+    for f in logs_dir.glob("_chunk_*.pkl"):
         f.unlink()
 
     print(f"Results: {run_dir} ({len(all_results)} ok)", flush=True)

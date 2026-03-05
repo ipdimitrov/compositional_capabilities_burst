@@ -34,9 +34,11 @@ def _bar_label(ax, x, text):
 def _schedule_bar(ax, T, U, sched, p, bs, seed, P=0):
     total = P + T + U
     fracs = np.zeros(total)
+    saved_rng_state = np.random.get_state()
     for s in range(T):
         np.random.seed(seed * 10000 + s)
         fracs[P + s] = n_target_for_step(s, T, sched, p, bs) / bs
+    np.random.set_state(saved_rng_state)
     ax.imshow(fracs.reshape(1, -1), aspect="auto", cmap="Blues",
               extent=[0, total, 0, 1], vmin=0, vmax=1)
     ax.set_yticks([])
@@ -739,13 +741,17 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     for fname in sorted(per_run_fnames):
         pdf.chart(plots_dir / fname, w=240)
 
-    pdf.output(str(run_dir / "analysis_report.pdf"))
-    print(f"  Saved {run_dir / 'analysis_report.pdf'}")
+    results_dir = run_dir / "results"
+    out_pdf = (results_dir / "analysis_report.pdf") if results_dir.exists() else (run_dir / "analysis_report.pdf")
+    pdf.output(str(out_pdf))
+    print(f"  Saved {out_pdf}")
 
 
 def plot_task_distributions(run_dir):
     run_dir = Path(run_dir)
-    stats_dir = run_dir / "task_distributions"
+    logs_dir = run_dir / "logs"
+    stats_dir = (logs_dir / "task_distributions") if (logs_dir / "task_distributions").exists() \
+        else (run_dir / "task_distributions")
 
     if not stats_dir.exists():
         print("  No task_distributions folder found, skipping...")
@@ -1057,10 +1063,27 @@ def plot_task_distributions(run_dir):
     return generated_files
 
 
+def _resolve_dirs(run_dir: Path) -> tuple[Path, Path, Path]:
+    """Return (results_dir, logs_dir, plots_dir) for a run directory.
+
+    Supports both old flat layout and new results/logs layout.
+    """
+    results_dir = run_dir / "results"
+    logs_dir = run_dir / "logs"
+    if results_dir.exists():
+        plots_dir = results_dir / "plots"
+    else:
+        plots_dir = run_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    return results_dir if results_dir.exists() else run_dir, \
+           logs_dir if logs_dir.exists() else run_dir, \
+           plots_dir
+
+
 def main():
     if len(sys.argv) < 2:
         data_dir = Path("data")
-        burst_dirs = sorted([d for d in data_dir.glob("burst_d*") if d.is_dir()])
+        burst_dirs = sorted([d for d in data_dir.glob("*burst_d*") if d.is_dir()])
         if not burst_dirs:
             print("No burst_d* dirs found"); sys.exit(1)
         run_dir = burst_dirs[-1]
@@ -1069,8 +1092,7 @@ def main():
         run_dir = Path(sys.argv[1])
 
     results, cfg = load_results(run_dir)
-    plots_dir = run_dir / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    _, logs_dir, plots_dir = _resolve_dirs(run_dir)
 
     print("Per-run plots...")
     per_run_fnames = []
