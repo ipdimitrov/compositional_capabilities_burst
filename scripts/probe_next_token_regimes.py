@@ -638,7 +638,9 @@ def main():
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    with open(run_dir / "config.json") as f:
+    from burst.train_utils import resolve_run_paths
+    cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
+    with open(cfg_path) as f:
         cfg = json.load(f)
 
     rc = parse_run_config(cfg)
@@ -681,7 +683,7 @@ def main():
     if args.seed_override is not None:
         jobs_cfg = [j for j in jobs_cfg if j["seed"] == args.seed_override]
 
-    ckpt_root = run_dir / "checkpoints"
+    ckpt_root = logs_dir / "checkpoints"
     use_checkpoints = ckpt_root.exists()
 
     schedules_to_run = sorted(set(j["schedule"] for j in jobs_cfg))

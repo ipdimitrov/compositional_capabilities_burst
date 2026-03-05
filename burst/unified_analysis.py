@@ -20,6 +20,10 @@ Dimension key:
     V: vocab_size
 """
 import sys, os, argparse, pickle, json, time, re
+from dataclasses import dataclass
+from datetime import datetime
+from itertools import combinations
+from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -38,32 +42,52 @@ from burst.config import (
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SCHEDULES_ORDERED = SCHEDULE_ORDER
 SCHEDULE_COLORS = SCHED_COLORS
-N_LAYERS = 6
 
 
-def _load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
-    net = nanoGPT(OmegaConf.create({
+# ---------------------------------------------------------------------------
+# Preloaded checkpoint data for a single seed
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SeedCheckpoints:
+    label: str
+    cfg: dict
+    r: dict
+    sd_pre: dict[str, torch.Tensor]
+    sd_peak: dict[str, torch.Tensor]
+    sd_rev: dict[str, torch.Tensor]
+    sd_pre_cpu: dict[str, torch.Tensor]
+    sd_peak_cpu: dict[str, torch.Tensor]
+    sd_rev_cpu: dict[str, torch.Tensor]
+    files: dict[int, Path]
+    pre_step: int
+    peak_step: int
+    rev_step: int
+
+
+def _make_net(cfg: dict) -> nanoGPT:
+    return nanoGPT(OmegaConf.create({
         "compile": False, "vocab_size": cfg["vocab_size"],
         "context_size": cfg["context_size"],
         "n_layer": cfg["n_layer"], "n_head": cfg["n_head"],
         "n_embd": cfg["n_embd"], "dropout": 0.0, "bias": False, "mlp": True,
     })).to(DEVICE)
+
+
+def _load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
+    net = _make_net(cfg)
     net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
     return net
 
 
 @torch.no_grad()
+@torch.no_grad()
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     B, L = docs_t.shape
-    generated = docs_t[:, :prompt_len].clone()
     target_B6 = docs_t[:, -6:]
-    for _ in range(L - prompt_len):
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits_BTV = net(generated)
-        next_tok = logits_BTV[:, -1, :].argmax(dim=-1, keepdim=True)
-        generated = torch.cat([generated, next_tok], dim=1)
+    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
@@ -92,11 +116,12 @@ def _ckpt_files(ckpt_dir: Path) -> dict[int, Path]:
     return {int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")}
 
 
-def _get_key_steps(files: dict[int, Path], cfg: dict):
+def _get_key_steps(files: dict[int, Path], r: dict):
     available = sorted(files.keys())
-    T = cfg["total_steps"]
+    P = r.get("pre_burst_steps", 0)
+    T = r["config"]["total_steps"]
     pre_step = available[0]
-    peak_step = min(available, key=lambda x: abs(x - (T - 1)))
+    peak_step = min(available, key=lambda x: abs(x - (P + T - 1)))
     rev_step = max(available)
     return pre_step, peak_step, rev_step
 
@@ -108,6 +133,84 @@ def _subsample_docs(docs_BL: np.ndarray, n: int = 256) -> np.ndarray:
     return docs_BL[idx]
 
 
+def _build_layer_groups(n_layer: int) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {
+        "emb": ["transformer.wte.weight", "transformer.wpe.weight"],
+    }
+    for bi in range(n_layer):
+        groups[f"block{bi}.attn"] = [
+            f"transformer.h.{bi}.attn.c_attn.weight",
+            f"transformer.h.{bi}.attn.c_proj.weight",
+        ]
+        groups[f"block{bi}.mlp"] = [
+            f"transformer.h.{bi}.mlp.c_fc.weight",
+            f"transformer.h.{bi}.mlp.c_proj.weight",
+        ]
+        groups[f"block{bi}.ln"] = [
+            f"transformer.h.{bi}.ln_1.weight",
+            f"transformer.h.{bi}.ln_2.weight",
+        ]
+    groups["ln_f"] = ["transformer.ln_f.weight"]
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint preloading
+# ---------------------------------------------------------------------------
+
+def _preload_seeds(
+    ckpt_root: Path,
+    all_results: list[dict],
+    n_seeds: int,
+) -> dict[str, list[SeedCheckpoints]]:
+    """Preload all needed checkpoints once, grouped by schedule."""
+    jobs_by_schedule: dict[str, list[dict]] = {}
+    for r in all_results:
+        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
+
+    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    preloaded: dict[str, list[SeedCheckpoints]] = {}
+
+    for sched in schedules:
+        sched_results = jobs_by_schedule[sched]
+        seeds: list[SeedCheckpoints] = []
+        for r in sched_results:
+            if len(seeds) >= n_seeds:
+                break
+            label = r["label"]
+            ckpt_dir = ckpt_root / label
+            if not ckpt_dir.exists():
+                continue
+            files = _ckpt_files(ckpt_dir)
+            if not files:
+                continue
+
+            cfg = r["config"]
+            pre_step, peak_step, rev_step = _get_key_steps(files, r)
+
+            sd_pre_cpu = {k: v.float() for k, v in torch.load(
+                str(files[pre_step]), map_location="cpu", weights_only=True).items()}
+            sd_peak_cpu = {k: v.float() for k, v in torch.load(
+                str(files[peak_step]), map_location="cpu", weights_only=True).items()}
+            sd_rev_cpu = {k: v.float() for k, v in torch.load(
+                str(files[rev_step]), map_location="cpu", weights_only=True).items()}
+
+            sd_pre = {k: v.to(DEVICE) for k, v in sd_pre_cpu.items()}
+            sd_peak = {k: v.to(DEVICE) for k, v in sd_peak_cpu.items()}
+            sd_rev = {k: v.to(DEVICE) for k, v in sd_rev_cpu.items()}
+
+            seeds.append(SeedCheckpoints(
+                label=label, cfg=cfg, r=r,
+                sd_pre=sd_pre, sd_peak=sd_peak, sd_rev=sd_rev,
+                sd_pre_cpu=sd_pre_cpu, sd_peak_cpu=sd_peak_cpu, sd_rev_cpu=sd_rev_cpu,
+                files=files, pre_step=pre_step, peak_step=peak_step, rev_step=rev_step,
+            ))
+
+        preloaded[sched] = seeds
+
+    return preloaded
+
+
 # ---------------------------------------------------------------------------
 # Frankenstein layer-swap
 # ---------------------------------------------------------------------------
@@ -117,9 +220,6 @@ def _build_hybrid_sd(
     sd_top: dict[str, torch.Tensor],
     cut_after_block: int,
 ) -> dict[str, torch.Tensor]:
-    """Build a hybrid state_dict: blocks [0..cut_after_block] from sd_bottom,
-    blocks [cut_after_block+1..5] + ln_f from sd_top.
-    Embeddings always from sd_bottom. LM_head tied to wte (from bottom)."""
     hybrid = {}
     for key in sd_bottom:
         if key.startswith("transformer.wte.") or key.startswith("transformer.wpe.") or key.startswith("transformer.drop."):
@@ -133,7 +233,7 @@ def _build_hybrid_sd(
         elif key.startswith("transformer.ln_f."):
             hybrid[key] = sd_top[key]
         elif key.startswith("LM_head."):
-            hybrid[key] = sd_bottom[key]
+            hybrid[key] = sd_top[key]
         else:
             hybrid[key] = sd_bottom[key]
     return hybrid
@@ -141,73 +241,36 @@ def _build_hybrid_sd(
 
 @torch.no_grad()
 def compute_frankenstein(
-    ckpt_root: Path,
-    all_results: list[dict],
-    burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
     prompt_len: int,
+    n_layer: int,
     n_seeds: int = 10,
 ) -> dict:
-    """Frankenstein layer-swap: pre-burst vs post-burst.
-
-    For each cut point k in [-1, 0, 1, 2, 3, 4, 5]:
-      - k=-1: all layers from model B (post-burst), embeddings from A (pre-burst)
-      - k=5: all layers from model A (pre-burst), only ln_f from B
-
-    Two directions:
-      - "pre_bottom": bottom layers from pre-burst, top from post-burst
-      - "post_bottom": bottom layers from post-burst, top from pre-burst
-    """
-    jobs_by_schedule: dict[str, list[dict]] = {}
-    for r in all_results:
-        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
-
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
-    cut_points = list(range(-1, N_LAYERS))
-    burst_sub = _subsample_docs(burst_docs_BL)
-    other_sub = _subsample_docs(other_docs_BL)
+    cut_points = list(range(-1, n_layer))
     results = {}
 
-    for sched in schedules:
-        sched_results = jobs_by_schedule[sched]
+    for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
-        seeds_done = 0
-
-        for r in sched_results:
-            if seeds_done >= n_seeds:
-                break
-            label = r["label"]
-            ckpt_dir = ckpt_root / label
-            if not ckpt_dir.exists():
-                continue
-            files = _ckpt_files(ckpt_dir)
-            if not files:
-                continue
-
-            cfg = r["config"]
-            pre_step, peak_step, _ = _get_key_steps(files, cfg)
-
-            sd_pre = torch.load(str(files[pre_step]), map_location=DEVICE, weights_only=True)
-            sd_post = torch.load(str(files[peak_step]), map_location=DEVICE, weights_only=True)
-
-            net = _load_net(cfg, str(files[pre_step]))
-            seed_data = {"pre_bottom_burst": [], "pre_bottom_other": [],
-                         "post_bottom_burst": [], "post_bottom_other": []}
-
+        for sc in seeds[:n_seeds]:
+            net = _make_net(sc.cfg)
+            all_hybrids: list[tuple[str, dict]] = []
             for k in cut_points:
-                hybrid_pre_bot = _build_hybrid_sd(sd_pre, sd_post, k)
-                net.load_state_dict(hybrid_pre_bot)
-                seed_data["pre_bottom_burst"].append(_free_gen_acc(net, burst_sub, prompt_len))
-                seed_data["pre_bottom_other"].append(_free_gen_acc(net, other_sub, prompt_len))
+                all_hybrids.append(("pre_bottom", _build_hybrid_sd(sc.sd_pre, sc.sd_peak, k)))
+                all_hybrids.append(("post_bottom", _build_hybrid_sd(sc.sd_peak, sc.sd_pre, k)))
 
-                hybrid_post_bot = _build_hybrid_sd(sd_post, sd_pre, k)
-                net.load_state_dict(hybrid_post_bot)
-                seed_data["post_bottom_burst"].append(_free_gen_acc(net, burst_sub, prompt_len))
-                seed_data["post_bottom_other"].append(_free_gen_acc(net, other_sub, prompt_len))
+            seed_data: dict[str, list[float]] = {
+                "pre_bottom_burst": [], "pre_bottom_other": [],
+                "post_bottom_burst": [], "post_bottom_other": [],
+            }
+            for direction, hybrid_sd in all_hybrids:
+                net.load_state_dict(hybrid_sd)
+                seed_data[f"{direction}_burst"].append(_free_gen_acc(net, burst_sub, prompt_len))
+                seed_data[f"{direction}_other"].append(_free_gen_acc(net, other_sub, prompt_len))
 
             per_seed.append(seed_data)
-            seeds_done += 1
-            print(f"  {label}: frankenstein done", flush=True)
+            print(f"  {sc.label}: frankenstein done", flush=True)
 
         results[sched] = {"cut_points": cut_points, "per_seed": per_seed}
 
@@ -216,78 +279,48 @@ def compute_frankenstein(
 
 @torch.no_grad()
 def compute_cross_burst_frankenstein(
-    ckpt_root: Path,
-    all_results: list[dict],
-    burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
     prompt_len: int,
-    n_seeds: int = 3,
-    schedule_pairs: list[tuple[str, str]] = None,
+    n_layer: int,
+    n_seeds: int = 10,
+    schedule_pairs: list[tuple[str, str]] | None = None,
 ) -> dict:
-    """Cross-burst Frankenstein: swap layers between post-burst models of
-    different schedules to see if they store the capability in the same layers."""
     if schedule_pairs is None:
-        schedule_pairs = [
-            ("burst_100", "burst_10"),
-            ("burst_100", "burst_50"),
-            ("burst_50", "burst_10"),
-        ]
+        available = sorted(preloaded.keys(), key=_sched_order)
+        schedule_pairs = list(combinations(available, 2))
 
-    jobs_by_schedule: dict[str, list[dict]] = {}
-    for r in all_results:
-        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
-
-    cut_points = list(range(-1, N_LAYERS))
-    burst_sub = _subsample_docs(burst_docs_BL)
-    other_sub = _subsample_docs(other_docs_BL)
+    cut_points = list(range(-1, n_layer))
     results = {}
 
     for sched_a, sched_b in schedule_pairs:
-        if sched_a not in jobs_by_schedule or sched_b not in jobs_by_schedule:
+        seeds_a = preloaded.get(sched_a, [])
+        seeds_b = preloaded.get(sched_b, [])
+        if not seeds_a or not seeds_b:
             continue
-        jobs_a = jobs_by_schedule[sched_a]
-        jobs_b = jobs_by_schedule[sched_b]
 
         per_seed: list[dict] = []
-        seeds_done = 0
-
-        for r_a, r_b in zip(jobs_a, jobs_b):
-            if seeds_done >= n_seeds:
+        for sc_a, sc_b in zip(seeds_a, seeds_b):
+            if len(per_seed) >= n_seeds:
                 break
-            dir_a = ckpt_root / r_a["label"]
-            dir_b = ckpt_root / r_b["label"]
-            if not dir_a.exists() or not dir_b.exists():
-                continue
-            files_a = _ckpt_files(dir_a)
-            files_b = _ckpt_files(dir_b)
-            if not files_a or not files_b:
-                continue
-
-            cfg = r_a["config"]
-            _, peak_a, _ = _get_key_steps(files_a, cfg)
-            _, peak_b, _ = _get_key_steps(files_b, cfg)
-
-            sd_a = torch.load(str(files_a[peak_a]), map_location=DEVICE, weights_only=True)
-            sd_b = torch.load(str(files_b[peak_b]), map_location=DEVICE, weights_only=True)
-
-            net = _load_net(cfg, str(files_a[peak_a]))
-            seed_data = {"a_bottom_burst": [], "a_bottom_other": [],
-                         "b_bottom_burst": [], "b_bottom_other": []}
-
+            net = _make_net(sc_a.cfg)
+            all_hybrids: list[tuple[str, dict]] = []
             for k in cut_points:
-                hybrid_a_bot = _build_hybrid_sd(sd_a, sd_b, k)
-                net.load_state_dict(hybrid_a_bot)
-                seed_data["a_bottom_burst"].append(_free_gen_acc(net, burst_sub, prompt_len))
-                seed_data["a_bottom_other"].append(_free_gen_acc(net, other_sub, prompt_len))
+                all_hybrids.append(("a_bottom", _build_hybrid_sd(sc_a.sd_peak, sc_b.sd_peak, k)))
+                all_hybrids.append(("b_bottom", _build_hybrid_sd(sc_b.sd_peak, sc_a.sd_peak, k)))
 
-                hybrid_b_bot = _build_hybrid_sd(sd_b, sd_a, k)
-                net.load_state_dict(hybrid_b_bot)
-                seed_data["b_bottom_burst"].append(_free_gen_acc(net, burst_sub, prompt_len))
-                seed_data["b_bottom_other"].append(_free_gen_acc(net, other_sub, prompt_len))
+            seed_data: dict[str, list[float]] = {
+                "a_bottom_burst": [], "a_bottom_other": [],
+                "b_bottom_burst": [], "b_bottom_other": [],
+            }
+            for direction, hybrid_sd in all_hybrids:
+                net.load_state_dict(hybrid_sd)
+                seed_data[f"{direction}_burst"].append(_free_gen_acc(net, burst_sub, prompt_len))
+                seed_data[f"{direction}_other"].append(_free_gen_acc(net, other_sub, prompt_len))
 
             per_seed.append(seed_data)
-            seeds_done += 1
-            print(f"  {r_a['label']} x {r_b['label']}: cross-frankenstein done", flush=True)
+            print(f"  {sc_a.label} x {sc_b.label}: cross-frankenstein done", flush=True)
 
         pair_key = f"{sched_a}_x_{sched_b}"
         results[pair_key] = {
@@ -304,29 +337,14 @@ def compute_cross_burst_frankenstein(
 
 @torch.no_grad()
 def compute_lmc_dual(
-    ckpt_root: Path,
-    all_results: list[dict],
-    burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
     prompt_len: int,
     n_seeds: int = 10,
     n_alphas: int = 11,
 ) -> dict:
-    """LMC with dual-class evaluation and pre-burst baseline.
-
-    Computes two interpolation paths:
-      1. pre_burst <-> post_burst (primary)
-      2. post_burst <-> post_reversion (secondary)
-    Evaluates loss on both burst and other docs at each alpha.
-    """
-    jobs_by_schedule: dict[str, list[dict]] = {}
-    for r in all_results:
-        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
-
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
     alphas = np.linspace(0, 1, n_alphas).tolist()
-    burst_sub = _subsample_docs(burst_docs_BL)
-    other_sub = _subsample_docs(other_docs_BL)
     burst_t = torch.as_tensor(burst_sub, dtype=torch.long, device=DEVICE)
     other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
     burst_inp, burst_tgt = burst_t[:, :-1], burst_t[:, 1:]
@@ -334,51 +352,37 @@ def compute_lmc_dual(
 
     results = {}
 
-    for sched in schedules:
-        sched_results = jobs_by_schedule[sched]
+    for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
-        seeds_done = 0
+        for sc in seeds[:n_seeds]:
+            V = sc.cfg["vocab_size"]
+            net = _make_net(sc.cfg)
 
-        for r in sched_results:
-            if seeds_done >= n_seeds:
-                break
-            label = r["label"]
-            ckpt_dir = ckpt_root / label
-            if not ckpt_dir.exists():
-                continue
-            files = _ckpt_files(ckpt_dir)
-            if not files:
-                continue
+            all_interps_pre_peak = [
+                {k: (1 - a) * sc.sd_pre_cpu[k] + a * sc.sd_peak_cpu[k] for k in sc.sd_pre_cpu}
+                for a in alphas
+            ]
+            all_interps_peak_rev = [
+                {k: (1 - a) * sc.sd_peak_cpu[k] + a * sc.sd_rev_cpu[k] for k in sc.sd_peak_cpu}
+                for a in alphas
+            ]
 
-            cfg = r["config"]
-            pre_step, peak_step, rev_step = _get_key_steps(files, cfg)
-
-            sd_pre = {k: v.float() for k, v in torch.load(
-                str(files[pre_step]), map_location="cpu", weights_only=True).items()}
-            sd_peak = {k: v.float() for k, v in torch.load(
-                str(files[peak_step]), map_location="cpu", weights_only=True).items()}
-            sd_rev = {k: v.float() for k, v in torch.load(
-                str(files[rev_step]), map_location="cpu", weights_only=True).items()}
-
-            net = _load_net(cfg, str(files[pre_step]))
-
-            def _eval_interp(sd_a, sd_b):
+            def _eval_batch(interps):
                 burst_losses, other_losses = [], []
-                for alpha in alphas:
-                    interp = {k: (1 - alpha) * sd_a[k] + alpha * sd_b[k] for k in sd_a}
+                for interp in interps:
                     net.load_state_dict(interp)
                     net.eval()
                     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-                        bl = F.cross_entropy(net(burst_inp).float().reshape(-1, cfg["vocab_size"]),
+                        bl = F.cross_entropy(net(burst_inp).float().reshape(-1, V),
                                              burst_tgt.reshape(-1)).item()
-                        ol = F.cross_entropy(net(other_inp).float().reshape(-1, cfg["vocab_size"]),
+                        ol = F.cross_entropy(net(other_inp).float().reshape(-1, V),
                                              other_tgt.reshape(-1)).item()
                     burst_losses.append(bl)
                     other_losses.append(ol)
                 return burst_losses, other_losses
 
-            pre_peak_burst, pre_peak_other = _eval_interp(sd_pre, sd_peak)
-            peak_rev_burst, peak_rev_other = _eval_interp(sd_peak, sd_rev)
+            pre_peak_burst, pre_peak_other = _eval_batch(all_interps_pre_peak)
+            peak_rev_burst, peak_rev_other = _eval_batch(all_interps_peak_rev)
 
             def _barrier(curve):
                 ep = (curve[0] + curve[-1]) / 2
@@ -394,8 +398,7 @@ def compute_lmc_dual(
                 "barrier_peak_rev_burst": _barrier(peak_rev_burst),
                 "barrier_peak_rev_other": _barrier(peak_rev_other),
             })
-            seeds_done += 1
-            print(f"  {label}: LMC barriers pre↔peak burst={per_seed[-1]['barrier_pre_peak_burst']:.4f}, "
+            print(f"  {sc.label}: LMC barriers pre↔peak burst={per_seed[-1]['barrier_pre_peak_burst']:.4f}, "
                   f"peak↔rev burst={per_seed[-1]['barrier_peak_rev_burst']:.4f}", flush=True)
 
         results[sched] = {"alphas": alphas, "per_seed": per_seed}
@@ -409,68 +412,39 @@ def compute_lmc_dual(
 
 @torch.no_grad()
 def compute_ema_dual(
-    ckpt_root: Path,
-    all_results: list[dict],
-    burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
     prompt_len: int,
     n_seeds: int = 10,
 ) -> dict:
-    """EMA interpolation with dual-class evaluation.
-
-    Two paths:
-      1. pre_burst <-> post_burst: alpha=0 is pre, alpha=1 is peak
-      2. post_burst <-> post_reversion: alpha=0 is reverted, alpha=1 is peak
-    """
     alphas = [0.0, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0]
-    jobs_by_schedule: dict[str, list[dict]] = {}
-    for r in all_results:
-        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
-
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
-    burst_sub = _subsample_docs(burst_docs_BL, n=128)
-    other_sub = _subsample_docs(other_docs_BL, n=128)
     results = {}
 
-    for sched in schedules:
-        sched_results = jobs_by_schedule[sched]
+    for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
-        seeds_done = 0
+        for sc in seeds[:n_seeds]:
+            net = _make_net(sc.cfg)
 
-        for r in sched_results:
-            if seeds_done >= n_seeds:
-                break
-            label = r["label"]
-            ckpt_dir = ckpt_root / label
-            if not ckpt_dir.exists():
-                continue
-            files = _ckpt_files(ckpt_dir)
-            if not files:
-                continue
+            all_pre_peak = [
+                {k: (1 - a) * sc.sd_pre_cpu[k] + a * sc.sd_peak_cpu[k] for k in sc.sd_pre_cpu}
+                for a in alphas
+            ]
+            all_rev_peak = [
+                {k: (1 - a) * sc.sd_rev_cpu[k] + a * sc.sd_peak_cpu[k] for k in sc.sd_rev_cpu}
+                for a in alphas
+            ]
 
-            cfg = r["config"]
-            pre_step, peak_step, rev_step = _get_key_steps(files, cfg)
-
-            sd_pre = {k: v.float() for k, v in torch.load(
-                str(files[pre_step]), map_location="cpu", weights_only=True).items()}
-            sd_peak = {k: v.float() for k, v in torch.load(
-                str(files[peak_step]), map_location="cpu", weights_only=True).items()}
-            sd_rev = {k: v.float() for k, v in torch.load(
-                str(files[rev_step]), map_location="cpu", weights_only=True).items()}
-
-            net = _load_net(cfg, str(files[pre_step]))
-
-            def _eval_path(sd_a, sd_b):
+            def _eval_path(interps):
                 burst_accs, other_accs = [], []
-                for alpha in alphas:
-                    interp = {k: (1 - alpha) * sd_a[k] + alpha * sd_b[k] for k in sd_a}
+                for interp in interps:
                     net.load_state_dict(interp)
                     burst_accs.append(_free_gen_acc(net, burst_sub, prompt_len))
                     other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
                 return burst_accs, other_accs
 
-            pre_peak_burst, pre_peak_other = _eval_path(sd_pre, sd_peak)
-            rev_peak_burst, rev_peak_other = _eval_path(sd_rev, sd_peak)
+            pre_peak_burst, pre_peak_other = _eval_path(all_pre_peak)
+            rev_peak_burst, rev_peak_other = _eval_path(all_rev_peak)
 
             def _cliff(accs):
                 return next((a for a, acc in zip(alphas, accs) if acc > 0.5), 1.0)
@@ -483,8 +457,7 @@ def compute_ema_dual(
                 "cliff_pre_peak_burst": _cliff(pre_peak_burst),
                 "cliff_rev_peak_burst": _cliff(rev_peak_burst),
             })
-            seeds_done += 1
-            print(f"  {label}: EMA cliff pre↔peak={per_seed[-1]['cliff_pre_peak_burst']:.2f}, "
+            print(f"  {sc.label}: EMA cliff pre↔peak={per_seed[-1]['cliff_pre_peak_burst']:.2f}, "
                   f"rev↔peak={per_seed[-1]['cliff_rev_peak_burst']:.2f}", flush=True)
 
         results[sched] = {"alphas": alphas, "per_seed": per_seed}
@@ -498,61 +471,39 @@ def compute_ema_dual(
 
 @torch.no_grad()
 def compute_pruning_dual(
-    ckpt_root: Path,
-    all_results: list[dict],
-    burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
     prompt_len: int,
     n_seeds: int = 10,
     n_prune_levels: int = 10,
 ) -> dict:
-    jobs_by_schedule: dict[str, list[dict]] = {}
-    for r in all_results:
-        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
-
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
     sparsities = np.linspace(0, 0.9, n_prune_levels).tolist()
-    burst_sub = _subsample_docs(burst_docs_BL)
-    other_sub = _subsample_docs(other_docs_BL)
     results = {}
 
-    for sched in schedules:
-        sched_results = jobs_by_schedule[sched]
+    for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
-        seeds_done = 0
-
-        for r in sched_results:
-            if seeds_done >= n_seeds:
-                break
-            label = r["label"]
-            ckpt_dir = ckpt_root / label
-            if not ckpt_dir.exists():
-                continue
-            files = _ckpt_files(ckpt_dir)
-            if not files:
-                continue
-
-            cfg = r["config"]
-            _, peak_step, _ = _get_key_steps(files, cfg)
-
-            sd_orig = torch.load(str(files[peak_step]), map_location=DEVICE, weights_only=True)
-            net = _load_net(cfg, str(files[peak_step]))
+        for sc in seeds[:n_seeds]:
+            sd_orig = sc.sd_peak
+            net = _make_net(sc.cfg)
             all_w = torch.cat([v.view(-1).abs() for v in sd_orig.values()])
 
-            burst_accs, other_accs = [], []
-            for sparsity in sparsities:
-                if sparsity > 0:
-                    threshold = torch.quantile(all_w, sparsity)
-                    pruned = {k: v * (v.abs() >= threshold).to(v.dtype) for k, v in sd_orig.items()}
-                    net.load_state_dict(pruned)
+            thresholds = [torch.quantile(all_w, s) if s > 0 else None for s in sparsities]
+            all_pruned = []
+            for threshold in thresholds:
+                if threshold is not None:
+                    all_pruned.append({k: v * (v.abs() >= threshold).to(v.dtype) for k, v in sd_orig.items()})
                 else:
-                    net.load_state_dict(sd_orig)
+                    all_pruned.append(sd_orig)
+
+            burst_accs, other_accs = [], []
+            for pruned_sd in all_pruned:
+                net.load_state_dict(pruned_sd)
                 burst_accs.append(_free_gen_acc(net, burst_sub, prompt_len))
                 other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
 
             per_seed.append({"burst_accs": burst_accs, "other_accs": other_accs})
-            seeds_done += 1
-            print(f"  {label}: pruning burst@0%={burst_accs[0]:.3f}, other@0%={other_accs[0]:.3f}", flush=True)
+            print(f"  {sc.label}: pruning burst@0%={burst_accs[0]:.3f}, other@0%={other_accs[0]:.3f}", flush=True)
 
         results[sched] = {"sparsities": sparsities, "per_seed": per_seed}
 
@@ -565,70 +516,31 @@ def compute_pruning_dual(
 
 @torch.no_grad()
 def compute_transfer_dual(
-    ckpt_root: Path,
-    all_results: list[dict],
-    burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
     prompt_len: int,
     n_seeds: int = 10,
 ) -> dict:
-    jobs_by_schedule: dict[str, list[dict]] = {}
-    for r in all_results:
-        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
-
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
-    burst_sub = _subsample_docs(burst_docs_BL)
-    other_sub = _subsample_docs(other_docs_BL)
     results = {}
 
-    for sched in schedules:
-        sched_results = jobs_by_schedule[sched]
+    for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
-        seeds_done = 0
-
-        for i, r_src in enumerate(sched_results):
-            if seeds_done >= n_seeds:
-                break
-            label_src = r_src["label"]
-            ckpt_dir_src = ckpt_root / label_src
-            if not ckpt_dir_src.exists():
-                continue
-            files_src = _ckpt_files(ckpt_dir_src)
-            if not files_src:
+        for i, sc_src in enumerate(seeds[:n_seeds]):
+            sc_tgt = next((s for j, s in enumerate(seeds) if j != i), None)
+            if sc_tgt is None:
                 continue
 
-            cfg = r_src["config"]
-            pre_step_src, peak_step_src, _ = _get_key_steps(files_src, cfg)
+            tau = {k: sc_src.sd_peak_cpu[k] - sc_src.sd_pre_cpu[k] for k in sc_src.sd_peak_cpu}
+            transferred = {k: sc_tgt.sd_pre_cpu[k] + tau[k] for k in sc_tgt.sd_pre_cpu}
 
-            r_tgt = next(
-                (r for j, r in enumerate(sched_results) if j != i
-                 and (ckpt_root / r["label"]).exists()), None)
-            if r_tgt is None:
-                continue
-
-            files_tgt = _ckpt_files(ckpt_root / r_tgt["label"])
-            if not files_tgt:
-                continue
-            pre_step_tgt = min(files_tgt.keys())
-
-            peak_sd = {k: v.float() for k, v in torch.load(
-                str(files_src[peak_step_src]), map_location="cpu", weights_only=True).items()}
-            pre_sd = {k: v.float() for k, v in torch.load(
-                str(files_src[pre_step_src]), map_location="cpu", weights_only=True).items()}
-            tgt_sd = {k: v.float() for k, v in torch.load(
-                str(files_tgt[pre_step_tgt]), map_location="cpu", weights_only=True).items()}
-
-            tau = {k: peak_sd[k] - pre_sd[k] for k in peak_sd}
-            transferred = {k: tgt_sd[k] + tau[k] for k in tgt_sd}
-
-            net = _load_net(cfg, str(files_tgt[pre_step_tgt]))
+            net = _make_net(sc_src.cfg)
             net.load_state_dict(transferred)
             burst_acc = _free_gen_acc(net, burst_sub, prompt_len)
             other_acc = _free_gen_acc(net, other_sub, prompt_len)
 
             per_seed.append({"burst_acc": burst_acc, "other_acc": other_acc})
-            seeds_done += 1
-            print(f"  {label_src} → {r_tgt['label']}: burst={burst_acc:.3f}, other={other_acc:.3f}", flush=True)
+            print(f"  {sc_src.label} → {sc_tgt.label}: burst={burst_acc:.3f}, other={other_acc:.3f}", flush=True)
 
         results[sched] = {"per_seed": per_seed}
 
@@ -640,42 +552,22 @@ def compute_transfer_dual(
 # ---------------------------------------------------------------------------
 
 def compute_relearning_dual(
-    ckpt_root: Path,
-    all_results: list[dict],
+    preloaded: dict[str, list[SeedCheckpoints]],
     burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
     prompt_len: int,
     n_seeds: int = 10,
     relearn_steps: int = 50,
 ) -> dict:
-    jobs_by_schedule: dict[str, list[dict]] = {}
-    for r in all_results:
-        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
-
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
-    burst_sub = _subsample_docs(burst_docs_BL)
-    other_sub = _subsample_docs(other_docs_BL)
     results = {}
 
-    for sched in schedules:
-        sched_results = jobs_by_schedule[sched]
+    for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
-        seeds_done = 0
-
-        for r in sched_results:
-            if seeds_done >= n_seeds:
-                break
-            label = r["label"]
-            ckpt_dir = ckpt_root / label
-            if not ckpt_dir.exists():
-                continue
-            files = _ckpt_files(ckpt_dir)
-            if not files:
-                continue
-
-            cfg = r["config"]
-            _, _, rev_step = _get_key_steps(files, cfg)
-            net = _load_net(cfg, str(files[rev_step]))
+        for sc in seeds[:n_seeds]:
+            cfg = sc.cfg
+            net = _make_net(cfg)
+            net.load_state_dict(sc.sd_rev)
 
             optim_cfg = OmegaConf.create({
                 "learning_rate": cfg["lr"] * 0.3,
@@ -716,8 +608,7 @@ def compute_relearning_dual(
                     steps_log.append(step)
 
             per_seed.append({"steps": steps_log, "burst_accs": burst_accs, "other_accs": other_accs})
-            seeds_done += 1
-            print(f"  {label}: relearn burst={burst_accs[-1]:.3f}, other={other_accs[-1]:.3f}", flush=True)
+            print(f"  {sc.label}: relearn burst={burst_accs[-1]:.3f}, other={other_accs[-1]:.3f}", flush=True)
 
         results[sched] = {"per_seed": per_seed}
 
@@ -760,7 +651,8 @@ def compute_trajectory_dim(
                 continue
 
             T = r["config"]["total_steps"]
-            rev_steps_all = sorted(s for s in files if s >= T)
+            burst_end = r.get("burst_end_step", r.get("pre_burst_steps", 0) + T)
+            rev_steps_all = sorted(s for s in files if s >= burst_end)
             if len(rev_steps_all) < 3:
                 continue
 
@@ -795,6 +687,37 @@ def compute_trajectory_dim(
 
 
 # ---------------------------------------------------------------------------
+# Analysis feature flags — comment out any key to skip that metric.
+# Data-only metrics (1-3, 12-17) read from all_results; no GPU needed.
+# Checkpoint-based metrics (4-11, 18) require preloaded SeedCheckpoints.
+# ---------------------------------------------------------------------------
+ANALYSIS_METRICS: dict[str, bool] = {
+    # existing metrics
+    "forgetting_decomposition": True,
+    "grad_temporal":            True,
+    "layer_interference":       True,
+    "ema_dual":                 True,
+    "lmc_dual":                 True,
+    "frankenstein":             True,
+    "cross_frankenstein":       True,
+    "transfer_dual":            True,
+    "pruning_dual":             True,
+    "trajectory_dim":           True,
+    "relearning_dual":          True,
+    "sharpness":                True,
+    # new gradient metrics (data-only, read from grad_sim_log in all_results)
+    "grad_norm_ratio":           True,
+    "grad_rank":                 True,
+    "grad_snr":                  True,
+    "conflict_rate":             True,
+    "token_pos_grad":            True,
+    "grad_attribution":          True,
+    # new gradient metric (requires preloaded checkpoints)
+    "forgetting_grad_alignment": True,
+}
+
+
+# ---------------------------------------------------------------------------
 # Data-only metrics (from all_results, keep per-seed)
 # ---------------------------------------------------------------------------
 
@@ -815,7 +738,8 @@ def compute_forgetting_decomposition(all_results: list[dict]) -> dict:
             phases = log["phase"]
             T = r["config"]["total_steps"]
 
-            rev_steps = [s - T for s, p in zip(steps, phases) if p == PHASE_REVERSION]
+            burst_end = r.get("burst_end_step", r.get("pre_burst_steps", 0) + T)
+            rev_steps = [s - burst_end for s, p in zip(steps, phases) if p == PHASE_REVERSION]
             rev_accs = [a for a, p in zip(accs, phases) if p == PHASE_REVERSION]
             if len(rev_accs) < 2:
                 continue
@@ -856,9 +780,10 @@ def compute_grad_temporal(all_results: list[dict]) -> dict:
             sims = gsl.get("burst_vs_other", [])
             phases = gsl.get("phase", [])
             T = r["config"]["total_steps"]
+            burst_end = r.get("burst_end_step", r.get("pre_burst_steps", 0) + T)
             for s, sim, ph in zip(steps, sims, phases):
                 if ph == PHASE_REVERSION:
-                    step_sims.setdefault(s - T, []).append(sim)
+                    step_sims.setdefault(s - burst_end, []).append(sim)
 
         if not step_sims:
             results[sched] = {"steps": [], "mean_sims": []}
@@ -881,6 +806,7 @@ def compute_layer_interference(all_results: list[dict]) -> dict:
 
     for sched in schedules:
         layer_sims: dict[str, list[float]] = {}
+        layer_end_sims: dict[str, list[float]] = {}
         layer_names = []
         for r in jobs_by_schedule[sched]:
             gsl = r.get("grad_sim_log", {})
@@ -892,16 +818,223 @@ def compute_layer_interference(all_results: list[dict]) -> dict:
                 burst_vals = [v for v, p in zip(vals, phases) if p == PHASE_BURST]
                 if burst_vals:
                     layer_sims.setdefault(ln, []).append(float(np.mean(burst_vals)))
+                    layer_end_sims.setdefault(ln, []).append(float(burst_vals[-1]))
 
         if not layer_sims:
             results[sched] = {}
             continue
 
         mean_per_layer = {ln: float(np.mean(vs)) for ln, vs in layer_sims.items()}
+        end_per_layer = {ln: float(np.mean(vs)) for ln, vs in layer_end_sims.items()}
         results[sched] = {
             "mean_per_layer": mean_per_layer,
+            "end_per_layer": end_per_layer,
             "layer_names": layer_names or list(mean_per_layer.keys()),
         }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# New gradient metrics (data-only, read from grad_sim_log in all_results)
+# ---------------------------------------------------------------------------
+
+def _aggregate_layer_metric(all_results: list[dict], key: str,
+                             phase_filter: str = PHASE_BURST) -> dict:
+    """Generic aggregator for per-layer time-series dicts stored in grad_sim_log.
+
+    Returns {sched: {mean_per_layer, end_per_layer, layer_names}}.
+    """
+    jobs_by_schedule: dict[str, list[dict]] = {}
+    for r in all_results:
+        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
+
+    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    results = {}
+
+    for sched in schedules:
+        layer_vals: dict[str, list[float]] = {}
+        layer_end_vals: dict[str, list[float]] = {}
+        layer_names: list[str] = []
+
+        for r in jobs_by_schedule[sched]:
+            gsl = r.get("grad_sim_log", {})
+            per_layer = gsl.get(key, {})
+            phases = gsl.get("phase", [])
+            if not layer_names and gsl.get("layer_names"):
+                layer_names = gsl["layer_names"]
+            for ln, vals in per_layer.items():
+                filtered = [v for v, p in zip(vals, phases) if p == phase_filter]
+                if filtered:
+                    layer_vals.setdefault(ln, []).append(float(np.nanmean(filtered)))
+                    layer_end_vals.setdefault(ln, []).append(float(filtered[-1]))
+
+        if not layer_vals:
+            results[sched] = {}
+            continue
+
+        results[sched] = {
+            "mean_per_layer": {ln: float(np.nanmean(vs)) for ln, vs in layer_vals.items()},
+            "end_per_layer": {ln: float(np.nanmean(vs)) for ln, vs in layer_end_vals.items()},
+            "layer_names": layer_names or list(layer_vals.keys()),
+        }
+
+    return results
+
+
+def compute_grad_norm_ratio(all_results: list[dict]) -> dict:
+    """Per-layer ||g_burst|| / ||g_other|| aggregated over burst phase."""
+    return _aggregate_layer_metric(all_results, "grad_norm_ratio")
+
+
+def compute_grad_rank(all_results: list[dict]) -> dict:
+    """Per-layer effective gradient rank aggregated over burst phase."""
+    return _aggregate_layer_metric(all_results, "grad_rank")
+
+
+def compute_grad_snr(all_results: list[dict]) -> dict:
+    """Per-layer gradient SNR aggregated over burst phase."""
+    return _aggregate_layer_metric(all_results, "grad_snr")
+
+
+def compute_conflict_rate(all_results: list[dict]) -> dict:
+    """Per-layer gradient sign conflict rate aggregated over burst phase."""
+    return _aggregate_layer_metric(all_results, "conflict_rate")
+
+
+def compute_token_pos_grad(all_results: list[dict]) -> dict:
+    """Mean per-token-position embedding gradient norm over burst phase.
+
+    Returns {sched: {mean_norms: [float], n_positions: int}}.
+    """
+    jobs_by_schedule: dict[str, list[dict]] = {}
+    for r in all_results:
+        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
+
+    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    results = {}
+
+    for sched in schedules:
+        all_norms: list[list[float]] = []
+        for r in jobs_by_schedule[sched]:
+            gsl = r.get("grad_sim_log", {})
+            norms_list = gsl.get("token_pos_grad_norms", [])
+            phases = gsl.get("phase", [])
+            for norms, phase in zip(norms_list, phases):
+                if phase == PHASE_BURST and norms:
+                    all_norms.append(norms)
+
+        if not all_norms:
+            results[sched] = {"mean_norms": [], "n_positions": 0}
+            continue
+
+        max_len = max(len(n) for n in all_norms)
+        padded = np.array([n + [float("nan")] * (max_len - len(n)) for n in all_norms])
+        mean_norms = np.nanmean(padded, axis=0).tolist()
+        results[sched] = {"mean_norms": mean_norms, "n_positions": max_len}
+
+    return results
+
+
+def compute_grad_attribution(all_results: list[dict]) -> dict:
+    """Fraction of gradient norm from intermediate vs final output positions.
+
+    Returns {sched: {per_seed_intermediate: [float], per_seed_final: [float],
+                     mean_intermediate: float, mean_final: float}}.
+    """
+    jobs_by_schedule: dict[str, list[dict]] = {}
+    for r in all_results:
+        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
+
+    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    results = {}
+
+    for sched in schedules:
+        seed_intermediate: list[float] = []
+        seed_final: list[float] = []
+
+        for r in jobs_by_schedule[sched]:
+            gsl = r.get("grad_sim_log", {})
+            attr = gsl.get("grad_attribution", {})
+            int_fracs = attr.get("intermediate_frac", [])
+            fin_fracs = attr.get("final_frac", [])
+            phases = gsl.get("phase", [])
+
+            burst_int = [v for v, p in zip(int_fracs, phases) if p == PHASE_BURST]
+            burst_fin = [v for v, p in zip(fin_fracs, phases) if p == PHASE_BURST]
+
+            if burst_int:
+                seed_intermediate.append(float(np.nanmean(burst_int)))
+            if burst_fin:
+                seed_final.append(float(np.nanmean(burst_fin)))
+
+        results[sched] = {
+            "per_seed_intermediate": seed_intermediate,
+            "per_seed_final": seed_final,
+            "mean_intermediate": float(np.nanmean(seed_intermediate)) if seed_intermediate else float("nan"),
+            "mean_final": float(np.nanmean(seed_final)) if seed_final else float("nan"),
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Forgetting gradient alignment (requires preloaded checkpoints)
+# ---------------------------------------------------------------------------
+
+def compute_forgetting_grad_alignment(
+    preloaded: dict[str, list[SeedCheckpoints]],
+    other_sub: np.ndarray,
+    n_seeds: int = 10,
+) -> dict:
+    """Alignment of other-class gradient at peak-burst with the reversion direction.
+
+    Measures cos(grad_other(theta_peak), theta_pre - theta_peak).
+
+    Positive: other-class gradient at peak actively points back toward pre-burst
+              state — the burst modification is unstable under other-class data.
+    Near zero: other-class gradient is orthogonal to the burst modification —
+               the two live in separate parameter subspaces.
+
+    Returns {sched: {per_seed: [float]}}.
+    """
+    other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
+    other_inp, other_tgt = other_t[:, :-1], other_t[:, 1:]
+
+    results = {}
+    for sched, seeds in preloaded.items():
+        per_seed: list[float] = []
+        for sc in seeds[:n_seeds]:
+            net = _make_net(sc.cfg)
+            net.load_state_dict(sc.sd_peak)
+            net.train()
+            net.zero_grad()
+
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+                logits = net(other_inp).float()
+                loss = F.cross_entropy(logits.reshape(-1, sc.cfg["vocab_size"]),
+                                       other_tgt.reshape(-1))
+            loss.backward()
+
+            # Flat gradient of other-class loss at peak
+            g_other = torch.cat([
+                p.grad.detach().view(-1).float()
+                for p in net.parameters() if p.grad is not None
+            ])
+
+            # Reversion direction: theta_pre - theta_peak (flat)
+            rev_dir = torch.cat([
+                (sc.sd_pre_cpu[k].to(DEVICE).float() - sc.sd_peak[k].float()).view(-1)
+                for k in sc.sd_pre_cpu
+                if k in sc.sd_peak
+            ])
+
+            cos = F.cosine_similarity(g_other.unsqueeze(0), rev_dir.unsqueeze(0)).item()
+            per_seed.append(cos)
+            net.zero_grad()
+            print(f"  {sc.label}: forgetting_grad_alignment={cos:.4f}", flush=True)
+
+        results[sched] = {"per_seed": per_seed}
 
     return results
 
@@ -910,79 +1043,33 @@ def compute_layer_interference(all_results: list[dict]) -> dict:
 # Critical sharpness: global + per-layer Hutchinson trace of Hessian
 # ---------------------------------------------------------------------------
 
-LAYER_GROUPS = {
-    "emb": ["transformer.wte.weight", "transformer.wpe.weight"],
-}
-for _bi in range(N_LAYERS):
-    LAYER_GROUPS[f"block{_bi}.attn"] = [
-        f"transformer.h.{_bi}.attn.c_attn.weight",
-        f"transformer.h.{_bi}.attn.c_proj.weight",
-    ]
-    LAYER_GROUPS[f"block{_bi}.mlp"] = [
-        f"transformer.h.{_bi}.mlp.c_fc.weight",
-        f"transformer.h.{_bi}.mlp.c_proj.weight",
-    ]
-    LAYER_GROUPS[f"block{_bi}.ln"] = [
-        f"transformer.h.{_bi}.ln_1.weight",
-        f"transformer.h.{_bi}.ln_2.weight",
-    ]
-LAYER_GROUPS["ln_f"] = ["transformer.ln_f.weight"]
-
-
 def compute_sharpness(
-    ckpt_root: Path,
-    all_results: list[dict],
-    burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
+    n_layer: int,
     n_seeds: int = 10,
-    n_samples: int = 128,
     n_hutchinson: int = 15,
 ) -> dict:
-    """Hutchinson trace of Hessian — global and per-layer group.
+    layer_groups = _build_layer_groups(n_layer)
+    layer_group_names = list(layer_groups.keys())
 
-    For each seed: loads peak-burst checkpoint, computes Hessian trace
-    on burst-class loss globally and restricted to each layer group.
-    Also computes on other-class loss for comparison.
-    """
-    jobs_by_schedule: dict[str, list[dict]] = {}
-    for r in all_results:
-        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
-
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
-    burst_sub = _subsample_docs(burst_docs_BL, n=n_samples)
-    other_sub = _subsample_docs(other_docs_BL, n=n_samples)
     burst_t = torch.as_tensor(burst_sub, dtype=torch.long, device=DEVICE)
     other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
     burst_inp, burst_tgt = burst_t[:, :-1], burst_t[:, 1:]
     other_inp, other_tgt = other_t[:, :-1], other_t[:, 1:]
 
     results = {}
-    layer_group_names = list(LAYER_GROUPS.keys())
 
-    for sched in schedules:
-        sched_results = jobs_by_schedule[sched]
+    for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
-        seeds_done = 0
-
-        for r in sched_results:
-            if seeds_done >= n_seeds:
-                break
-            label = r["label"]
-            ckpt_dir = ckpt_root / label
-            if not ckpt_dir.exists():
-                continue
-            files = _ckpt_files(ckpt_dir)
-            if not files:
-                continue
-
-            cfg = r["config"]
-            _, peak_step, _ = _get_key_steps(files, cfg)
-
-            net = _load_net(cfg, str(files[peak_step]))
+        for sc in seeds[:n_seeds]:
+            net = _make_net(sc.cfg)
+            net.load_state_dict(sc.sd_peak)
             net.train()
 
             param_to_group: dict[str, str] = {}
-            for gname, pnames in LAYER_GROUPS.items():
+            for gname, pnames in layer_groups.items():
                 for pn in pnames:
                     if pn in dict(net.named_parameters()):
                         param_to_group[pn] = gname
@@ -992,7 +1079,7 @@ def compute_sharpness(
             param_tensors = [p for _, p in params]
 
             def _hutchinson_trace(inp_t, tgt_t):
-                V = cfg["vocab_size"]
+                V = sc.cfg["vocab_size"]
                 global_traces = []
                 layer_traces: dict[str, list[float]] = {g: [] for g in layer_group_names}
 
@@ -1037,8 +1124,7 @@ def compute_sharpness(
                 "burst_layers": burst_layers,
                 "other_layers": other_layers,
             })
-            seeds_done += 1
-            print(f"  {label}: sharpness burst={burst_global:.1f}, other={other_global:.1f}", flush=True)
+            print(f"  {sc.label}: sharpness burst={burst_global:.1f}, other={other_global:.1f}", flush=True)
 
         results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
 
@@ -1134,7 +1220,6 @@ def _bar_with_seeds(
     row: int = None,
     col: int = None,
 ) -> None:
-    """Add a bar trace with individual seed points and 95% CI error bars."""
     import plotly.graph_objects as go
 
     means = []
@@ -1194,7 +1279,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         _save_png(fig, str(charts_dir / f"{key}.png"))
 
     run_names = results.get("run_names", [])
-    first_run = run_names[0] if run_names else ""
+    n_layer = results.get("n_layer", 6)
 
     # ------------------------------------------------------------------
     # Section 1: EMA Interpolation (dual-class, fixed)
@@ -1314,7 +1399,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             continue
         schedules = sorted(frank.keys(), key=_sched_order)
         cut_points = frank[schedules[0]]["cut_points"]
-        cut_labels = ["emb"] + [f"block {i}" for i in range(N_LAYERS)]
+        cut_labels = ["emb"] + [f"block {i}" for i in range(len(cut_points) - 1)]
 
         for direction, dir_label, burst_key, other_key in [
             ("pre_bottom", "Pre-Burst Bottom → Post-Burst Top", "pre_bottom_burst", "pre_bottom_other"),
@@ -1354,7 +1439,6 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         xfrank = results.get("cross_frankenstein", {}).get(rn, {})
         if not xfrank:
             continue
-        cut_labels = ["emb"] + [f"block {i}" for i in range(N_LAYERS)]
 
         for pair_key, pair_data in xfrank.items():
             sa, sb = pair_data["sched_a"], pair_data["sched_b"]
@@ -1362,6 +1446,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             if not ps:
                 continue
             cut_points = pair_data["cut_points"]
+            cut_labels = ["emb"] + [f"block {i}" for i in range(len(cut_points) - 1)]
 
             fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class", "Other Classes"])
             a_burst = [float(np.mean([s["a_bottom_burst"][i] for s in ps])) for i in range(len(cut_points))]
@@ -1589,11 +1674,29 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             colorbar=dict(title="Cosine Sim"),
         ))
         fig.update_layout(
-            title=f"Per-Layer Gradient Interference (Burst Phase) — {rn}",
+            title=f"Per-Layer Gradient Interference — Mean (Burst Phase) — {rn}",
             xaxis_title="Layer", yaxis_title="Schedule",
             template="plotly_white", height=500,
         )
-        _add(f"layer_interference_{rn}", f"Layer Interference ({rn})", fig)
+        _add(f"layer_interference_{rn}", f"Layer Interference Mean ({rn})", fig)
+
+        z_end = []
+        for sched in schedules:
+            d = pli.get(sched, {})
+            row = [d.get("end_per_layer", {}).get(ln, float("nan")) for ln in layer_names]
+            z_end.append(row)
+
+        fig_end = go.Figure(go.Heatmap(
+            z=z_end, x=layer_names, y=schedules,
+            colorscale="RdBu", zmid=0,
+            colorbar=dict(title="Cosine Sim"),
+        ))
+        fig_end.update_layout(
+            title=f"Per-Layer Gradient Interference — End of Burst — {rn}",
+            xaxis_title="Layer", yaxis_title="Schedule",
+            template="plotly_white", height=500,
+        )
+        _add(f"layer_interference_end_{rn}", f"Layer Interference End-of-Burst ({rn})", fig_end)
 
     # ------------------------------------------------------------------
     # Section 12: Critical Sharpness — Global
@@ -1707,6 +1810,227 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             _add(f"position_{metric_key}", f"Position {metric_label}", fig)
 
     # ------------------------------------------------------------------
+    # Section 14: Gradient Norm Ratio Per Layer
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        gnr = results.get("grad_norm_ratio", {}).get(rn, {})
+        if not gnr:
+            continue
+        schedules = sorted(gnr.keys(), key=_sched_order)
+        sample = next((gnr[s] for s in schedules if gnr.get(s)), None)
+        if not sample or "layer_names" not in sample:
+            continue
+        layer_names = sample["layer_names"]
+
+        z = []
+        for sched in schedules:
+            d = gnr.get(sched, {})
+            row = [d.get("mean_per_layer", {}).get(ln, float("nan")) for ln in layer_names]
+            z.append(row)
+
+        fig = go.Figure(go.Heatmap(
+            z=z, x=layer_names, y=schedules,
+            colorscale="RdBu_r", zmid=1.0,
+            colorbar=dict(title="||g_burst|| / ||g_other||"),
+        ))
+        fig.update_layout(
+            title=f"Per-Layer Gradient Norm Ratio (Burst / Other) — Mean (Burst Phase) — {rn}<br>"
+                  "<sup>Ratio > 1: burst data dominates that layer's gradient. "
+                  "Ratio << 1: other-class data dominates.</sup>",
+            xaxis_title="Layer", yaxis_title="Schedule",
+            template="plotly_white", height=500,
+        )
+        _add(f"grad_norm_ratio_{rn}", f"Grad Norm Ratio ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 15: Gradient Effective Rank Per Layer
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        gr = results.get("grad_rank", {}).get(rn, {})
+        if not gr:
+            continue
+        schedules = sorted(gr.keys(), key=_sched_order)
+        sample = next((gr[s] for s in schedules if gr.get(s)), None)
+        if not sample or "layer_names" not in sample:
+            continue
+        layer_names = sample["layer_names"]
+
+        z = []
+        for sched in schedules:
+            d = gr.get(sched, {})
+            row = [d.get("mean_per_layer", {}).get(ln, float("nan")) for ln in layer_names]
+            z.append(row)
+
+        fig = go.Figure(go.Heatmap(
+            z=z, x=layer_names, y=schedules,
+            colorscale="Viridis",
+            colorbar=dict(title="Effective Rank"),
+        ))
+        fig.update_layout(
+            title=f"Per-Layer Gradient Effective Rank — Mean (Burst Phase) — {rn}<br>"
+                  "<sup>Low rank = gradient pushes along a low-dimensional subspace (wrapper-like). "
+                  "High rank = rich multi-feature learning.</sup>",
+            xaxis_title="Layer", yaxis_title="Schedule",
+            template="plotly_white", height=500,
+        )
+        _add(f"grad_rank_{rn}", f"Grad Rank ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 16: Gradient SNR Per Layer
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        gsnr = results.get("grad_snr", {}).get(rn, {})
+        if not gsnr:
+            continue
+        schedules = sorted(gsnr.keys(), key=_sched_order)
+        sample = next((gsnr[s] for s in schedules if gsnr.get(s)), None)
+        if not sample or "layer_names" not in sample:
+            continue
+        layer_names = sample["layer_names"]
+
+        z = []
+        for sched in schedules:
+            d = gsnr.get(sched, {})
+            row = [d.get("mean_per_layer", {}).get(ln, float("nan")) for ln in layer_names]
+            z.append(row)
+
+        fig = go.Figure(go.Heatmap(
+            z=z, x=layer_names, y=schedules,
+            colorscale="YlOrRd",
+            colorbar=dict(title="SNR"),
+        ))
+        fig.update_layout(
+            title=f"Per-Layer Gradient SNR (Burst Class) — Mean (Burst Phase) — {rn}<br>"
+                  "<sup>High SNR: all burst examples push the same direction (shortcut/wrapper). "
+                  "Low SNR: diverse gradient directions (richer learning).</sup>",
+            xaxis_title="Layer", yaxis_title="Schedule",
+            template="plotly_white", height=500,
+        )
+        _add(f"grad_snr_{rn}", f"Grad SNR ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 17: Gradient Conflict Rate Per Layer
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        gcr = results.get("conflict_rate", {}).get(rn, {})
+        if not gcr:
+            continue
+        schedules = sorted(gcr.keys(), key=_sched_order)
+        sample = next((gcr[s] for s in schedules if gcr.get(s)), None)
+        if not sample or "layer_names" not in sample:
+            continue
+        layer_names = sample["layer_names"]
+
+        z = []
+        for sched in schedules:
+            d = gcr.get(sched, {})
+            row = [d.get("mean_per_layer", {}).get(ln, float("nan")) for ln in layer_names]
+            z.append(row)
+
+        fig = go.Figure(go.Heatmap(
+            z=z, x=layer_names, y=schedules,
+            colorscale="RdBu_r", zmid=0.5,
+            colorbar=dict(title="Conflict Rate"),
+        ))
+        fig.update_layout(
+            title=f"Per-Layer Gradient Conflict Rate (Burst vs Other) — Mean (Burst Phase) — {rn}<br>"
+                  "<sup>Fraction of parameters where burst and other gradients have opposite signs. "
+                  "0.5 = random; > 0.5 = systematic conflict.</sup>",
+            xaxis_title="Layer", yaxis_title="Schedule",
+            template="plotly_white", height=500,
+        )
+        _add(f"conflict_rate_{rn}", f"Conflict Rate ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 18: Per-Token-Position Gradient Norms
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        tpg = results.get("token_pos_grad", {}).get(rn, {})
+        if not tpg:
+            continue
+        schedules = sorted(tpg.keys(), key=_sched_order)
+        fig = go.Figure()
+        for sched in schedules:
+            d = tpg.get(sched, {})
+            norms = d.get("mean_norms", [])
+            if not norms:
+                continue
+            positions = list(range(len(norms)))
+            fig.add_trace(go.Scatter(
+                x=positions, y=norms, name=sched,
+                line=dict(color=_color(sched), width=2), mode="lines+markers",
+            ))
+        fig.update_layout(
+            title=f"Per-Token-Position Embedding Gradient Norm — Mean (Burst Phase) — {rn}<br>"
+                  "<sup>Which token positions does the model attend to for gradient updates? "
+                  "Concentration on output positions = shortcut; spread = compositional learning.</sup>",
+            xaxis_title="Token Position",
+            yaxis_title="Mean ||d(loss)/d(embedding)||",
+            template="plotly_white", height=500,
+        )
+        _add(f"token_pos_grad_{rn}", f"Token Pos Grad ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 19: Gradient Attribution to Composition Steps
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        ga = results.get("grad_attribution", {}).get(rn, {})
+        if not ga:
+            continue
+        schedules = sorted(ga.keys(), key=_sched_order)
+
+        int_vals = {s: ga[s]["per_seed_intermediate"] for s in schedules if ga.get(s)}
+        fin_vals = {s: ga[s]["per_seed_final"] for s in schedules if ga.get(s)}
+
+        if int_vals:
+            fig = go.Figure()
+            _bar_with_seeds(fig, list(int_vals.keys()), int_vals)
+            fig.update_layout(
+                title=f"Gradient Attribution: Intermediate Output Fraction — {rn}<br>"
+                      "<sup>Fraction of total gradient norm from intermediate output positions. "
+                      "High = model is learning compositional steps; Low = shortcutting to final answer.</sup>",
+                xaxis_title="Schedule", yaxis_title="Intermediate Fraction",
+                template="plotly_white", height=500,
+            )
+            _add(f"grad_attribution_intermediate_{rn}", f"Grad Attribution Intermediate ({rn})", fig)
+
+        if fin_vals:
+            fig = go.Figure()
+            _bar_with_seeds(fig, list(fin_vals.keys()), fin_vals)
+            fig.update_layout(
+                title=f"Gradient Attribution: Final Output Fraction — {rn}<br>"
+                      "<sup>Fraction of total gradient norm from the final output position only. "
+                      "High = model ignores intermediate steps.</sup>",
+                xaxis_title="Schedule", yaxis_title="Final Output Fraction",
+                template="plotly_white", height=500,
+            )
+            _add(f"grad_attribution_final_{rn}", f"Grad Attribution Final ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 20: Forgetting Gradient Alignment
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        fga = results.get("forgetting_grad_alignment", {}).get(rn, {})
+        if not fga:
+            continue
+        schedules = sorted(fga.keys(), key=_sched_order)
+        vals = {s: fga[s]["per_seed"] for s in schedules if fga.get(s) and fga[s].get("per_seed")}
+        if not vals:
+            continue
+        fig = go.Figure()
+        _bar_with_seeds(fig, list(vals.keys()), vals)
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+        fig.update_layout(
+            title=f"Forgetting Gradient Alignment at Peak Burst — {rn}<br>"
+                  "<sup>cos(grad_other(theta_peak), theta_pre - theta_peak). "
+                  "Positive: other-class gradient actively reverts burst modification. "
+                  "Near zero: burst lives in orthogonal subspace.</sup>",
+            xaxis_title="Schedule", yaxis_title="Cosine Alignment",
+            template="plotly_white", height=500,
+        )
+        _add(f"forgetting_grad_alignment_{rn}", f"Forgetting Grad Alignment ({rn})", fig)
+
+    # ------------------------------------------------------------------
     # Assemble HTML
     # ------------------------------------------------------------------
     html_parts = ["""<!DOCTYPE html>
@@ -1760,8 +2084,458 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Extended metrics dashboard (10+ new metrics, dual-alignment charts)
+# ---------------------------------------------------------------------------
+
+def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:
+    """Compute 11 additional scalar metrics + curve data per schedule from training logs.
+
+    Dimension key:
+        S: n_seeds
+        T: burst phase steps
+        U: reversion steps
+    """
+    from burst.config import SCHED_COLORS
+
+    sched_groups: dict[str, list[dict]] = {}
+    for r in results:
+        sched_groups.setdefault(r["schedule"], []).append(r)
+
+    metrics: dict[str, dict] = {}
+
+    for sched, runs in sched_groups.items():
+        T_sched = runs[0]["config"]["total_steps"]
+        U_sched = runs[0]["config"]["reversion_steps"]
+        ev = runs[0]["config"]["eval_every"]
+
+        steps_to_peak_S: list[float] = []
+        burst_efficiency_S: list[float] = []
+        retention_ratio_S: list[float] = []
+        reversal_speed_S: list[float] = []
+        burst_onset_step_S: list[float] = []
+        other_drop_during_burst_S: list[float] = []
+        other_recovery_steps_S: list[float] = []
+        normalized_auc_S: list[float] = []
+        burst_learning_rate_S: list[float] = []
+        burst_other_ratio_at_peak_S: list[float] = []
+        time_to_half_peak_S: list[float] = []
+
+        burst_curve_S: list[np.ndarray] = []
+        other_curve_S: list[np.ndarray] = []
+        rev_burst_curve_S: list[np.ndarray] = []
+        rev_other_curve_S: list[np.ndarray] = []
+        burst_steps_arr: np.ndarray | None = None
+        rev_steps_arr: np.ndarray | None = None
+
+        for r in runs:
+            log = r["log"]
+            steps = np.array(log["step"])
+            acc_burst = np.array(log.get("acc_burst", [0.0] * len(steps)))
+            acc_other = np.array(log.get("acc_other", [0.0] * len(steps)))
+            phases = log["phase"]
+
+            burst_mask = np.array([ph == "special" for ph in phases])
+            rev_mask = np.array([ph == "all-but-special" for ph in phases])
+
+            burst_steps_loc = steps[burst_mask]
+            burst_acc = acc_burst[burst_mask]
+            burst_other = acc_other[burst_mask]
+            rev_steps_loc = steps[rev_mask]
+            rev_acc = acc_burst[rev_mask]
+            rev_other = acc_other[rev_mask]
+
+            burst_curve_S.append(burst_acc)
+            other_curve_S.append(burst_other)
+            rev_burst_curve_S.append(rev_acc)
+            rev_other_curve_S.append(rev_other)
+            if burst_steps_arr is None and len(burst_steps_loc) > 0:
+                burst_steps_arr = burst_steps_loc
+            if rev_steps_arr is None and len(rev_steps_loc) > 0:
+                rev_steps_arr = rev_steps_loc - rev_steps_loc[0]
+
+            peak = r["peak_burst"]
+            peak_idx = int(np.argmax(burst_acc)) if len(burst_acc) > 0 else 0
+            peak_step = burst_steps_loc[peak_idx] if len(burst_steps_loc) > peak_idx else T_sched
+
+            steps_to_peak_S.append(float(peak_step))
+
+            bs = r["config"]["batch_size"]
+            p = r["config"]["p_target"]
+            total_special = T_sched * p * bs
+            burst_efficiency_S.append(peak / max(total_special, 1) * 1000)
+
+            rev_end = r["reversion_end_burst"]
+            retention_ratio_S.append(rev_end / peak if peak > 1e-6 else 0.0)
+
+            if len(rev_acc) >= 2:
+                n_early = min(len(rev_acc), max(2, 50 // ev))
+                slope = (rev_acc[n_early - 1] - rev_acc[0]) / max(n_early * ev, 1)
+                reversal_speed_S.append(float(slope))
+            else:
+                reversal_speed_S.append(0.0)
+
+            onset_mask = burst_acc > 0.1
+            onset_step = float(burst_steps_loc[onset_mask][0]) if onset_mask.any() else float(T_sched)
+            burst_onset_step_S.append(onset_step)
+
+            if len(burst_other) > 0:
+                other_drop_during_burst_S.append(float(burst_other[0] - burst_other.min()))
+            else:
+                other_drop_during_burst_S.append(0.0)
+
+            pre_other = burst_other[0] if len(burst_other) > 0 else 0.0
+            recovery_step = float(U_sched)
+            if len(rev_other) > 0:
+                rec_mask = rev_other >= pre_other * 0.95
+                if rec_mask.any():
+                    recovery_step = float(rev_steps_loc[rec_mask][0] - rev_steps_loc[0])
+            other_recovery_steps_S.append(recovery_step)
+
+            normalized_auc_S.append(r["reversion_auc"] / max(peak * U_sched, 1e-6))
+
+            if len(burst_acc) >= 2:
+                bl_slope = (burst_acc.max() - burst_acc[0]) / max(len(burst_acc) * ev, 1)
+                burst_learning_rate_S.append(float(bl_slope))
+            else:
+                burst_learning_rate_S.append(0.0)
+
+            other_at_peak = burst_other[peak_idx] if len(burst_other) > peak_idx else 0.0
+            burst_other_ratio_at_peak_S.append(peak / max(other_at_peak, 1e-6))
+
+            half_peak = peak * 0.5
+            half_mask = burst_acc >= half_peak
+            half_step = float(burst_steps_loc[half_mask][0]) if half_mask.any() else float(T_sched)
+            time_to_half_peak_S.append(half_step)
+
+        metrics[sched] = {
+            "steps_to_peak": steps_to_peak_S,
+            "burst_efficiency": burst_efficiency_S,
+            "retention_ratio": retention_ratio_S,
+            "reversal_speed": reversal_speed_S,
+            "burst_onset_step": burst_onset_step_S,
+            "other_drop_during_burst": other_drop_during_burst_S,
+            "other_recovery_steps": other_recovery_steps_S,
+            "normalized_auc": normalized_auc_S,
+            "burst_learning_rate": burst_learning_rate_S,
+            "burst_other_ratio_at_peak": burst_other_ratio_at_peak_S,
+            "time_to_half_peak": time_to_half_peak_S,
+            "burst_curve": burst_curve_S,
+            "other_curve": other_curve_S,
+            "rev_burst_curve": rev_burst_curve_S,
+            "rev_other_curve": rev_other_curve_S,
+            "burst_steps": burst_steps_arr,
+            "rev_steps": rev_steps_arr,
+            "T": T_sched,
+            "U": U_sched,
+        }
+
+    return metrics
+
+
+def _ext_bar_fig(
+    schedules: list[str],
+    metric_key: str,
+    title: str,
+    yaxis_title: str,
+    metrics: dict[str, dict],
+    colors: dict[str, str],
+):
+    import plotly.graph_objects as go
+
+    means, cis, all_vals = [], [], []
+    for s in schedules:
+        vals = np.array(metrics[s][metric_key])
+        means.append(float(vals.mean()))
+        ci = 1.96 * vals.std() / np.sqrt(len(vals)) if len(vals) > 1 else float(vals.std())
+        cis.append(ci)
+        all_vals.append(vals)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=schedules, y=means,
+        error_y=dict(type="data", array=cis, visible=True),
+        marker_color=[colors.get(s, "#888") for s in schedules],
+        name="Mean ± 95% CI",
+    ))
+    for i, (s, vals) in enumerate(zip(schedules, all_vals)):
+        jitter = np.random.default_rng(42 + i).uniform(-0.2, 0.2, len(vals))
+        fig.add_trace(go.Scatter(
+            x=[s] * len(vals),
+            y=vals.tolist(),
+            mode="markers",
+            marker=dict(color="black", size=5, opacity=0.5),
+            showlegend=(i == 0),
+            name="Seeds",
+        ))
+    fig.update_layout(
+        title=title, yaxis_title=yaxis_title,
+        template="plotly_white", height=450,
+    )
+    return fig
+
+
+def _ext_curve_burst_aligned(
+    schedules: list[str],
+    metrics: dict[str, dict],
+    colors: dict[str, str],
+    curve_key: str,
+    title: str,
+    yaxis_title: str,
+):
+    """Curve chart aligned to burst start (x=0 at start of burst)."""
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    for s in schedules:
+        m = metrics[s]
+        curves = m[curve_key]
+        steps = m["burst_steps"]
+        if steps is None or len(curves) == 0:
+            continue
+        min_len = min(len(c) for c in curves)
+        arr = np.array([c[:min_len] for c in curves])
+        mean_c = arr.mean(axis=0)
+        ci = 1.96 * arr.std(axis=0) / np.sqrt(arr.shape[0]) if arr.shape[0] > 1 else arr.std(axis=0)
+        x = (steps[:min_len] - steps[0]).tolist()
+        c = colors.get(s, "#888")
+        fig.add_trace(go.Scatter(x=x, y=mean_c.tolist(), mode="lines", name=s,
+                                  line=dict(color=c, width=2)))
+        fig.add_trace(go.Scatter(
+            x=x + x[::-1],
+            y=(mean_c + ci).tolist() + (mean_c - ci).tolist()[::-1],
+            fill="toself", fillcolor=c, opacity=0.15,
+            line=dict(width=0), showlegend=False,
+        ))
+    fig.add_vline(x=0, line_dash="dash", line_color="gray", annotation_text="Burst Start")
+    fig.update_layout(
+        title=title + " — Burst-Start Aligned",
+        xaxis_title="Steps from Burst Start",
+        yaxis_title=yaxis_title, template="plotly_white", height=500,
+    )
+    return fig
+
+
+def _ext_curve_reversal_aligned(
+    schedules: list[str],
+    metrics: dict[str, dict],
+    colors: dict[str, str],
+    burst_curve_key: str,
+    rev_curve_key: str,
+    title: str,
+    yaxis_title: str,
+):
+    """Curve chart aligned to reversal start (x=0 = end of burst / start of reversal).
+
+    Burst phase shown on negative x (different schedules start at different negative x
+    because burst lengths differ). Reversal shown on positive x (all start at 0).
+    """
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    for s in schedules:
+        m = metrics[s]
+        burst_curves = m[burst_curve_key]
+        rev_curves = m[rev_curve_key]
+        b_steps = m["burst_steps"]
+        r_steps = m["rev_steps"]
+        c = colors.get(s, "#888")
+
+        if b_steps is not None and len(burst_curves) > 0:
+            min_len = min(len(cv) for cv in burst_curves)
+            arr = np.array([cv[:min_len] for cv in burst_curves])
+            mean_c = arr.mean(axis=0)
+            ci = 1.96 * arr.std(axis=0) / np.sqrt(arr.shape[0]) if arr.shape[0] > 1 else arr.std(axis=0)
+            x = (b_steps[:min_len] - b_steps[-1]).tolist()
+            fig.add_trace(go.Scatter(x=x, y=mean_c.tolist(), mode="lines", name=s,
+                                      line=dict(color=c, width=2)))
+            fig.add_trace(go.Scatter(
+                x=x + x[::-1],
+                y=(mean_c + ci).tolist() + (mean_c - ci).tolist()[::-1],
+                fill="toself", fillcolor=c, opacity=0.12,
+                line=dict(width=0), showlegend=False,
+            ))
+
+        if r_steps is not None and len(rev_curves) > 0:
+            min_len = min(len(cv) for cv in rev_curves)
+            arr = np.array([cv[:min_len] for cv in rev_curves])
+            mean_c = arr.mean(axis=0)
+            ci = 1.96 * arr.std(axis=0) / np.sqrt(arr.shape[0]) if arr.shape[0] > 1 else arr.std(axis=0)
+            x = r_steps[:min_len].tolist()
+            fig.add_trace(go.Scatter(x=x, y=mean_c.tolist(), mode="lines", showlegend=False,
+                                      line=dict(color=c, width=2, dash="dot")))
+            fig.add_trace(go.Scatter(
+                x=x + x[::-1],
+                y=(mean_c + ci).tolist() + (mean_c - ci).tolist()[::-1],
+                fill="toself", fillcolor=c, opacity=0.12,
+                line=dict(width=0), showlegend=False,
+            ))
+
+    fig.add_vline(x=0, line_dash="dash", line_color="black", annotation_text="Reversal Start")
+    fig.update_layout(
+        title=title + " — Reversal-Start Aligned",
+        xaxis_title="Steps from Reversal Start (negative = burst phase)",
+        yaxis_title=yaxis_title, template="plotly_white", height=500,
+    )
+    return fig
+
+
+def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path):
+    """Generate extended metrics dashboard with 11 new metrics and dual-alignment charts.
+
+    Saves:
+      - out_dir/extended_metrics.html  (interactive Plotly)
+      - out_dir/charts/extended_*.png  (static PNG via kaleido if available)
+    """
+    import plotly.graph_objects as go
+    import plotly.io as pio
+    from burst.config import ordered_schedules, SCHED_COLORS
+    from burst.train_utils import load_results
+
+    charts_dir = out_dir / "charts"
+    charts_dir.mkdir(exist_ok=True)
+
+    all_results_combined: list[dict] = []
+    for run_dir in run_dirs:
+        try:
+            results, _ = load_results(run_dir)
+            all_results_combined.extend(results)
+        except Exception as e:
+            print(f"  Warning: could not load {run_dir}: {e}", flush=True)
+
+    if not all_results_combined:
+        print("  No results found for extended metrics.", flush=True)
+        return
+
+    metrics = _compute_extended_metrics(all_results_combined)
+    schedules = ordered_schedules(list(metrics.keys()))
+    colors = SCHED_COLORS
+
+    scalar_metrics = [
+        ("steps_to_peak", "Steps to Peak Burst Accuracy", "Steps"),
+        ("burst_efficiency", "Burst Efficiency (peak / special_examples × 1000)", "Efficiency"),
+        ("retention_ratio", "Retention Ratio (final reversal / peak)", "Ratio"),
+        ("reversal_speed", "Reversal Speed (acc slope, early reversal)", "Acc/Step"),
+        ("burst_onset_step", "Burst Onset Step (first step > 0.1 acc)", "Steps"),
+        ("other_drop_during_burst", "Other-Class Acc Drop During Burst", "Accuracy Drop"),
+        ("other_recovery_steps", "Other-Class Recovery Steps (post-burst)", "Steps"),
+        ("normalized_auc", "Normalized Reversal AUC (AUC / peak×U)", "Normalized AUC"),
+        ("burst_learning_rate", "Burst Learning Rate (acc slope during burst)", "Acc/Step"),
+        ("burst_other_ratio_at_peak", "Burst/Other Accuracy Ratio at Peak", "Ratio"),
+        ("time_to_half_peak", "Time to Half-Peak During Burst", "Steps"),
+    ]
+
+    all_figs: list[tuple[str, str, Any]] = []
+
+    def _try_save_png(fig, name):
+        try:
+            pio.write_image(fig, str(charts_dir / name), width=1200, height=500)
+        except Exception:
+            pass
+
+    for key, title, ylabel in scalar_metrics:
+        fig = _ext_bar_fig(schedules, key, title, ylabel, metrics, colors)
+        all_figs.append((key, title, fig))
+        _try_save_png(fig, f"extended_{key}.png")
+
+    for curve_key, title, ylabel in [
+        ("burst_curve", "Special Class Accuracy", "Accuracy"),
+        ("other_curve", "Other-Class Accuracy During Burst", "Accuracy"),
+    ]:
+        fig_ba = _ext_curve_burst_aligned(schedules, metrics, colors, curve_key, title, ylabel)
+        fig_ra = _ext_curve_reversal_aligned(
+            schedules, metrics, colors, curve_key,
+            "rev_burst_curve" if curve_key == "burst_curve" else "rev_other_curve",
+            title, ylabel,
+        )
+        all_figs.append((f"{curve_key}_burst_aligned", f"{title} — Burst-Start Aligned", fig_ba))
+        all_figs.append((f"{curve_key}_reversal_aligned", f"{title} — Reversal-Start Aligned", fig_ra))
+        _try_save_png(fig_ba, f"extended_{curve_key}_burst_aligned.png")
+        _try_save_png(fig_ra, f"extended_{curve_key}_reversal_aligned.png")
+
+    fig_var = go.Figure()
+    for s in schedules:
+        vals = np.array(metrics[s]["steps_to_peak"])
+        fig_var.add_trace(go.Box(
+            y=vals.tolist(), name=s,
+            marker_color=colors.get(s, "#888"),
+            boxpoints="all", jitter=0.3,
+        ))
+    fig_var.update_layout(
+        title="Cross-Seed Variance: Steps to Peak",
+        yaxis_title="Steps to Peak", template="plotly_white", height=450,
+    )
+    all_figs.append(("seed_variance_steps_to_peak", "Cross-Seed Variance: Steps to Peak", fig_var))
+    _try_save_png(fig_var, "extended_seed_variance.png")
+
+    html_parts = ["""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Extended Metrics Dashboard</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; background: #f0f2f5; }
+  h1 { color: #1a1a2e; font-size: 1.8em; }
+  h2 { color: #16213e; margin-top: 40px; font-size: 1.3em; }
+  .chart-container {
+    background: white; border-radius: 10px; padding: 20px;
+    margin: 20px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  }
+  .toc { background: white; border-radius: 10px; padding: 20px; margin: 20px 0;
+         box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+  .toc a { display: block; margin: 4px 0; color: #1565c0; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<h1>Extended Metrics Dashboard</h1>
+<p style="color:#555; max-width:900px;">
+  11 new scalar metrics + 4 dual-alignment curve charts + 1 variance chart.
+  Dual-alignment: each curve chart is generated twice — once aligned to burst start
+  (x=0 at start of burst phase) and once aligned to reversal start (x=0 at end of
+  burst / start of reversal). The reversal-aligned view shows burst history on
+  negative x and reversal on positive x, enabling direct comparison of reversal
+  dynamics across schedules with different burst lengths.
+</p>
+<div class="toc"><strong>Contents:</strong>
+"""]
+    for i, (key, title, _) in enumerate(all_figs):
+        html_parts.append(f'  <a href="#ext_{i}">{i+1}. {title}</a>\n')
+    html_parts.append("</div>\n")
+
+    for i, (key, title, fig) in enumerate(all_figs):
+        html_parts.append(f'<div class="chart-container" id="ext_{i}">\n')
+        html_parts.append(f'<h2>{i+1}. {title}</h2>\n')
+        html_parts.append(fig.to_html(full_html=False, include_plotlyjs=(i == 0)))
+        html_parts.append("</div>\n")
+
+    html_parts.append("</body></html>")
+
+    html_path = out_dir / "extended_metrics.html"
+    with open(html_path, "w") as f:
+        f.write("".join(html_parts))
+    print(f"Extended metrics dashboard saved: {html_path}", flush=True)
+    print(f"PNG charts saved: {charts_dir}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
+
+def _resolve_unified_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
+    """Return (config_path, data_path, all_results_path, ckpt_root)."""
+    results_dir = run_dir / "results"
+    logs_dir = run_dir / "logs"
+
+    config_path = (results_dir / "config.json") if (results_dir / "config.json").exists() \
+        else (run_dir / "config.json")
+    data_path = (logs_dir / "_data.pkl") if (logs_dir / "_data.pkl").exists() \
+        else (run_dir / "_data.pkl")
+    all_results_path = (logs_dir / "all_results.pkl") if (logs_dir / "all_results.pkl").exists() \
+        else (run_dir / "all_results.pkl")
+    ckpt_root = (logs_dir / "checkpoints") if (logs_dir / "checkpoints").exists() \
+        else (run_dir / "checkpoints")
+    return config_path, data_path, all_results_path, ckpt_root
+
 
 def analyse_run(
     run_dir: Path,
@@ -1769,83 +2543,146 @@ def analyse_run(
     n_prune_levels: int = 10,
     relearn_steps: int = 50,
     frank_seeds: int = 10,
-    xfrank_seeds: int = 3,
+    xfrank_seeds: int = 10,
     n_hutchinson: int = 15,
+    subsample_n: int = 256,
 ) -> dict:
     print(f"\n{'='*60}", flush=True)
     print(f"Analysing: {run_dir.name}", flush=True)
     print(f"{'='*60}", flush=True)
 
-    with open(run_dir / "config.json") as f:
+    config_path, data_path, all_results_path, ckpt_root = _resolve_unified_paths(run_dir)
+
+    with open(config_path) as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
     base_cfg = rc["base_cfg"]
+    n_layer = base_cfg["n_layer"]
 
-    with open(run_dir / "_data.pkl", "rb") as f:
+    with open(data_path, "rb") as f:
         target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
-    with open(run_dir / "all_results.pkl", "rb") as f:
+    with open(all_results_path, "rb") as f:
         all_results = pickle.load(f)
 
-    ckpt_root = run_dir / "checkpoints"
     run_name = run_dir.name
 
-    result = {"run_name": run_name, "burst_pos": rc["burst_pos"]}
+    burst_sub = _subsample_docs(burst_docs_BL, n=subsample_n)
+    other_sub = _subsample_docs(other_docs_BL, n=subsample_n)
 
-    print("\n[1/12] Data-only: forgetting decomposition...", flush=True)
-    result["forgetting_decomposition"] = compute_forgetting_decomposition(all_results)
+    result = {"run_name": run_name, "burst_pos": rc["burst_pos"], "n_layer": n_layer}
 
-    print("\n[2/12] Data-only: gradient temporal dynamics...", flush=True)
-    result["grad_temporal"] = compute_grad_temporal(all_results)
+    if ANALYSIS_METRICS.get("forgetting_decomposition", True):
+        print("\n[1/18] Data-only: forgetting decomposition...", flush=True)
+        result["forgetting_decomposition"] = compute_forgetting_decomposition(all_results)
 
-    print("\n[3/12] Data-only: layer interference...", flush=True)
-    result["layer_interference"] = compute_layer_interference(all_results)
+    if ANALYSIS_METRICS.get("grad_temporal", True):
+        print("\n[2/18] Data-only: gradient temporal dynamics...", flush=True)
+        result["grad_temporal"] = compute_grad_temporal(all_results)
+
+    if ANALYSIS_METRICS.get("layer_interference", True):
+        print("\n[3/18] Data-only: layer interference...", flush=True)
+        result["layer_interference"] = compute_layer_interference(all_results)
+
+    if ANALYSIS_METRICS.get("grad_norm_ratio", True):
+        print("\n[12/18] Data-only: gradient norm ratio per layer...", flush=True)
+        result["grad_norm_ratio"] = compute_grad_norm_ratio(all_results)
+
+    if ANALYSIS_METRICS.get("grad_rank", True):
+        print("\n[13/18] Data-only: gradient effective rank per layer...", flush=True)
+        result["grad_rank"] = compute_grad_rank(all_results)
+
+    if ANALYSIS_METRICS.get("grad_snr", True):
+        print("\n[14/18] Data-only: gradient SNR per layer...", flush=True)
+        result["grad_snr"] = compute_grad_snr(all_results)
+
+    if ANALYSIS_METRICS.get("conflict_rate", True):
+        print("\n[15/18] Data-only: gradient conflict rate per layer...", flush=True)
+        result["conflict_rate"] = compute_conflict_rate(all_results)
+
+    if ANALYSIS_METRICS.get("token_pos_grad", True):
+        print("\n[16/18] Data-only: per-token-position gradient norms...", flush=True)
+        result["token_pos_grad"] = compute_token_pos_grad(all_results)
+
+    if ANALYSIS_METRICS.get("grad_attribution", True):
+        print("\n[17/18] Data-only: gradient attribution to composition steps...", flush=True)
+        result["grad_attribution"] = compute_grad_attribution(all_results)
+
+    need_ckpts = any(ANALYSIS_METRICS.get(k, True) for k in (
+        "ema_dual", "lmc_dual", "frankenstein", "cross_frankenstein",
+        "transfer_dual", "pruning_dual", "trajectory_dim", "relearning_dual",
+        "sharpness", "forgetting_grad_alignment",
+    ))
 
     if not ckpt_root.exists():
         print("  No checkpoints — skipping checkpoint-based metrics.", flush=True)
         return result
 
-    print("\n[4/12] EMA interpolation (dual-class)...", flush=True)
-    result["ema_dual"] = compute_ema_dual(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len, n_seeds=n_seeds)
+    if not need_ckpts:
+        return result
 
-    print("\n[5/12] LMC (dual-class)...", flush=True)
-    result["lmc_dual"] = compute_lmc_dual(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len, n_seeds=n_seeds)
+    max_seeds = max(n_seeds, frank_seeds, xfrank_seeds)
+    print(f"\n[preload] Loading checkpoints for up to {max_seeds} seeds per schedule...", flush=True)
+    t_preload = time.time()
+    preloaded = _preload_seeds(ckpt_root, all_results, max_seeds)
+    print(f"  Preloaded in {time.time() - t_preload:.1f}s", flush=True)
 
-    print("\n[6/12] Frankenstein layer-swap...", flush=True)
-    result["frankenstein"] = compute_frankenstein(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len, n_seeds=frank_seeds)
+    if ANALYSIS_METRICS.get("ema_dual", True):
+        print("\n[4/18] EMA interpolation (dual-class)...", flush=True)
+        result["ema_dual"] = compute_ema_dual(
+            preloaded, burst_sub, other_sub, prompt_len, n_seeds=n_seeds)
 
-    print("\n[7/12] Cross-burst Frankenstein...", flush=True)
-    result["cross_frankenstein"] = compute_cross_burst_frankenstein(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len, n_seeds=xfrank_seeds)
+    if ANALYSIS_METRICS.get("lmc_dual", True):
+        print("\n[5/18] LMC (dual-class)...", flush=True)
+        result["lmc_dual"] = compute_lmc_dual(
+            preloaded, burst_sub, other_sub, prompt_len, n_seeds=n_seeds)
 
-    print("\n[8/12] Task vector transfer (dual-class)...", flush=True)
-    result["transfer_dual"] = compute_transfer_dual(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len, n_seeds=n_seeds)
+    if ANALYSIS_METRICS.get("frankenstein", True):
+        print("\n[6/18] Frankenstein layer-swap...", flush=True)
+        result["frankenstein"] = compute_frankenstein(
+            preloaded, burst_sub, other_sub, prompt_len, n_layer=n_layer, n_seeds=frank_seeds)
 
-    print("\n[9/12] Pruning robustness (dual-class)...", flush=True)
-    result["pruning_dual"] = compute_pruning_dual(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len,
-        n_seeds=n_seeds, n_prune_levels=n_prune_levels)
+    if ANALYSIS_METRICS.get("cross_frankenstein", True):
+        print("\n[7/18] Cross-burst Frankenstein...", flush=True)
+        result["cross_frankenstein"] = compute_cross_burst_frankenstein(
+            preloaded, burst_sub, other_sub, prompt_len, n_layer=n_layer, n_seeds=xfrank_seeds)
 
-    print("\n[10/12] Forgetting trajectory dim + relearning...", flush=True)
-    result["trajectory_dim"] = compute_trajectory_dim(
-        ckpt_root, all_results, n_seeds=n_seeds)
-    result["relearning_dual"] = compute_relearning_dual(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len,
-        n_seeds=n_seeds, relearn_steps=relearn_steps)
+    if ANALYSIS_METRICS.get("transfer_dual", True):
+        print("\n[8/18] Task vector transfer (dual-class)...", flush=True)
+        result["transfer_dual"] = compute_transfer_dual(
+            preloaded, burst_sub, other_sub, prompt_len, n_seeds=n_seeds)
 
-    print("\n[11/12] Critical sharpness (global + per-layer Hessian trace)...", flush=True)
-    result["sharpness"] = compute_sharpness(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL,
-        n_seeds=n_seeds, n_samples=128, n_hutchinson=n_hutchinson)
+    if ANALYSIS_METRICS.get("pruning_dual", True):
+        print("\n[9/18] Pruning robustness (dual-class)...", flush=True)
+        result["pruning_dual"] = compute_pruning_dual(
+            preloaded, burst_sub, other_sub, prompt_len,
+            n_seeds=n_seeds, n_prune_levels=n_prune_levels)
+
+    if ANALYSIS_METRICS.get("trajectory_dim", True) or ANALYSIS_METRICS.get("relearning_dual", True):
+        print("\n[10/18] Forgetting trajectory dim + relearning...", flush=True)
+        if ANALYSIS_METRICS.get("trajectory_dim", True):
+            result["trajectory_dim"] = compute_trajectory_dim(
+                ckpt_root, all_results, n_seeds=n_seeds)
+        if ANALYSIS_METRICS.get("relearning_dual", True):
+            result["relearning_dual"] = compute_relearning_dual(
+                preloaded, burst_docs_BL, burst_sub, other_sub, prompt_len,
+                n_seeds=n_seeds, relearn_steps=relearn_steps)
+
+    if ANALYSIS_METRICS.get("sharpness", True):
+        print("\n[11/18] Critical sharpness (global + per-layer Hessian trace)...", flush=True)
+        result["sharpness"] = compute_sharpness(
+            preloaded, burst_sub, other_sub, n_layer=n_layer,
+            n_seeds=n_seeds, n_hutchinson=n_hutchinson)
+
+    if ANALYSIS_METRICS.get("forgetting_grad_alignment", True):
+        print("\n[18/18] Forgetting gradient alignment at peak burst...", flush=True)
+        result["forgetting_grad_alignment"] = compute_forgetting_grad_alignment(
+            preloaded, other_sub, n_seeds=n_seeds)
 
     return result
 
@@ -1853,13 +2690,15 @@ def analyse_run(
 def main():
     parser = argparse.ArgumentParser(description="Unified burstiness analysis dashboard.")
     parser.add_argument("run_dirs", nargs="+", type=Path)
-    parser.add_argument("--out-dir", type=Path, default=Path("data/unified_analysis"))
+    default_out = Path(f"data/{datetime.now().strftime('%Y%m%d-%H%M%S')}_unified_analysis")
+    parser.add_argument("--out-dir", type=Path, default=default_out)
     parser.add_argument("--n-seeds", type=int, default=10)
     parser.add_argument("--n-prune-levels", type=int, default=10)
     parser.add_argument("--relearn-steps", type=int, default=50)
     parser.add_argument("--frank-seeds", type=int, default=10)
-    parser.add_argument("--xfrank-seeds", type=int, default=3)
+    parser.add_argument("--xfrank-seeds", type=int, default=10)
     parser.add_argument("--n-hutchinson", type=int, default=15)
+    parser.add_argument("--subsample-n", type=int, default=256)
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -1876,19 +2715,24 @@ def main():
             frank_seeds=args.frank_seeds,
             xfrank_seeds=args.xfrank_seeds,
             n_hutchinson=args.n_hutchinson,
+            subsample_n=args.subsample_n,
         )
         per_run_results.append(r)
         print(f"  Completed {run_dir.name} in {time.time() - t0:.1f}s", flush=True)
 
     run_names = [r["run_name"] for r in per_run_results]
     burst_positions = {r["run_name"]: r["burst_pos"] for r in per_run_results}
+    n_layer = per_run_results[0].get("n_layer", 6) if per_run_results else 6
 
-    combined: dict = {"run_names": run_names, "burst_positions": burst_positions}
+    combined: dict = {"run_names": run_names, "burst_positions": burst_positions, "n_layer": n_layer}
     metric_keys = [
         "ema_dual", "lmc_dual", "frankenstein", "cross_frankenstein",
         "transfer_dual", "pruning_dual", "relearning_dual",
         "trajectory_dim", "forgetting_decomposition", "grad_temporal",
         "layer_interference", "sharpness",
+        # new gradient metrics
+        "grad_norm_ratio", "grad_rank", "grad_snr", "conflict_rate",
+        "token_pos_grad", "grad_attribution", "forgetting_grad_alignment",
     ]
     for mk in metric_keys:
         combined[mk] = {}
@@ -1903,6 +2747,10 @@ def main():
 
     print("\nGenerating dashboard...", flush=True)
     make_dashboard(combined, args.out_dir)
+
+    print("\nGenerating extended metrics dashboard...", flush=True)
+    make_extended_metrics_dashboard(args.run_dirs, args.out_dir)
+
     print("\nDone.", flush=True)
 
 

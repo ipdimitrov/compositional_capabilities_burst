@@ -171,23 +171,14 @@ def causal_ablation_accuracy(
 
 
 @torch.no_grad()
+@torch.no_grad()
 def _free_gen_accuracy(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     B, L = docs_t.shape
-    prompt_BT = docs_t[:, :prompt_len]
     target_B6 = docs_t[:, -6:]
-
-    generated = prompt_BT.clone()
-    for _ in range(L - prompt_len):
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits_BTV = net(generated)
-        next_tok = logits_BTV[:, -1, :].argmax(dim=-1, keepdim=True)
-        generated = torch.cat([generated, next_tok], dim=1)
-
-    pred_B6 = generated[:, -6:]
-    correct = (pred_B6 == target_B6).all(dim=1).float().mean().item()
-    return correct
+    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
+    return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
 @torch.no_grad()
@@ -206,7 +197,6 @@ def _free_gen_accuracy_with_ablation(
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     B, L = docs_t.shape
-    prompt_BT = docs_t[:, :prompt_len]
     target_B6 = docs_t[:, -6:]
 
     delta_TN = delta_KTN[ablate_layer].to(DEVICE).float()
@@ -214,33 +204,33 @@ def _free_gen_accuracy_with_ablation(
     delta_unit_TN = delta_TN / norms_T
 
     def _ablate_hook(module, input, output):
-        x_BTN = output.float()
+        if isinstance(output, tuple):
+            x_raw, rest = output[0], output[1:]
+        else:
+            x_raw, rest = output, None
+        x_BTN = x_raw.float()
         T_cur = x_BTN.shape[1]
         T_delta = delta_unit_TN.shape[0]
         T_use = min(T_cur, T_delta)
         d_TN = delta_unit_TN[:T_use]
         proj = torch.einsum("btn,tn->bt", x_BTN[:, :T_use], d_TN).unsqueeze(-1) * d_TN.unsqueeze(0)
         x_BTN[:, :T_use] -= proj
-        return x_BTN.to(output.dtype)
+        x_BTN = x_BTN.to(x_raw.dtype)
+        if rest is not None:
+            return (x_BTN, *rest)
+        return x_BTN
 
     if ablate_layer == 0:
         handle = net.transformer.drop.register_forward_hook(_ablate_hook)
     else:
         handle = net.transformer.h[ablate_layer - 1].register_forward_hook(_ablate_hook)
 
-    generated = prompt_BT.clone()
     try:
-        for _ in range(L - prompt_len):
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-                logits_BTV = net(generated)
-            next_tok = logits_BTV[:, -1, :].argmax(dim=-1, keepdim=True)
-            generated = torch.cat([generated, next_tok], dim=1)
+        generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     finally:
         handle.remove()
 
-    pred_B6 = generated[:, -6:]
-    correct = (pred_B6 == target_B6).all(dim=1).float().mean().item()
-    return correct
+    return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
 def _burst_token_ids(cfg: dict, n_a: int) -> list[int]:
@@ -329,7 +319,9 @@ def main():
     args = parser.parse_args()
 
     run_dir = args.run_dir
-    with open(run_dir / "config.json") as f:
+    from burst.train_utils import resolve_run_paths
+    cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
+    with open(cfg_path) as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
@@ -338,12 +330,12 @@ def main():
     T = base_cfg["total_steps"]
     U = base_cfg["reversion_steps"]
 
-    ckpt_root = run_dir / "checkpoints"
+    ckpt_root = logs_dir / "checkpoints"
     if not ckpt_root.exists():
-        print(f"No checkpoints directory in {run_dir}, nothing to do.", flush=True)
+        print(f"No checkpoints directory in {logs_dir}, nothing to do.", flush=True)
         return
 
-    with open(run_dir / "_data.pkl", "rb") as f:
+    with open(logs_dir / "_data.pkl", "rb") as f:
         target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
@@ -359,7 +351,7 @@ def main():
                   "context_size": base_cfg.get("context_size", 80)}
     for j in job_entries:
         label = j["label"]
-        pkl_path = run_dir / f"{label}.pkl"
+        pkl_path = logs_dir / f"{label}.pkl"
         if pkl_path.exists():
             with open(pkl_path, "rb") as f:
                 r = pickle.load(f)
@@ -377,7 +369,7 @@ def main():
         if not ckpt_dir.exists():
             continue
 
-        pkl_path = run_dir / f"{label}.pkl"
+        pkl_path = logs_dir / f"{label}.pkl"
         if not pkl_path.exists():
             continue
         with open(pkl_path, "rb") as f:
@@ -477,7 +469,7 @@ def main():
                     "mean_burst_rank_KT", "acc_baseline", "acc_ablated_K", "acc_drop_K"]:
             log[key] = [log[key][i] for i in order]
 
-    adl_dir = run_dir / "adl"
+    adl_dir = logs_dir / "adl"
     adl_dir.mkdir(exist_ok=True)
 
     for j in job_entries:
@@ -492,7 +484,7 @@ def main():
         with open(adl_dir / f"{label}.json", "w") as f:
             json.dump(record, f)
 
-    all_results_path = run_dir / "all_results.pkl"
+    all_results_path = logs_dir / "all_results.pkl"
     if all_results_path.exists():
         with open(all_results_path, "rb") as f:
             all_results = pickle.load(f)

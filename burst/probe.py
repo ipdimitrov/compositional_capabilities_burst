@@ -302,7 +302,9 @@ def main():
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    with open(run_dir / "config.json") as f:
+    from burst.train_utils import resolve_run_paths
+    cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
+    with open(cfg_path) as f:
         cfg = json.load(f)
 
     rc = parse_run_config(cfg)
@@ -329,7 +331,7 @@ def main():
     token_labels = get_token_position_labels(doc_len, bcfg["seq_len"], depth)
     print(f"  Token positions ({len(token_labels)}): {token_labels[:6]}...{token_labels[-3:]}")
 
-    ckpt_root = run_dir / "checkpoints"
+    ckpt_root = logs_dir / "checkpoints"
     use_checkpoints = ckpt_root.exists()
     if use_checkpoints:
         print(f"  Found checkpoints at {ckpt_root}, will load instead of retraining")

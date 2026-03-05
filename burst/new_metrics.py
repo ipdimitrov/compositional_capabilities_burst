@@ -85,17 +85,13 @@ def _flat_params(net: nanoGPT) -> torch.Tensor:
 
 
 @torch.no_grad()
+@torch.no_grad()
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     B, L = docs_t.shape
-    generated = docs_t[:, :prompt_len].clone()
     target_B6 = docs_t[:, -6:]
-    for _ in range(L - prompt_len):
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits_BTV = net(generated)
-        next_tok = logits_BTV[:, -1, :].argmax(dim=-1, keepdim=True)
-        generated = torch.cat([generated, next_tok], dim=1)
+    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
@@ -1687,23 +1683,25 @@ def analyse_run(
     print(f"Analysing: {run_dir.name}", flush=True)
     print(f"{'='*60}", flush=True)
 
-    with open(run_dir / "config.json") as f:
+    from burst.train_utils import resolve_run_paths
+    cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
+    with open(cfg_path) as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
     base_cfg = rc["base_cfg"]
 
-    with open(run_dir / "_data.pkl", "rb") as f:
+    with open(logs_dir / "_data.pkl", "rb") as f:
         target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
-    with open(run_dir / "all_results.pkl", "rb") as f:
+    with open(logs_dir / "all_results.pkl", "rb") as f:
         all_results = pickle.load(f)
 
-    ckpt_root = run_dir / "checkpoints"
+    ckpt_root = logs_dir / "checkpoints"
     run_name = run_dir.name
 
     result = {"run_name": run_name, "burst_pos": rc["burst_pos"]}

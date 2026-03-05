@@ -26,7 +26,7 @@ Flags:
     --adl-seeds N      Seeds per schedule for ADL + EMA probe (default: 3)
     --adl-samples N    Docs per ADL forward pass (default: 256)
     --sharpness-seeds N  Seeds per schedule for sharpness (default: 3)
-    --n-hutchinson N   Hutchinson samples for sharpness (default: 20)
+    --n-hutchinson N   Hutchinson samples for sharpness (default: 10)
     --out-dir PATH     Output directory (default: data/deep_analysis_combined)
 
 Dimension key:
@@ -147,17 +147,13 @@ def _logit_lens_readability(
 
 
 @torch.no_grad()
+@torch.no_grad()
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     B, L = docs_t.shape
-    generated = docs_t[:, :prompt_len].clone()
     target_B6 = docs_t[:, -6:]
-    for _ in range(L - prompt_len):
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits_BTV = net(generated)
-        next_tok = logits_BTV[:, -1, :].argmax(dim=-1, keepdim=True)
-        generated = torch.cat([generated, next_tok], dim=1)
+    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
@@ -172,7 +168,6 @@ def _free_gen_acc_ablated(
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     B, L = docs_t.shape
-    generated = docs_t[:, :prompt_len].clone()
     target_B6 = docs_t[:, -6:]
 
     delta_TN = delta_KTN[ablate_layer].to(DEVICE).float()
@@ -180,12 +175,19 @@ def _free_gen_acc_ablated(
     delta_unit_TN = delta_TN / norms_T
 
     def _hook(module, input, output):
-        x = output.float()
+        if isinstance(output, tuple):
+            x_raw, rest = output[0], output[1:]
+        else:
+            x_raw, rest = output, None
+        x = x_raw.float()
         T_use = min(x.shape[1], delta_unit_TN.shape[0])
         d = delta_unit_TN[:T_use]
         proj = torch.einsum("btn,tn->bt", x[:, :T_use], d).unsqueeze(-1) * d.unsqueeze(0)
         x[:, :T_use] -= proj
-        return x.to(output.dtype)
+        x = x.to(x_raw.dtype)
+        if rest is not None:
+            return (x, *rest)
+        return x
 
     if ablate_layer == 0:
         handle = net.transformer.drop.register_forward_hook(_hook)
@@ -193,11 +195,7 @@ def _free_gen_acc_ablated(
         handle = net.transformer.h[ablate_layer - 1].register_forward_hook(_hook)
 
     try:
-        for _ in range(L - prompt_len):
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-                logits_BTV = net(generated)
-            next_tok = logits_BTV[:, -1, :].argmax(dim=-1, keepdim=True)
-            generated = torch.cat([generated, next_tok], dim=1)
+        generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     finally:
         handle.remove()
 
@@ -284,22 +282,27 @@ def extract_grad_interference(result: dict) -> dict:
 
     mean_burst_interference = float(np.mean(burst_sims)) if burst_sims else float("nan")
     mean_rev_interference = float(np.mean(rev_sims)) if rev_sims else float("nan")
+    end_burst_interference = float(burst_sims[-1]) if burst_sims else float("nan")
 
     per_layer = gsl.get("per_layer", {})
     layer_names = gsl.get("layer_names", [])
     mean_layer_interference = {}
+    end_layer_interference = {}
     for ln in layer_names:
         vals = per_layer.get(ln, [])
         burst_vals = [v for v, p in zip(vals, phases) if p == PHASE_BURST]
         mean_layer_interference[ln] = float(np.mean(burst_vals)) if burst_vals else float("nan")
+        end_layer_interference[ln] = float(burst_vals[-1]) if burst_vals else float("nan")
 
     return {
         "steps": steps,
         "burst_vs_other": burst_vs_other,
         "phases": phases,
         "mean_burst_interference": mean_burst_interference,
+        "end_burst_interference": end_burst_interference,
         "mean_rev_interference": mean_rev_interference,
         "mean_layer_interference": mean_layer_interference,
+        "end_layer_interference": end_layer_interference,
     }
 
 
@@ -405,7 +408,7 @@ def compute_critical_sharpness(
     cfg: dict,
     burst_docs_BL: np.ndarray,
     n_samples: int = 128,
-    n_hutchinson: int = 20,
+    n_hutchinson: int = 10,
 ) -> float:
     """Estimate sharpness via Hutchinson trace of the Hessian.
 
@@ -530,14 +533,16 @@ def analyse_run(
     adl_seeds: int = 3,
     adl_n_samples: int = 256,
     sharpness_seeds: int = 3,
-    n_hutchinson: int = 20,
+    n_hutchinson: int = 10,
 ) -> dict:
     """Run all five analyses on a single run directory."""
     print(f"\n{'='*60}", flush=True)
     print(f"Analysing: {run_dir.name}", flush=True)
     print(f"{'='*60}", flush=True)
 
-    with open(run_dir / "config.json") as f:
+    from burst.train_utils import resolve_run_paths
+    cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
+    with open(cfg_path) as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
@@ -547,20 +552,20 @@ def analyse_run(
     burst_pos = rc["burst_pos"]
     T = base_cfg["total_steps"]
 
-    with open(run_dir / "_data.pkl", "rb") as f:
+    with open(logs_dir / "_data.pkl", "rb") as f:
         target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
-    with open(run_dir / "all_results.pkl", "rb") as f:
+    with open(logs_dir / "all_results.pkl", "rb") as f:
         all_results = pickle.load(f)
 
     results_by_label = {r["label"]: r for r in all_results}
     schedules_present = sorted(set(r["schedule"] for r in all_results))
 
-    ckpt_root = run_dir / "checkpoints"
+    ckpt_root = logs_dir / "checkpoints"
 
     analysis = {
         "run_dir": str(run_dir),
@@ -768,6 +773,7 @@ def analyse_run(
             "mean_life_95": float(np.nanmean([r.get("life_95", np.nan) for r in sched_results])),
             "mean_life_90": float(np.nanmean([r.get("life_90", np.nan) for r in sched_results])),
             "mean_dropoff_abs": float(np.mean([r.get("dropoff_abs", 0) for r in sched_results])),
+            "mean_dropoff_pct": float(np.mean([r.get("dropoff_pct", 0) for r in sched_results])),
         }
 
     return analysis
@@ -911,41 +917,63 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
     all_figs.append(("Gradient Interference Time Series", fig1))
 
     # -----------------------------------------------------------------------
-    # Chart 2: Mean gradient interference (burst phase) vs forgetting speed
+    # Chart 2: Gradient interference vs forgetting — 2×2 grid
+    #   Rows: Y = Reversion AUC  |  Y = % Unlearning (dropoff_pct)
+    #   Cols: X = Mean grad interference (burst phase)  |  X = End-of-burst grad interference
+    # Each panel has one subplot per run (burst position).
     # -----------------------------------------------------------------------
-    fig2 = make_subplots(rows=1, cols=len(analyses),
-                         subplot_titles=[a["run_name"] for a in analyses])
-    for col_idx, analysis in enumerate(analyses, start=1):
-        gi = analysis["grad_interference"]
-        sm = analysis["summary_metrics"]
-        schedules = sorted(set(v["schedule"] for v in gi.values()), key=_sched_order)
-        x_interference = []
-        y_auc = []
-        colors = []
-        labels = []
-        for sched in schedules:
-            if sched not in sm:
-                continue
-            sched_entries = [v for v in gi.values() if v["schedule"] == sched]
-            mean_int = float(np.mean([e["mean_burst_interference"] for e in sched_entries]))
-            x_interference.append(mean_int)
-            y_auc.append(sm[sched]["mean_reversion_auc"])
-            colors.append(_color(sched))
-            labels.append(sched)
-        fig2.add_trace(go.Scatter(
-            x=x_interference, y=y_auc,
-            mode="markers+text",
-            text=labels,
-            textposition="top center",
-            marker=dict(color=colors, size=12),
-            showlegend=False,
-        ), row=1, col=col_idx)
-    fig2.update_xaxes(title_text="Mean Gradient Interference (burst phase)")
-    fig2.update_yaxes(title_text="Reversion AUC (lower = faster forgetting)")
+    n_runs = len(analyses)
+    row_labels = ["Reversion AUC (lower = faster forgetting)", "% Unlearning at Reversal End"]
+    col_labels = ["Mean Gradient Interference (burst phase)", "End-of-Burst Gradient Interference"]
+    y_keys = ["mean_reversion_auc", "mean_dropoff_pct"]
+    x_keys = ["mean_burst_interference", "end_burst_interference"]
+
+    subplot_titles = []
+    for row_lbl in ["AUC", "% Unlearning"]:
+        for col_lbl in ["Mean Grad Interference", "End-of-Burst Grad Interference"]:
+            for a in analyses:
+                subplot_titles.append(f"{a['run_name']} | {col_lbl} vs {row_lbl}")
+
+    fig2 = make_subplots(
+        rows=2, cols=2 * n_runs,
+        subplot_titles=subplot_titles,
+        horizontal_spacing=0.06,
+        vertical_spacing=0.15,
+    )
+
+    for row_idx, (y_key, y_label) in enumerate(zip(y_keys, row_labels), start=1):
+        for x_col, (x_key, x_label) in enumerate(zip(x_keys, col_labels)):
+            for run_idx, analysis in enumerate(analyses):
+                col_idx = x_col * n_runs + run_idx + 1
+                gi = analysis["grad_interference"]
+                sm = analysis["summary_metrics"]
+                schedules = sorted(set(v["schedule"] for v in gi.values()), key=_sched_order)
+                xs, ys, colors, labels = [], [], [], []
+                for sched in schedules:
+                    if sched not in sm:
+                        continue
+                    sched_entries = [v for v in gi.values() if v["schedule"] == sched]
+                    x_val = float(np.nanmean([e.get(x_key, float("nan")) for e in sched_entries]))
+                    y_val = sm[sched][y_key]
+                    xs.append(x_val)
+                    ys.append(y_val)
+                    colors.append(_color(sched))
+                    labels.append(sched)
+                fig2.add_trace(go.Scatter(
+                    x=xs, y=ys,
+                    mode="markers+text",
+                    text=labels,
+                    textposition="top center",
+                    marker=dict(color=colors, size=12),
+                    showlegend=False,
+                ), row=row_idx, col=col_idx)
+                fig2.update_xaxes(title_text=x_label, row=row_idx, col=col_idx)
+                fig2.update_yaxes(title_text=y_label, row=row_idx, col=col_idx)
+
     fig2.update_layout(
         title="Gradient Interference vs Forgetting Speed",
         template="plotly_white",
-        height=500,
+        height=900,
     )
     _save_png(fig2, "02_grad_interference_vs_forgetting")
     all_figs.append(("Gradient Interference vs Forgetting", fig2))
@@ -1314,14 +1342,17 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         burst_pct = [int(s.replace("burst_", "")) for s in schedules]
 
         fig13 = make_subplots(
-            rows=2, cols=3,
+            rows=3, cols=3,
             subplot_titles=[
                 "Reversion AUC (lower = faster forgetting)",
-                "Gradient Interference (burst phase)",
+                "Mean Gradient Interference (burst phase)",
+                "End-of-Burst Gradient Interference",
+                "% Unlearning at Reversal End",
                 "Critical Sharpness",
                 "EMA Cliff Alpha (sharpness)",
                 "Weight Delta Total Rank",
                 "ADL Readability at Peak",
+                "",
             ],
         )
 
@@ -1341,20 +1372,26 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         _add_scatter(fig13, 1, 1, burst_pct,
                      [sm[s]["mean_reversion_auc"] for s in schedules], colors, schedules)
 
-        gi_means = []
+        gi_means, gi_ends = [], []
         for s in schedules:
             sched_entries = [v for v in gi.values() if v["schedule"] == s]
-            gi_means.append(float(np.mean([e["mean_burst_interference"] for e in sched_entries]))
+            gi_means.append(float(np.nanmean([e["mean_burst_interference"] for e in sched_entries]))
                             if sched_entries else float("nan"))
+            gi_ends.append(float(np.nanmean([e.get("end_burst_interference", float("nan")) for e in sched_entries]))
+                           if sched_entries else float("nan"))
         _add_scatter(fig13, 1, 2, burst_pct, gi_means, colors, schedules)
+        _add_scatter(fig13, 1, 3, burst_pct, gi_ends, colors, schedules)
 
-        _add_scatter(fig13, 1, 3, burst_pct,
+        _add_scatter(fig13, 2, 1, burst_pct,
+                     [sm[s].get("mean_dropoff_pct", float("nan")) for s in schedules], colors, schedules)
+
+        _add_scatter(fig13, 2, 2, burst_pct,
                      [sh.get(s, {}).get("mean", float("nan")) for s in schedules], colors, schedules)
 
         ema_cliff = [tv.get(s, {}).get("mean_cliff_alpha", float("nan")) for s in schedules]
-        _add_scatter(fig13, 2, 1, burst_pct, ema_cliff, colors, schedules)
+        _add_scatter(fig13, 2, 3, burst_pct, ema_cliff, colors, schedules)
 
-        _add_scatter(fig13, 2, 2, burst_pct,
+        _add_scatter(fig13, 3, 1, burst_pct,
                      [wdr.get(s, {}).get("total_rank", float("nan")) for s in schedules],
                      colors, schedules)
 
@@ -1366,13 +1403,13 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 adl_read.append(step_data[max(peak_steps)]["mean_readability"])
             else:
                 adl_read.append(float("nan"))
-        _add_scatter(fig13, 2, 3, burst_pct, adl_read, colors, schedules)
+        _add_scatter(fig13, 3, 2, burst_pct, adl_read, colors, schedules)
 
         fig13.update_xaxes(title_text="Burst %")
         fig13.update_layout(
             title=f"All Metrics vs Burstiness Level — {run_name}",
             template="plotly_white",
-            height=800,
+            height=1100,
         )
         _save_png(fig13, f"13_summary_all_metrics_{run_name}")
         all_figs.append((f"Summary All Metrics ({run_name})", fig13))
@@ -1489,7 +1526,7 @@ def main():
                         help="Docs per ADL forward pass (default: 256)")
     parser.add_argument("--sharpness-seeds", type=int, default=3,
                         help="Seeds per schedule for sharpness (default: 3)")
-    parser.add_argument("--n-hutchinson", type=int, default=20,
+    parser.add_argument("--n-hutchinson", type=int, default=10,
                         help="Hutchinson samples for sharpness estimate (default: 20)")
     parser.add_argument(
         "--out-dir", type=Path, default=None,
