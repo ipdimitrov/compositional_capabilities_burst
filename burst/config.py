@@ -16,9 +16,9 @@ import colorsys
 # ---------------------------------------------------------------------------
 # Phase names (three-phase experiment)
 # ---------------------------------------------------------------------------
-PHASE_PRE_BURST = "pre-burst"
-PHASE_BURST = "special"
-PHASE_REVERSION = "all-but-special"
+PHASE_PRE_BURST = "all-but-special (background)"
+PHASE_BURST = "special (burst)"
+PHASE_REVERSION = "all-but-special (reversion)"
 PHASE_NAMES = [PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION]
 
 PHASE_FOUNDATION = PHASE_PRE_BURST
