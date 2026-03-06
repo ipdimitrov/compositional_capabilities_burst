@@ -200,12 +200,20 @@ def build_data(cfg: dict, depth: int, burst_pos: int, n_a: int):
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
 
 
-def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path):
+def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path,
+                  eval_docs: dict | None = None, prompt_len: int = 0,
+                  eval_every: int = 25) -> dict:
     """Train one model on all-but-special for pretrain_steps, save checkpoint.
 
     Uses seed=DATA_SEED so the pretrained model is deterministic and shared
     across all per-schedule seeds.
+
+    Returns a pretrain log dict with step/loss/phase/acc_other/acc_burst lists
+    so charts can show the pretraining trajectory.
     """
+    from burst._worker import eval_free_gen
+    from burst.config import EVAL_KEYS, PHASE_PRE_BURST
+
     set_seed(DATA_SEED)
     net = nanoGPT(OmegaConf.create({
         "compile": False, "vocab_size": cfg["vocab_size"],
@@ -228,6 +236,10 @@ def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path)
 
     bg_ids = list(bg_pool.keys())
     bs = cfg["batch_size"]
+
+    log: dict[str, list] = {"step": [], "loss": [], "phase": []}
+    for k in EVAL_KEYS:
+        log[k] = []
 
     net.train()
     it = 0
@@ -256,12 +268,23 @@ def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path)
         scaler.step(optimizer)
         scaler.update()
 
+        if eval_docs and prompt_len > 0 and (s % eval_every == 0 or s == pretrain_steps - 1):
+            loss_val = loss.item()
+            log["step"].append(s)
+            log["loss"].append(loss_val)
+            log["phase"].append(PHASE_PRE_BURST)
+            for ek in EVAL_KEYS:
+                pool_key = ek.removeprefix("acc_")
+                log[ek].append(eval_free_gen(net, eval_docs[pool_key], prompt_len))
+            net.train()
+
         if (s + 1) % 100 == 0 or s == pretrain_steps - 1:
             print(f"  pretrain step {s+1}/{pretrain_steps}  loss={loss.item():.4f}", flush=True)
 
     raw = getattr(net, "_orig_mod", net)
     torch.save(raw.state_dict(), ckpt_path)
     print(f"  Pretrain checkpoint saved: {ckpt_path}", flush=True)
+    return log
 
 
 def main():
@@ -331,8 +354,14 @@ def main():
                     "vocab_size": cfg_out["vocab_size"],
                     "context_size": cfg_out["context_size"]}
     print(f"\nPretraining shared checkpoint ({P} steps on all-but-special)...", flush=True)
-    run_pretrain(pretrain_cfg, P, bp, pretrain_ckpt_path)
+    pretrain_log = run_pretrain(
+        pretrain_cfg, P, bp, pretrain_ckpt_path,
+        eval_docs=ed, prompt_len=pl, eval_every=base_cfg["eval_every"],
+    )
+    with open(logs_dir / "pretrain_log.pkl", "wb") as f:
+        pickle.dump(pretrain_log, f)
 
+    pretrain_log_path = str(logs_dir / "pretrain_log.pkl")
     jobs = []
     for sched in exp.schedules:
         sched_total_steps = burst_steps_for_schedule(sched, BURST_BASE_STEPS)
@@ -346,6 +375,7 @@ def main():
             jobs.append({
                 "schedule": sched, "seed": seed, "cfg": cfg, "label": label,
                 "pretrain_ckpt": str(pretrain_ckpt_path),
+                "pretrain_log_path": pretrain_log_path,
             })
 
     with open(results_dir / "config.json", "w") as f:

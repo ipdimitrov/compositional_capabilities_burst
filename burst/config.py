@@ -8,7 +8,7 @@ To add/remove a schedule, edit BURST_FRACTIONS below — everything else
 Burst phase length scales inversely with burst concentration so that all
 schedules see the same total number of special-class examples:
     burst_steps = BURST_BASE_STEPS * (100 / pct)
-e.g. burst_100 → 500 steps, burst_50 → 1000 steps, burst_25 → 2000 steps.
+e.g. burst_100 → 200 steps, burst_50 → 400 steps, burst_25 → 800 steps.
 """
 from dataclasses import dataclass, field
 import colorsys
@@ -16,7 +16,7 @@ import colorsys
 # ---------------------------------------------------------------------------
 # Phase names (three-phase experiment)
 # ---------------------------------------------------------------------------
-PHASE_PRE_BURST = "all-but-special"
+PHASE_PRE_BURST = "pre-burst"
 PHASE_BURST = "special"
 PHASE_REVERSION = "all-but-special"
 PHASE_NAMES = [PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION]
@@ -98,7 +98,7 @@ DATA_SEED = 999
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
-BURST_BASE_STEPS = 500
+BURST_BASE_STEPS = 200
 
 
 def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) -> int:
@@ -114,6 +114,9 @@ def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) 
         frac = MIXED_FRACTIONS[schedule]
         return max(base_steps, int(round(base_steps / frac)))
     return base_steps
+
+
+MIXED_FRACTIONS["burst_100"] = 1.0
 
 
 @dataclass
@@ -137,10 +140,10 @@ class TrainConfig:
 
     batch_size: int = 128
     grad_sim_batch_size: int = 2048
-    pre_burst_steps: int = 500
+    pre_burst_steps: int = 200
     total_steps: int = BURST_BASE_STEPS
     p_target: float = 0.25
-    reversion_steps: int = 500
+    reversion_steps: int = 200
     eval_every: int = 25
     reversion_thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70)
 

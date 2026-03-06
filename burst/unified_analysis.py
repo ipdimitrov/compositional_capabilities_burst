@@ -688,7 +688,7 @@ ANALYSIS_METRICS: dict[str, bool] = {
     "transfer_dual":            True,
     "pruning_dual":             True,
     "trajectory_dim":           True,
-    "relearning_dual":          True,
+    "relearning_dual":          False,
     "sharpness":                True,
     # new gradient metrics (data-only, read from grad_sim_log in all_results)
     "grad_norm_ratio":           True,
