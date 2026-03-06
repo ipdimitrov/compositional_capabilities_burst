@@ -66,12 +66,14 @@ def _schedule_bar(ax, T, U, sched, p, bs, seed, P=0):
         _bar_label(ax, P + T + U / 2, "Other: 100% | Special: 0%")
         return
 
-    regions, cur_val, start = [], fracs[0], 0
-    for i in range(1, total):
-        if abs(fracs[i] - cur_val) > 0.01:
+    burst_fracs = fracs[P:P + T + U]
+    burst_total = T + U
+    regions, cur_val, start = [], burst_fracs[0], 0
+    for i in range(1, burst_total):
+        if abs(burst_fracs[i] - cur_val) > 0.01:
             regions.append((start, i, cur_val))
-            cur_val, start = fracs[i], i
-    regions.append((start, total, cur_val))
+            cur_val, start = burst_fracs[i], i
+    regions.append((start, burst_total, cur_val))
 
     merged = []
     for s, e, v in regions:
@@ -81,33 +83,28 @@ def _schedule_bar(ax, T, U, sched, p, bs, seed, P=0):
             merged.append((s, e, v))
 
     for s, e, v in merged:
-        if (e - s) < total * 0.03:
+        if (e - s) < burst_total * 0.03:
             continue
         b_pct = v * 100
         txt = (f"Other: {100-b_pct:.0f}% | Special: 0%" if b_pct < 0.5
                else f"Other: {100-b_pct:.0f}% | Special: {b_pct:.0f}%")
-        _bar_label(ax, (s + e) / 2, txt)
+        _bar_label(ax, P + (s + e) / 2, txt)
 
 
 def plot_lr_schedule(cfg, plots_dir):
     steps, lrs = compute_lr_schedule(cfg)
-    P = cfg.get("pre_burst_steps", 0)
     T, U = cfg["total_steps"], cfg["reversion_steps"]
-    total = P + T + U
+    total = T + U
     fig, ax = plt.subplots(figsize=(14, 4))
     ax.plot(steps, lrs, color="#1565C0", lw=2)
-    if P > 0:
-        ax.axvline(P, color="black", lw=2, ls="--")
-    ax.axvline(P + T, color="black", lw=2, ls="--")
+    ax.axvline(T, color="black", lw=2, ls="--")
     ax.axvline(cfg["warmup_iters"], color="gray", lw=1, ls=":", alpha=0.6)
     ax.set_xlim(0, total)
-    ax.set_xlabel("Global Step")
+    ax.set_xlabel("Step")
     ax.set_ylabel("Learning Rate")
     ax.set_title("Learning Rate Schedule (cosine decay with warmup)", fontsize=12, fontweight="bold")
-    if P > 0:
-        ax.text(P * 0.5, ax.get_ylim()[1] * 0.95, "ALL-BUT-SPECIAL", ha="center", fontsize=8, color="gray")
-    ax.text(P + T * 0.5, ax.get_ylim()[1] * 0.95, "SPECIAL", ha="center", fontsize=9, color="gray")
-    ax.text(P + T + U * 0.5, ax.get_ylim()[1] * 0.95, "ALL-BUT-SPECIAL", ha="center", fontsize=8, color="gray")
+    ax.text(T * 0.5, ax.get_ylim()[1] * 0.95, "SPECIAL", ha="center", fontsize=9, color="gray")
+    ax.text(T + U * 0.5, ax.get_ylim()[1] * 0.95, "ALL-BUT-SPECIAL", ha="center", fontsize=8, color="gray")
     ax.grid(True, alpha=0.2)
     fig.tight_layout()
     fig.savefig(plots_dir / "lr_schedule.png", dpi=150, bbox_inches="tight")
@@ -118,14 +115,12 @@ def plot_per_run(result, plots_dir, run_cfg):
     log, sched, seed, cfg = result["log"], result["schedule"], result["seed"], result["config"]
     steps = np.array(log["step"])
     loss = np.array(log["loss"])
-    P = cfg.get("pre_burst_steps", 0)
     T, U = cfg["total_steps"], cfg["reversion_steps"]
+    P = result.get("pre_burst_steps", 0)
     bs, p = cfg["batch_size"], cfg["p_target"]
+    burst_end = P + T
 
     _depth = run_cfg["depth"]
-
-    train_m = np.array([ph == "special" for ph in log["phase"]])
-    reversion_m = np.array([ph == "all-but-special" for ph in log["phase"]])
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), gridspec_kw={"height_ratios": [1, 4, 2]})
     fig.suptitle(f"{sched}  seed={seed}  (depth-{_depth} bijection chain)",
@@ -141,7 +136,7 @@ def plot_per_run(result, plots_dir, run_cfg):
         ax.plot(steps, vals, color=sty["color"], ls=sty["ls"], lw=1.5, label=sty["label"])
     if P > 0:
         ax.axvline(P, color="gray", ls="--", alpha=0.5)
-    ax.axvline(P + T, color="gray", ls="--", alpha=0.5)
+    ax.axvline(burst_end, color="gray", ls="--", alpha=0.5)
     ax.set_xlim(0, total)
     ax.set_ylim(-0.05, 1.05)
     ax.set_ylabel("Free-gen Accuracy (last 6 tok)")
@@ -155,7 +150,7 @@ def plot_per_run(result, plots_dir, run_cfg):
     first_key = reversion_life_key(thresholds[0])
     first_val = result.get(first_key, U)
     first_str = f"{first_val:.0f}" if first_val < U else f">{U}"
-    ax.text(P + T + U * 0.5, 0.95,
+    ax.text(burst_end + U * 0.5, 0.95,
             f"peak={peak:.3f}  {reversion_life_label(thresholds[0])}={first_str}  drop={drop:.3f}({drop_pct:.0f}%)",
             ha="center", fontsize=7, color="#D32F2F", fontweight="bold",
             transform=ax.get_xaxis_transform())
@@ -163,17 +158,17 @@ def plot_per_run(result, plots_dir, run_cfg):
         lk = reversion_life_key(t)
         lv = result.get(lk, U)
         if lv < U:
-            ax.axvline(P + T + lv, color="#D32F2F", ls="--", lw=1, alpha=0.4)
+            ax.axvline(burst_end + lv, color="#D32F2F", ls="--", lw=1, alpha=0.4)
             ax.axhline(peak * t, color="#D32F2F", ls=":", lw=0.8, alpha=0.3)
 
     ax = axes[2]
     ax.plot(steps, loss, color="#333", lw=1, label="loss")
     if P > 0:
         ax.axvline(P, color="gray", ls="--", alpha=0.5)
-    ax.axvline(P + T, color="gray", ls="--", alpha=0.5)
+    ax.axvline(burst_end, color="gray", ls="--", alpha=0.5)
     ax.set_xlim(0, total)
     ax.set_ylabel("Loss")
-    ax.set_xlabel("Global Step")
+    ax.set_xlabel("Step")
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.2)
 
@@ -182,7 +177,7 @@ def plot_per_run(result, plots_dir, run_cfg):
                      color="gray", transform=axes[1].get_xaxis_transform())
     axes[1].text(P + T * 0.5, -0.04, "SPECIAL", ha="center", fontsize=7,
                  color="gray", transform=axes[1].get_xaxis_transform())
-    axes[1].text(P + T + U * 0.5, -0.04, "ALL-BUT-SPECIAL", ha="center", fontsize=6,
+    axes[1].text(burst_end + U * 0.5, -0.04, "ALL-BUT-SPECIAL", ha="center", fontsize=6,
                  color="gray", transform=axes[1].get_xaxis_transform())
 
     fig.tight_layout(rect=[0, 0.02, 1, 0.97])
@@ -355,18 +350,31 @@ def _build_sched_data(results):
     return sched_data
 
 
+def _get_P(results):
+    for r in results:
+        P = r.get("pre_burst_steps", 0)
+        if P > 0:
+            return P
+    return 0
+
+
 def plot_overlay_per_schedule(results, plots_dir, sched_data=None):
     if not results:
         return
-    P_ov = results[0]["config"].get("pre_burst_steps", 0)
-    T_ov = results[0]["config"]["total_steps"]
     U_ov = results[0]["config"]["reversion_steps"]
+    P = _get_P(results)
 
     if sched_data is None:
         sched_data = _build_sched_data(results)
 
+    sched_Ts = {}
+    for r in results:
+        sched_Ts.setdefault(r["schedule"], r["config"]["total_steps"])
+
     for align in ["absolute", "start", "end"]:
         for sched in ordered_schedules(sched_data.keys()):
+            T_s = sched_Ts[sched]
+            burst_end = P + T_s
             fig, ax = plt.subplots(figsize=(14, 8))
             fig.suptitle(f"{sched} - All Metrics (mean +/- 95% CI across seeds)",
                          fontsize=14, fontweight="bold")
@@ -383,10 +391,8 @@ def plot_overlay_per_schedule(results, plots_dir, sched_data=None):
                 n_seeds = len(runs)
                 ci = 1.96 * std_vals / np.sqrt(n_seeds) if n_seeds > 1 else std_vals
 
-                if align == "start":
-                    x = steps_ref - P_ov
-                elif align == "end":
-                    x = steps_ref - (P_ov + T_ov)
+                if align == "end":
+                    x = steps_ref - burst_end
                 else:
                     x = steps_ref
 
@@ -396,36 +402,32 @@ def plot_overlay_per_schedule(results, plots_dir, sched_data=None):
                 ax.fill_between(x, mean_vals - ci, mean_vals + ci,
                                color=sty["color"], alpha=0.25)
 
-            if align == "start":
+            total = P + T_s + U_ov
+            if align == "end":
+                if P > 0:
+                    ax.axvline(-burst_end, color="gray", ls="--", alpha=0.6, lw=2)
+                    ax.axvline(-T_s, color="gray", ls="--", alpha=0.6, lw=2)
+                    ax.text(-burst_end + P * 0.5, 0.05, "PRE", ha="center", fontsize=9,
+                           color="gray", fontweight="bold")
                 ax.axvline(0, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.axvline(T_ov, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.text(T_ov * 0.5, 0.05, "SPECIAL", ha="center", fontsize=11,
-                       color="gray", fontweight="bold")
-                ax.text(T_ov + U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=11,
-                       color="gray", fontweight="bold")
-                ax.set_xlim(0, T_ov + U_ov)
-                ax.set_xlabel("Steps from Burst Start", fontsize=11)
-            elif align == "end":
-                ax.axvline(-T_ov, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.axvline(0, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.text(-T_ov * 0.5, 0.05, "SPECIAL", ha="center", fontsize=11,
+                ax.text(-T_s * 0.5, 0.05, "SPECIAL", ha="center", fontsize=11,
                        color="gray", fontweight="bold")
                 ax.text(U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=11,
                        color="gray", fontweight="bold")
-                ax.set_xlim(-T_ov, U_ov)
+                ax.set_xlim(-burst_end, U_ov)
                 ax.set_xlabel("Steps from Burst End", fontsize=11)
             else:
-                if P_ov > 0:
-                    ax.axvline(P_ov, color="gray", ls="--", alpha=0.6, lw=2)
-                    ax.text(P_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
+                if P > 0:
+                    ax.axvline(P, color="gray", ls="--", alpha=0.6, lw=2)
+                    ax.text(P * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=9,
                            color="gray", fontweight="bold")
-                ax.axvline(P_ov + T_ov, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.text(P_ov + T_ov * 0.5, 0.05, "SPECIAL", ha="center", fontsize=11,
+                ax.axvline(burst_end, color="gray", ls="--", alpha=0.6, lw=2)
+                ax.text(P + T_s * 0.5, 0.05, "SPECIAL", ha="center", fontsize=11,
                        color="gray", fontweight="bold")
-                ax.text(P_ov + T_ov + U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
+                ax.text(burst_end + U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
                        color="gray", fontweight="bold")
-                ax.set_xlim(0, P_ov + T_ov + U_ov)
-                ax.set_xlabel("Global Step", fontsize=11)
+                ax.set_xlim(0, total)
+                ax.set_xlabel("Steps from Burst Start" if align == "start" else "Step", fontsize=11)
 
             ax.set_ylim(-0.05, 1.05)
             ax.set_ylabel("Free-gen Accuracy (last 6 tok)", fontsize=11)
@@ -440,12 +442,17 @@ def plot_overlay_per_schedule(results, plots_dir, sched_data=None):
 
 
 def plot_overlay_all_schedules(results, plots_dir, sched_data=None):
-    P_ov = results[0]["config"].get("pre_burst_steps", 0)
-    T_ov = results[0]["config"]["total_steps"]
     U_ov = results[0]["config"]["reversion_steps"]
+    P = _get_P(results)
 
     if sched_data is None:
         sched_data = _build_sched_data(results)
+
+    sched_Ts = {}
+    for r in results:
+        sched_Ts.setdefault(r["schedule"], r["config"]["total_steps"])
+    T_max = max(sched_Ts.values())
+    burst_end_max = P + T_max
 
     for align in ["absolute", "start", "end"]:
         for ki, k in enumerate(EVAL_KEYS):
@@ -455,6 +462,8 @@ def plot_overlay_all_schedules(results, plots_dir, sched_data=None):
 
             for sched in ordered_schedules(sched_data.keys()):
                 c = SCHED_COLORS.get(sched, "gray")
+                T_s = sched_Ts[sched]
+                burst_end_s = P + T_s
                 runs = sched_data[sched][k]
                 if len(runs) == 0:
                     continue
@@ -466,46 +475,37 @@ def plot_overlay_all_schedules(results, plots_dir, sched_data=None):
                 n_seeds = len(runs)
                 ci = 1.96 * std_vals / np.sqrt(n_seeds) if n_seeds > 1 else std_vals
 
-                if align == "start":
-                    x = steps_ref - P_ov
-                elif align == "end":
-                    x = steps_ref - (P_ov + T_ov)
+                if align == "end":
+                    x = steps_ref - burst_end_s
                 else:
                     x = steps_ref
 
                 ax.plot(x, mean_vals, color=c, lw=2.5, label=sched)
                 ax.fill_between(x, mean_vals - ci, mean_vals + ci, color=c, alpha=0.2)
 
-            if align == "start":
+            total = P + T_max + U_ov
+            if align == "end":
                 ax.axvline(0, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.axvline(T_ov, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.text(T_ov * 0.5, 0.05, "SPECIAL", ha="center", fontsize=12,
-                       color="gray", fontweight="bold")
-                ax.text(T_ov + U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=12,
-                       color="gray", fontweight="bold")
-                ax.set_xlim(0, T_ov + U_ov)
-                ax.set_xlabel("Steps from Burst Start", fontsize=13)
-            elif align == "end":
-                ax.axvline(-T_ov, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.axvline(0, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.text(-T_ov * 0.5, 0.05, "SPECIAL", ha="center", fontsize=12,
+                if P > 0:
+                    ax.text(-burst_end_max + P * 0.5, 0.05, "PRE", ha="center", fontsize=10,
+                           color="gray", fontweight="bold")
+                ax.text(-T_max * 0.3, 0.05, "SPECIAL", ha="center", fontsize=12,
                        color="gray", fontweight="bold")
                 ax.text(U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=12,
                        color="gray", fontweight="bold")
-                ax.set_xlim(-T_ov, U_ov)
+                ax.set_xlim(-burst_end_max, U_ov)
                 ax.set_xlabel("Steps from Burst End", fontsize=13)
             else:
-                if P_ov > 0:
-                    ax.axvline(P_ov, color="gray", ls="--", alpha=0.6, lw=2)
-                    ax.text(P_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=11,
+                if P > 0:
+                    ax.axvline(P, color="gray", ls="--", alpha=0.6, lw=2)
+                    ax.text(P * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
                            color="gray", fontweight="bold")
-                ax.axvline(P_ov + T_ov, color="gray", ls="--", alpha=0.6, lw=2)
-                ax.text(P_ov + T_ov * 0.5, 0.05, "SPECIAL", ha="center", fontsize=12,
+                ax.text(P + T_max * 0.5, 0.05, "SPECIAL", ha="center", fontsize=12,
                        color="gray", fontweight="bold")
-                ax.text(P_ov + T_ov + U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=11,
+                ax.text(burst_end_max + U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=11,
                        color="gray", fontweight="bold")
-                ax.set_xlim(0, P_ov + T_ov + U_ov)
-                ax.set_xlabel("Step", fontsize=13)
+                ax.set_xlim(0, total)
+                ax.set_xlabel("Steps from Burst Start" if align == "start" else "Step", fontsize=13)
 
             ax.set_ylim(-0.05, 1.05)
             ax.set_ylabel("Accuracy", fontsize=13)

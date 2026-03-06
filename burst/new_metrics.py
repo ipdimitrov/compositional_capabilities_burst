@@ -1656,10 +1656,11 @@ def analyse_run(
     result["forgetting_trajectory_dim"] = compute_forgetting_trajectory_dim(
         ckpt_root, all_results, n_seeds=n_seeds)
 
-    print("\n[3/10] Relearning efficiency...", flush=True)
-    result["relearning_efficiency"] = compute_relearning_efficiency(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len,
-        n_seeds=n_seeds, relearn_steps=relearn_steps)
+    # DISABLED — re-enable by uncommenting the block below
+    # print("\n[3/10] Relearning efficiency...", flush=True)
+    # result["relearning_efficiency"] = compute_relearning_efficiency(
+    #     ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len,
+    #     n_seeds=n_seeds, relearn_steps=relearn_steps)
 
     print("\n[4/10] Linear mode connectivity...", flush=True)
     result["linear_mode_connectivity"] = compute_linear_mode_connectivity(

@@ -34,26 +34,25 @@ PAIRWISE_STEP_NAMES = {"begin", "mid_burst", "end_burst", "mid_reversion", "end_
 def n_target_for_step(step, total_steps, schedule, p, batch_size):
     """Number of special-class examples in a batch at a given burst-phase step.
 
-    For all schedules 25–100%: sampling is used throughout the full burst phase
-    (window = total_steps), so burst phase length drives total special exposure.
-    burst_100 uses deterministic full batches for the last burst_len steps.
+    All schedules 25–100% use binomial sampling throughout the full burst phase.
+    burst_100 returns the full batch (frac=1.0) every step.
     """
     T = total_steps
-    burst_len = max(int(p * T), 1)
-
-    if schedule == "burst_100":
-        return batch_size if step >= T - burst_len else 0
 
     if schedule == "mid_block":
+        burst_len = max(int(p * T), 1)
         mid = T // 2
         half = burst_len // 2
         return batch_size if mid - half <= step < mid + (burst_len - half) else 0
 
     if schedule in MIXED_FRACTIONS:
         frac = MIXED_FRACTIONS[schedule]
+        if frac >= 1.0:
+            return batch_size
         return int(np.random.binomial(batch_size, frac))
 
     if schedule == "ramp_up":
+        burst_len = max(int(p * T), 1)
         max_frac = 0.20
         ramp_len = min(int(2 * burst_len / max_frac), T)
         if step >= T - ramp_len:
@@ -151,12 +150,18 @@ def checkpoint_steps(P: int, T: int, U: int) -> dict[int, str]:
 def run(job, shared_data_path, run_dir, progress_dir):
     label, schedule, seed, cfg = job["label"], job["schedule"], job["seed"], job["cfg"]
     pretrain_ckpt = job.get("pretrain_ckpt")
+    pretrain_log_path = job.get("pretrain_log_path")
 
     progress_file = Path(progress_dir) / f"{label}.txt"
     progress_file.write_text("0")
 
     with open(shared_data_path, "rb") as f:
         target_pool, bg_pool, eval_docs, prompt_len, _ = pickle.load(f)
+
+    pretrain_log = None
+    if pretrain_log_path and Path(pretrain_log_path).exists():
+        with open(pretrain_log_path, "rb") as f:
+            pretrain_log = pickle.load(f)
 
     set_seed(seed)
     net = nanoGPT(OmegaConf.create({
@@ -183,6 +188,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE == "cuda")
 
     T, U = cfg["total_steps"], cfg["reversion_steps"]
+    P = cfg.get("pre_burst_steps", 0)
     bs, p, ev = cfg["batch_size"], cfg["p_target"], cfg["eval_every"]
     total_lr_steps = T + U
 
@@ -190,12 +196,16 @@ def run(job, shared_data_path, run_dir, progress_dir):
     for k in EVAL_KEYS:
         log[k] = []
 
+    if pretrain_log and pretrain_log.get("step"):
+        for key in log:
+            log[key].extend(pretrain_log[key])
+
     ckpt_dir = Path(run_dir) / "checkpoints" / label
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_steps = checkpoint_steps(0, T, U)
 
-    def do_eval(phase, loss_val):
-        log["step"].append(it)
+    def do_eval(global_step, phase, loss_val):
+        log["step"].append(global_step)
         log["loss"].append(loss_val)
         log["phase"].append(phase)
         for k in EVAL_KEYS:
@@ -234,11 +244,11 @@ def run(job, shared_data_path, run_dir, progress_dir):
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, nt, bs, t_ids, b_ids)
         task_counts_burst.update(sampled_tasks)
         loss_val = do_train_step(batch_np)
-        gs = s
+        gs = P + s
         if s % ev == 0 or s == T - 1:
-            do_eval(PHASE_BURST, loss_val)
-        if gs in ckpt_steps:
-            torch.save(raw_net.state_dict(), ckpt_dir / f"step_{gs}.pt")
+            do_eval(gs, PHASE_BURST, loss_val)
+        if s in ckpt_steps:
+            torch.save(raw_net.state_dict(), ckpt_dir / f"step_{s}.pt")
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(s + 1))
 
@@ -247,11 +257,12 @@ def run(job, shared_data_path, run_dir, progress_dir):
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, 0, bs, t_ids, b_ids)
         task_counts_reversion.update(sampled_tasks)
         loss_val = do_train_step(batch_np)
-        gs = T + s
+        gs = P + T + s
         if s % ev == 0 or s == U - 1:
-            do_eval(PHASE_REVERSION, loss_val)
-        if gs in ckpt_steps:
-            torch.save(raw_net.state_dict(), ckpt_dir / f"step_{gs}.pt")
+            do_eval(gs, PHASE_REVERSION, loss_val)
+        local_gs = T + s
+        if local_gs in ckpt_steps:
+            torch.save(raw_net.state_dict(), ckpt_dir / f"step_{local_gs}.pt")
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(T + s + 1))
 
@@ -295,9 +306,10 @@ def run(job, shared_data_path, run_dir, progress_dir):
     if task_counts_reversion:
         save_task_distribution_stats(PHASE_REVERSION, task_counts_reversion)
 
-    burst_end_step = T
+    burst_end_step = P + T
     reversion_accs = [log["acc_burst"][i] for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
-    reversion_steps_rel = [log["step"][i] - burst_end_step for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
+    reversion_steps_log = [log["step"][i] for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
+    reversion_steps_rel = [s - burst_end_step for s in reversion_steps_log]
     burst_accs = [log["acc_burst"][i] for i, ph in enumerate(log["phase"]) if ph == PHASE_BURST]
 
     peak_burst = max(burst_accs) if burst_accs else 0
@@ -327,7 +339,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
     result = {
         "schedule": schedule, "seed": seed,
         "label": label, "log": log, "config": dict(cfg),
-        "pre_burst_steps": 0, "burst_end_step": burst_end_step,
+        "pre_burst_steps": P, "burst_end_step": burst_end_step,
         "peak_burst": peak_burst, "reversion_end_burst": reversion_end_burst,
         "dropoff_abs": dropoff_abs, "dropoff_pct": dropoff_pct,
         "reversion_auc": reversion_auc,
