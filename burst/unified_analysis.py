@@ -2040,8 +2040,8 @@ def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:
             acc_other = np.array(log.get("acc_other", [0.0] * len(steps)))
             phases = log["phase"]
 
-            burst_mask = np.array([ph == "special" for ph in phases])
-            rev_mask = np.array([ph == "all-but-special" for ph in phases])
+            burst_mask = np.array([ph == PHASE_BURST for ph in phases])
+            rev_mask = np.array([ph == PHASE_REVERSION for ph in phases])
 
             burst_steps_loc = steps[burst_mask]
             burst_acc = acc_burst[burst_mask]
