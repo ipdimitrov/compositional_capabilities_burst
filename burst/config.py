@@ -91,14 +91,14 @@ CURVE_STYLE = {
 # Data parameters
 # ---------------------------------------------------------------------------
 N_A = 3
-SEED_BASE = 107
+SEED_BASE = 420
 DATA_SEED = 999
 
 # ---------------------------------------------------------------------------
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
-BURST_BASE_STEPS = 200
+BURST_BASE_STEPS = 80
 
 
 def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) -> int:
@@ -140,10 +140,10 @@ class TrainConfig:
 
     batch_size: int = 128
     grad_sim_batch_size: int = 2048
-    pre_burst_steps: int = 200
+    pre_burst_steps: int = 550
     total_steps: int = BURST_BASE_STEPS
     p_target: float = 0.25
-    reversion_steps: int = 200
+    reversion_steps: int = 300
     eval_every: int = 25
     reversion_thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70)
 

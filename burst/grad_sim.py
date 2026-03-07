@@ -20,12 +20,14 @@ Dimension key:
     E: number of per-example gradient samples (for SNR)
     T: number of token positions
 """
-import sys, os, argparse, pickle, json
+import sys, os, argparse, pickle, json, warnings
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+warnings.filterwarnings("ignore", message=".*Full backward hook.*no inputs require gradients.*")
 from pathlib import Path
 from omegaconf import OmegaConf
 
@@ -50,6 +52,7 @@ GRAD_METRICS: dict[str, bool] = {
     "conflict_rate":    True,   # per-layer fraction of params with sign conflict
     "token_pos_grad":   True,   # per-token-position embedding gradient norm
     "grad_attribution": True,   # fraction of gradient from intermediate vs final outputs
+    "grad_projection":  True,   # OGD-style projection: interference magnitude, useful learning, ratio
 }
 
 # Number of per-example gradients to sample for SNR estimation.
@@ -257,6 +260,59 @@ def _conflict_rate_per_layer(burst_vecs: dict[str, torch.Tensor],
         conflict = (torch.sign(g_b) != torch.sign(g_o)).float().mean().item()
         result[name] = conflict
     return result
+
+
+def _grad_projection_metrics(
+    g_burst: torch.Tensor,
+    g_other: torch.Tensor,
+) -> dict[str, float]:
+    """OGD-style gradient projection decomposition.
+
+    Decomposes g_burst into:
+      g_parallel = projection of g_burst onto g_other direction
+                 = (g_burst · g_other / ||g_other||^2) * g_other
+      g_perp     = g_burst - g_parallel  (orthogonal residual)
+
+    Returns:
+      interference_magnitude: ||g_parallel||  (how much burst step affects other-class params)
+      useful_learning:        ||g_perp||       (how much burst step moves model orthogonally)
+      interference_ratio:     ||g_parallel|| / ||g_burst||  (= |cos(alpha)|, fraction wasted)
+      burst_norm:             ||g_burst||
+      other_norm:             ||g_other||
+    """
+    g_b = g_burst.float()
+    g_o = g_other.float()
+
+    norm_o = g_o.norm()
+    norm_b = g_b.norm()
+
+    if norm_o < 1e-12 or norm_b < 1e-12:
+        return {
+            "interference_magnitude": float("nan"),
+            "useful_learning": float("nan"),
+            "interference_ratio": float("nan"),
+            "burst_norm": float(norm_b.item()),
+            "other_norm": float(norm_o.item()),
+        }
+
+    # Scalar projection coefficient: (g_burst · g_other) / ||g_other||^2
+    dot = (g_b * g_o).sum()
+    proj_coeff = dot / (norm_o ** 2)
+
+    g_parallel = proj_coeff * g_o
+    g_perp = g_b - g_parallel
+
+    interference_mag = g_parallel.norm().item()
+    useful_learning = g_perp.norm().item()
+    interference_ratio = interference_mag / (norm_b.item() + 1e-12)
+
+    return {
+        "interference_magnitude": float(interference_mag),
+        "useful_learning": float(useful_learning),
+        "interference_ratio": float(interference_ratio),
+        "burst_norm": float(norm_b.item()),
+        "other_norm": float(norm_o.item()),
+    }
 
 
 def _token_pos_grad_norms(net, docs_np: np.ndarray, n_samples: int) -> list[float]:
@@ -510,14 +566,25 @@ def _worker_main():
     layer_groups = _layer_groups(net)
     net.train()
 
-    # --- cosine_global ---
-    if GRAD_METRICS.get("cosine_global", True):
+    # --- cosine_global + grad_projection ---
+    # Both metrics share the same two backward passes, so compute together.
+    need_global_grads = (
+        GRAD_METRICS.get("cosine_global", True) or
+        GRAD_METRICS.get("grad_projection", True)
+    )
+    if need_global_grads:
         net.zero_grad(set_to_none=True)
         g_burst_flat = _grad_vec_for_docs(net, burst_docs_all, n_samples=gs_bs)
         net.zero_grad(set_to_none=True)
         g_other_flat = _grad_vec_for_docs(net, other_docs_all, n_samples=gs_bs)
-        result["burst_vs_other"] = F.cosine_similarity(
-            g_burst_flat.unsqueeze(0), g_other_flat.unsqueeze(0)).item()
+
+        if GRAD_METRICS.get("cosine_global", True):
+            result["burst_vs_other"] = F.cosine_similarity(
+                g_burst_flat.unsqueeze(0), g_other_flat.unsqueeze(0)).item()
+
+        if GRAD_METRICS.get("grad_projection", True):
+            result["grad_projection"] = _grad_projection_metrics(g_burst_flat, g_other_flat)
+
         net.zero_grad(set_to_none=True)
 
     # --- cosine_per_layer + grad_norm_ratio + conflict_rate ---
@@ -747,6 +814,8 @@ def main():
                         "grad_snr", "conflict_rate")
     _SEQ_KEYS = ("token_pos_grad_norms",)
     _ATTR_KEYS = ("grad_attribution",)
+    _PROJ_KEYS = ("interference_magnitude", "useful_learning",
+                  "interference_ratio", "burst_norm", "other_norm")
 
     per_label: dict[str, dict] = {}
     for jr in results:
@@ -763,6 +832,7 @@ def main():
                     "grad_snr": {}, "conflict_rate": {},
                     "token_pos_grad_norms": [],
                     "grad_attribution": {"intermediate_frac": [], "final_frac": [], "per_pos": []},
+                    "grad_projection": {k: [] for k in _PROJ_KEYS},
                 },
                 "pairwise_snapshots": [],
             }
@@ -792,6 +862,11 @@ def main():
             gsl["grad_attribution"]["intermediate_frac"].append(attr.get("intermediate_frac", float("nan")))
             gsl["grad_attribution"]["final_frac"].append(attr.get("final_frac", float("nan")))
             gsl["grad_attribution"]["per_pos"].append(attr.get("per_pos", []))
+
+        if "grad_projection" in d:
+            proj = d["grad_projection"]
+            for k in _PROJ_KEYS:
+                gsl["grad_projection"][k].append(proj.get(k, float("nan")))
 
         if "pairwise" in d:
             snap = d["pairwise"]
@@ -823,6 +898,11 @@ def main():
             if len(vals) == len(order):
                 gsl["grad_attribution"][sub_key] = np.array(vals, dtype=object)[order].tolist()
 
+        for proj_key in _PROJ_KEYS:
+            vals = gsl["grad_projection"][proj_key]
+            if len(vals) == len(order):
+                gsl["grad_projection"][proj_key] = np.array(vals, dtype=float)[order].tolist()
+
         entry["pairwise_snapshots"].sort(key=lambda s: s["step"])
 
     # Write per-label JSON files
@@ -838,6 +918,7 @@ def main():
             "grad_sim_log": gsl,
             "layer_names": gsl.get("layer_names", []),
             "pairwise_snapshots": entry["pairwise_snapshots"],
+            "grad_projection_log": gsl.get("grad_projection", {}),
         }
         with open(gs_out_dir / f"{label}.json", "w") as f:
             json.dump(record, f)

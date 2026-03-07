@@ -823,6 +823,68 @@ def compute_grad_interference_temporal(all_results: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Metric 11: Gradient Projection (OGD-style interference decomposition)
+# ---------------------------------------------------------------------------
+
+_PROJ_KEYS = ("interference_magnitude", "useful_learning",
+              "interference_ratio", "burst_norm", "other_norm")
+
+
+def compute_grad_projection_metrics(all_results: list[dict]) -> dict:
+    """Aggregate gradient projection time-series from grad_sim_log.
+
+    For each schedule, collects per-step:
+      interference_magnitude: ||g_burst^parallel||  (absolute interference)
+      useful_learning:        ||g_burst^perp||       (orthogonal learning signal)
+      interference_ratio:     ||g_parallel|| / ||g_burst||  (= |cos α|)
+
+    Returns per-schedule mean ± std trajectories over seeds, split by phase.
+    """
+    jobs_by_schedule: dict[str, list[dict]] = {}
+    for r in all_results:
+        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
+
+    results = {}
+    for sched, sched_results in sorted(jobs_by_schedule.items(), key=lambda x: _sched_order(x[0])):
+        step_data: dict[int, dict[str, list[float]]] = {}
+        step_phases: dict[int, str] = {}
+
+        for r in sched_results:
+            gsl = r.get("grad_sim_log", {})
+            proj = gsl.get("grad_projection", {})
+            steps = gsl.get("step", [])
+            if not proj or not steps:
+                continue
+            for i, (step, phase) in enumerate(zip(steps, gsl.get("phase", []))):
+                step_data.setdefault(step, {k: [] for k in _PROJ_KEYS})
+                step_phases[step] = phase
+                for k in _PROJ_KEYS:
+                    vals = proj.get(k, [])
+                    if i < len(vals) and not np.isnan(vals[i]):
+                        step_data[step][k].append(vals[i])
+
+        if not step_data:
+            results[sched] = {}
+            continue
+
+        steps_sorted = sorted(step_data)
+        out, out_std = {k: [] for k in _PROJ_KEYS}, {f"{k}_std": [] for k in _PROJ_KEYS}
+        for step in steps_sorted:
+            for k in _PROJ_KEYS:
+                vals = step_data[step][k]
+                out[k].append(float(np.mean(vals)) if vals else float("nan"))
+                out_std[f"{k}_std"].append(float(np.std(vals)) if len(vals) > 1 else 0.0)
+
+        results[sched] = {
+            "steps": steps_sorted,
+            "phases": [step_phases[s] for s in steps_sorted],
+            **out, **out_std,
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Metric 10: Burst Position Comparison (cross-run meta-analysis)
 # ---------------------------------------------------------------------------
 
@@ -1014,6 +1076,28 @@ _METRIC_DESCRIPTIONS = {
             "The 0.1 threshold is empirically chosen based on observed sim ranges. "
             "Re-alignment speed is sensitive to the initial cosine similarity at the start of reversion. "
             "For burst_100 (pure burst batches), the starting sim is most negative, making re-alignment slower."
+        ),
+    },
+    "grad_projection": {
+        "title": "Gradient Projection: Interference vs Useful Learning",
+        "what": (
+            "Decomposes the burst gradient g_burst into a component parallel to g_other "
+            "(interference: g_parallel = projection onto g_other direction) and an orthogonal "
+            "residual (useful learning: g_perp = g_burst - g_parallel). "
+            "Tracks all three quantities over training steps with error bars across seeds."
+        ),
+        "high": (
+            "High interference_magnitude → burst steps strongly affect other-class parameters. "
+            "High useful_learning → burst steps move model in directions orthogonal to other-class concerns."
+        ),
+        "low": (
+            "Low interference_ratio → most of the burst gradient is orthogonal to other-class gradients "
+            "(minimal conflict). Diluted schedules should show lower interference_ratio."
+        ),
+        "limitations": (
+            "Projection is computed on aggregate (pooled) gradients, not per-example. "
+            "The interference_ratio equals |cos(α)| so it is bounded in [0, 1]. "
+            "A ratio near 0.5 is expected at random initialisation."
         ),
     },
     "burst_position_comparison": {
@@ -1396,6 +1480,94 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         _add_fig("realign_speed", fig)
 
     # ------------------------------------------------------------------
+    # Chart 11: Gradient Projection — interference magnitude, useful learning,
+    #           and interference ratio over time with error bands
+    # ------------------------------------------------------------------
+
+    def _proj_timeseries_fig(gp, schedules, metric_key, title, yaxis_label, hline=None):
+        """Line + shaded-band figure for one projection metric across schedules."""
+        fig = go.Figure()
+        for sched in schedules:
+            d = gp[sched]
+            if not d.get("steps"):
+                continue
+            steps = d["steps"]
+            y = d.get(metric_key, [])
+            y_std = d.get(f"{metric_key}_std", [0.0] * len(steps))
+            color = _color(sched)
+            fig.add_trace(go.Scatter(
+                x=steps, y=y, name=sched,
+                line=dict(color=color, width=2), mode="lines",
+            ))
+            fig.add_trace(go.Scatter(
+                x=steps + steps[::-1],
+                y=[v + e for v, e in zip(y, y_std)] + [v - e for v, e in zip(y[::-1], y_std[::-1])],
+                fill="toself", fillcolor=color, opacity=0.15,
+                line=dict(width=0), showlegend=False, hoverinfo="skip",
+            ))
+        if hline is not None:
+            fig.add_hline(y=hline, line_dash="dot", line_color="gray",
+                          annotation_text="random baseline")
+        fig.update_layout(
+            title=title, xaxis_title="Training Step", yaxis_title=yaxis_label,
+            legend_title="Schedule", template="plotly_white", height=500,
+        )
+        return fig
+
+    for analysis in existing_analyses:
+        run_name = analysis["run_name"]
+        gp = new_results.get("grad_projection", {}).get(run_name, {})
+        if not gp:
+            continue
+        schedules = sorted(gp.keys(), key=_sched_order)
+
+        _add_fig("grad_interference_magnitude", _proj_timeseries_fig(
+            gp, schedules, "interference_magnitude",
+            f"Gradient Interference Magnitude — {run_name}<br>"
+            "<sup>||g_burst^parallel||: projection of burst gradient onto other-class direction. "
+            "Higher = more damage to other-class parameters per step.</sup>",
+            "Interference Magnitude ||g_parallel||",
+        ))
+        _add_fig("grad_interference_ratio", _proj_timeseries_fig(
+            gp, schedules, "interference_ratio",
+            f"Gradient Interference Ratio — {run_name}<br>"
+            "<sup>||g_parallel|| / ||g_burst|| = |cos α|. "
+            "Fraction of burst gradient interfering with other-class learning. Range [0,1].</sup>",
+            "Interference Ratio (= |cos α|)", hline=0.5,
+        ))
+        _add_fig("grad_useful_learning", _proj_timeseries_fig(
+            gp, schedules, "useful_learning",
+            f"Gradient Useful Learning — {run_name}<br>"
+            "<sup>||g_burst^perp||: orthogonal component — safe learning that does not conflict.</sup>",
+            "Useful Learning ||g_perp||",
+        ))
+
+        # Bar: mean interference ratio during burst phase with error bars
+        sched_labels, mean_ratios, std_ratios = [], [], []
+        for sched in schedules:
+            d = gp[sched]
+            burst_ratios = [r for r, p in zip(d.get("interference_ratio", []), d.get("phases", []))
+                            if p == PHASE_BURST and not np.isnan(r)]
+            if burst_ratios:
+                sched_labels.append(sched)
+                mean_ratios.append(float(np.mean(burst_ratios)))
+                std_ratios.append(float(np.std(burst_ratios)))
+
+        fig_bar = go.Figure(go.Bar(
+            x=sched_labels, y=mean_ratios,
+            error_y=dict(type="data", array=std_ratios, visible=True),
+            marker_color=[_color(s) for s in sched_labels],
+        ))
+        fig_bar.update_layout(
+            title=f"Mean Gradient Interference Ratio During Burst — {run_name}<br>"
+                  "<sup>Mean |cos α| across burst-phase steps. "
+                  "Lower = burst gradient more orthogonal to other-class gradients.</sup>",
+            xaxis_title="Schedule", yaxis_title="Mean Interference Ratio",
+            template="plotly_white", height=500,
+        )
+        _add_fig("grad_interference_ratio_bar", fig_bar)
+
+    # ------------------------------------------------------------------
     # Chart 10: Burst Position Comparison
     # ------------------------------------------------------------------
     bpc = new_results.get("burst_position_comparison", {})
@@ -1641,6 +1813,9 @@ def analyse_run(
     print("\n[9/10] Gradient interference temporal dynamics...", flush=True)
     result["grad_interference_temporal"] = compute_grad_interference_temporal(all_results)
 
+    print("\n[11/11] Gradient projection (OGD-style interference decomposition)...", flush=True)
+    result["grad_projection"] = compute_grad_projection_metrics(all_results)
+
     print("\n[10/10] Burst position comparison (uses existing results)...", flush=True)
     # This is computed globally after all runs are processed
 
@@ -1724,7 +1899,7 @@ def main():
             "relearning_efficiency", "linear_mode_connectivity",
             "pruning_robustness", "pairwise_grad_separation",
             "forgetting_speed_decomposition", "layer_interference_localisation",
-            "grad_interference_temporal",
+            "grad_interference_temporal", "grad_projection",
         ]:
             if metric_key in r:
                 new_results.setdefault(metric_key, {})[run_name] = r[metric_key]
