@@ -64,6 +64,70 @@ def configure_optimizers(net, optim_cfg):
     return optimizer
 
 
+def _cosine_segment(t_frac: float, lr_start: float, lr_end: float) -> float:
+    coeff = 0.5 * (1.0 + math.cos(math.pi * t_frac))
+    return lr_end + coeff * (lr_start - lr_end)
+
+
+def phase_lr(
+    global_step: int,
+    warmup_steps: int,
+    pretrain_steps: int,
+    burst_steps: int,
+    reversion_steps: int,
+    lr_max: float,
+    lr_pretrain_end_frac: float,
+    lr_burst_end_frac: float,
+    lr_reversion_end_frac: float,
+) -> float:
+    """Three-phase cosine LR with a single linear warmup at the start.
+
+    global_step is 1-indexed.
+    Phase boundaries:
+      [1, pretrain_steps]                                   pretrain
+      [pretrain_steps+1, pretrain_steps+burst_steps]        burst
+      [pretrain_steps+burst_steps+1, ...]                   reversion
+    """
+    P, T, U = pretrain_steps, burst_steps, reversion_steps
+    lr_pretrain_end = lr_max * lr_pretrain_end_frac
+    lr_burst_end = lr_max * lr_burst_end_frac
+    lr_reversion_end = lr_max * lr_reversion_end_frac
+
+    if global_step <= P:
+        if global_step <= warmup_steps:
+            return lr_max * global_step / warmup_steps
+        t_frac = (global_step - warmup_steps) / max(P - warmup_steps, 1)
+        return _cosine_segment(t_frac, lr_max, lr_pretrain_end)
+
+    if global_step <= P + T:
+        t_frac = (global_step - P) / max(T, 1)
+        return _cosine_segment(t_frac, lr_pretrain_end, lr_burst_end)
+
+    t_frac = (global_step - P - T) / max(U, 1)
+    return _cosine_segment(t_frac, lr_burst_end, lr_reversion_end)
+
+
+def update_phase_lr(
+    global_step: int,
+    optimizer,
+    warmup_steps: int,
+    pretrain_steps: int,
+    burst_steps: int,
+    reversion_steps: int,
+    lr_max: float,
+    lr_pretrain_end_frac: float,
+    lr_burst_end_frac: float,
+    lr_reversion_end_frac: float,
+) -> float:
+    lr = phase_lr(
+        global_step, warmup_steps, pretrain_steps, burst_steps, reversion_steps,
+        lr_max, lr_pretrain_end_frac, lr_burst_end_frac, lr_reversion_end_frac,
+    )
+    for pg in optimizer.param_groups:
+        pg["lr"] = lr
+    return lr
+
+
 def update_cosine_warmup_lr(it, cfg, optimizer, total_steps):
     it += 1
     lr = cfg.learning_rate

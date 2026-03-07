@@ -131,12 +131,14 @@ class TrainConfig:
     context_size: int = 80
 
     lr: float = 3e-4
+    lr_pretrain_end_frac: float = 0.3
+    lr_burst_end_frac: float = 0.1
+    lr_reversion_end_frac: float = 0.01
     weight_decay: float = 1e-3
-    beta1: float = 0.9
+    beta1: float = 0.95
     beta2: float = 0.95
     grad_clip: float = 1.0
     warmup_iters: int = 50
-    min_lr: float = 6e-5
 
     batch_size: int = 128
     grad_sim_batch_size: int = 2048
@@ -161,7 +163,7 @@ class TrainConfig:
 @dataclass
 class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
-    n_seeds: int = 10
+    n_seeds: int = 3
     n_workers: int = 0
     depth: int = 3
     burst_pos: int = 3

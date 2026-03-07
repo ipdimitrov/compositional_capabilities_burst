@@ -18,7 +18,7 @@ from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, update_cosine_warmup_lr
+from net.runner import configure_optimizers, update_phase_lr
 from burst.data import BurstDataset
 from burst.config import (
     EVAL_KEYS, MIXED_FRACTIONS,
@@ -181,8 +181,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
     optim_cfg = OmegaConf.create({
         "learning_rate": cfg["lr"], "weight_decay": cfg["weight_decay"],
         "beta1": cfg["beta1"], "beta2": cfg["beta2"],
-        "grad_clip": cfg["grad_clip"], "decay_lr": True,
-        "warmup_iters": cfg["warmup_iters"], "min_lr": cfg["min_lr"],
+        "grad_clip": cfg["grad_clip"],
     })
     optimizer = configure_optimizers(net, optim_cfg)
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE == "cuda")
@@ -190,7 +189,11 @@ def run(job, shared_data_path, run_dir, progress_dir):
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     P = cfg.get("pre_burst_steps", 0)
     bs, p, ev = cfg["batch_size"], cfg["p_target"], cfg["eval_every"]
-    total_lr_steps = T + U
+    lr_max = cfg["lr"]
+    warmup_steps = cfg["warmup_iters"]
+    lr_pe = cfg.get("lr_pretrain_end_frac", 0.3)
+    lr_be = cfg.get("lr_burst_end_frac", 0.1)
+    lr_re = cfg.get("lr_reversion_end_frac", 0.01)
 
     log = {"step": [], "loss": [], "phase": []}
     for k in EVAL_KEYS:
@@ -212,11 +215,13 @@ def run(job, shared_data_path, run_dir, progress_dir):
             log[k].append(eval_free_gen(net, eval_docs[k.removeprefix("acc_")], prompt_len))
         net.train()
 
-    def do_train_step(batch_np):
-        nonlocal it
+    def do_train_step(batch_np, global_step):
         dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
-        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_lr_steps)
+        update_phase_lr(
+            global_step, optimizer, warmup_steps, P, T, U,
+            lr_max, lr_pe, lr_be, lr_re,
+        )
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
             logits = net(inp)
@@ -230,7 +235,6 @@ def run(job, shared_data_path, run_dir, progress_dir):
         return loss.item()
 
     net.train()
-    it = 0
 
     t_ids = list(target_pool.keys())
     b_ids = list(bg_pool.keys())
@@ -238,13 +242,12 @@ def run(job, shared_data_path, run_dir, progress_dir):
     task_counts_burst = Counter()
     task_counts_reversion = Counter()
 
-    # --- Phase 1: Special (burst) — starts from shared pretrain checkpoint ---
     for s in range(T):
         nt = n_target_for_step(s, T, schedule, p, bs)
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, nt, bs, t_ids, b_ids)
         task_counts_burst.update(sampled_tasks)
-        loss_val = do_train_step(batch_np)
         gs = P + s
+        loss_val = do_train_step(batch_np, gs + 1)
         if s % ev == 0 or s == T - 1:
             do_eval(gs, PHASE_BURST, loss_val)
         if s in ckpt_steps:
@@ -252,12 +255,11 @@ def run(job, shared_data_path, run_dir, progress_dir):
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(s + 1))
 
-    # --- Phase 2: All-But-Special (reversion) ---
     for s in range(U):
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, 0, bs, t_ids, b_ids)
         task_counts_reversion.update(sampled_tasks)
-        loss_val = do_train_step(batch_np)
         gs = P + T + s
+        loss_val = do_train_step(batch_np, gs + 1)
         if s % ev == 0 or s == U - 1:
             do_eval(gs, PHASE_REVERSION, loss_val)
         local_gs = T + s

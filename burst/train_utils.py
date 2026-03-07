@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, update_cosine_warmup_lr
+from net.runner import configure_optimizers, phase_lr, update_phase_lr
 from burst._worker import n_target_for_step, sample_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -49,8 +49,7 @@ def make_optim_cfg(cfg: dict) -> OmegaConf:
     return OmegaConf.create({
         "learning_rate": cfg["lr"], "weight_decay": cfg["weight_decay"],
         "beta1": cfg["beta1"], "beta2": cfg["beta2"],
-        "grad_clip": cfg["grad_clip"], "decay_lr": True,
-        "warmup_iters": cfg["warmup_iters"], "min_lr": cfg["min_lr"],
+        "grad_clip": cfg["grad_clip"],
     })
 
 
@@ -63,15 +62,23 @@ def train_step(
     net: nanoGPT,
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
-    optim_cfg,
-    it: int,
-    total_steps: int,
+    global_step: int,
+    cfg: dict,
     grad_clip: float,
-) -> tuple[int, float]:
-    """Single training step. Returns (new_it, loss_value)."""
+) -> float:
+    """Single training step with phase-aware LR. Returns loss_value."""
     dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
-    it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_steps)
+    P = cfg.get("pre_burst_steps", 0)
+    T = cfg["total_steps"]
+    U = cfg["reversion_steps"]
+    update_phase_lr(
+        global_step, optimizer, cfg["warmup_iters"],
+        P, T, U, cfg["lr"],
+        cfg.get("lr_pretrain_end_frac", 0.3),
+        cfg.get("lr_burst_end_frac", 0.1),
+        cfg.get("lr_reversion_end_frac", 0.01),
+    )
     optimizer.zero_grad(set_to_none=True)
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
         logits = net(inp)
@@ -82,7 +89,7 @@ def train_step(
         torch.nn.utils.clip_grad_norm_(net.parameters(), grad_clip)
     scaler.step(optimizer)
     scaler.update()
-    return it, loss.item()
+    return loss.item()
 
 
 def retrain_with_callbacks(
@@ -104,31 +111,30 @@ def retrain_with_callbacks(
     optimizer = configure_optimizers(net, optim_cfg)
     scaler = make_scaler()
 
+    P = cfg.get("pre_burst_steps", 0)
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p = cfg["batch_size"], cfg["p_target"]
-    total = T + U
-    effective_max = max_step if max_step is not None else total
+    effective_max = max_step if max_step is not None else (P + T + U)
 
     net.train()
-    it = 0
 
     if on_step:
         on_step(net, 0, "init")
 
-    train_end = min(T, effective_max)
+    train_end = min(T, max(0, effective_max - P))
     for s in range(train_end):
         nt = n_target_for_step(s, T, schedule, p, bs)
         batch_np, _ = sample_batch(target_pool, bg_pool, nt, bs)
-        it, loss_val = train_step(batch_np, net, optimizer, scaler, optim_cfg, it, total, cfg["grad_clip"])
-        global_step = s + 1
+        global_step = P + s + 1
+        train_step(batch_np, net, optimizer, scaler, global_step, cfg, cfg["grad_clip"])
         if on_step:
             on_step(net, global_step, "train")
 
-    reversion_end = min(U, max(0, effective_max - T))
+    reversion_end = min(U, max(0, effective_max - P - T))
     for s in range(reversion_end):
         batch_np, _ = sample_batch(target_pool, bg_pool, 0, bs)
-        it, loss_val = train_step(batch_np, net, optimizer, scaler, optim_cfg, it, total, cfg["grad_clip"])
-        global_step = T + s + 1
+        global_step = P + T + s + 1
+        train_step(batch_np, net, optimizer, scaler, global_step, cfg, cfg["grad_clip"])
         if on_step:
             on_step(net, global_step, "reversion")
 
@@ -199,16 +205,22 @@ def build_probe_docs(
     return _cat(other_pool), _cat(burst_pool)
 
 
-def compute_lr_schedule(cfg: dict):
-    """Compute LR schedule arrays from config. Returns (steps, lrs)."""
-    T, U = cfg["total_steps"], cfg["reversion_steps"]
-    total = T + U
-    lr_max, lr_min, warmup = cfg["lr"], cfg["min_lr"], cfg["warmup_iters"]
+def compute_lr_schedule(cfg: dict, pretrain_steps: int | None = None,
+                        burst_steps: int | None = None):
+    """Compute three-phase LR schedule arrays. Returns (steps, lrs)."""
+    P = pretrain_steps if pretrain_steps is not None else cfg.get("pre_burst_steps", 0)
+    T = burst_steps if burst_steps is not None else cfg["total_steps"]
+    U = cfg["reversion_steps"]
+    warmup = cfg["warmup_iters"]
+    lr_max = cfg["lr"]
+    lr_pe = cfg.get("lr_pretrain_end_frac", 0.3)
+    lr_be = cfg.get("lr_burst_end_frac", 0.1)
+    lr_re = cfg.get("lr_reversion_end_frac", 0.01)
+
+    total = P + T + U
     steps = np.arange(1, total + 1)
-    warmup_mask = steps < warmup
-    lrs = np.where(
-        warmup_mask,
-        lr_max * steps / warmup,
-        lr_min + 0.5 * (1.0 + np.cos(np.pi * (steps - warmup) / (total - warmup))) * (lr_max - lr_min),
-    )
+    lrs = np.array([
+        phase_lr(s, warmup, P, T, U, lr_max, lr_pe, lr_be, lr_re)
+        for s in steps
+    ])
     return steps, lrs

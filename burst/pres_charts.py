@@ -269,19 +269,30 @@ def auc_diff(pdir, results, cfg, groups=None):
 
 def lr_schedule(pdir, cfg):
     bcfg = cfg.get("base_cfg", cfg)
-    T, U = bcfg["total_steps"], bcfg["reversion_steps"]
-    total = T + U
-    steps, lrs = _compute_lr(bcfg)
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(steps, lrs, color="#1565C0", lw=2.5)
-    ax.axvline(T, color="black", lw=2, ls="--")
-    ax.set_xlim(0, total)
+    P = bcfg.get("pre_burst_steps", 0)
+    U = bcfg["reversion_steps"]
+    schedules = cfg.get("schedules", list(SCHEDULE_ORDER))
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    for sched in _ordered(schedules):
+        T_s = _burst_T(sched)
+        steps, lrs = _compute_lr(bcfg, pretrain_steps=P, burst_steps=T_s)
+        ax.plot(steps, lrs, color=PALETTE.get(sched, "#1565C0"), lw=2.5,
+                label=SCHED_SHORT.get(sched, sched), alpha=0.85)
+
+    T_ref = _burst_T(schedules[0])
+    ax.axvline(P, color="black", lw=1.5, ls="--", alpha=0.6)
+    ylim = ax.get_ylim()
+    ax.text(P * 0.5, ylim[1] * 0.92, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
+            color="gray", fontweight="bold")
+    ax.text(P + T_ref * 0.5, ylim[1] * 0.92, "SPECIAL", ha="center", fontsize=11,
+            color="gray", fontweight="bold")
+    ax.text(P + T_ref + U * 0.5, ylim[1] * 0.92, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
+            color="gray", fontweight="bold")
+
     _style(ax, "Step", "Learning Rate",
-           "Learning Rate Schedule (cosine decay with linear warmup)")
-    ax.text(T * 0.5, ax.get_ylim()[1] * 0.92, "SPECIAL", ha="center", fontsize=11,
-            color="gray", fontweight="bold")
-    ax.text(T + U * 0.5, ax.get_ylim()[1] * 0.92, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
-            color="gray", fontweight="bold")
+           "Learning Rate Schedule (three-phase cosine)")
+    ax.legend(fontsize=8, loc="upper right", ncol=2)
     fig.tight_layout()
     p_ = pdir / "lr_schedule.png"
     fig.savefig(p_, dpi=200, bbox_inches="tight")

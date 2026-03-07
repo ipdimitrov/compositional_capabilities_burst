@@ -19,7 +19,7 @@ from burst.config import (
     PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION,
     ordered_schedules, sched_sort_key,
     TrainConfig, reversion_life_key, reversion_life_label,
-    parse_run_config,
+    parse_run_config, burst_steps_for_schedule, BURST_BASE_STEPS,
 )
 
 W, H = 297, 210
@@ -91,20 +91,34 @@ def _schedule_bar(ax, T, U, sched, p, bs, seed, P=0):
         _bar_label(ax, P + (s + e) / 2, txt)
 
 
-def plot_lr_schedule(cfg, plots_dir):
-    steps, lrs = compute_lr_schedule(cfg)
-    T, U = cfg["total_steps"], cfg["reversion_steps"]
-    total = T + U
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(steps, lrs, color="#1565C0", lw=2)
-    ax.axvline(T, color="black", lw=2, ls="--")
-    ax.axvline(cfg["warmup_iters"], color="gray", lw=1, ls=":", alpha=0.6)
-    ax.set_xlim(0, total)
+def plot_lr_schedule(cfg, plots_dir, schedules=None):
+    P = cfg.get("pre_burst_steps", 0)
+    U = cfg["reversion_steps"]
+    warmup = cfg["warmup_iters"]
+
+    if schedules is None:
+        schedules = list(SCHEDULE_ORDER)
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    for sched in ordered_schedules(schedules):
+        T_s = burst_steps_for_schedule(sched, BURST_BASE_STEPS)
+        steps, lrs = compute_lr_schedule(cfg, pretrain_steps=P, burst_steps=T_s)
+        color = SCHED_COLORS.get(sched, "#1565C0")
+        ax.plot(steps, lrs, color=color, lw=2, label=sched, alpha=0.85)
+
+    T_ref = burst_steps_for_schedule(schedules[0], BURST_BASE_STEPS)
+    ax.axvline(P, color="black", lw=1.5, ls="--", alpha=0.6)
+    ax.axvline(warmup, color="gray", lw=1, ls=":", alpha=0.4)
+
+    ylim = ax.get_ylim()
+    ax.text(P * 0.5, ylim[1] * 0.95, "ALL-BUT-SPECIAL", ha="center", fontsize=8, color="gray")
+    ax.text(P + T_ref * 0.5, ylim[1] * 0.95, "SPECIAL", ha="center", fontsize=9, color="gray")
+    ax.text(P + T_ref + U * 0.5, ylim[1] * 0.95, "ALL-BUT-SPECIAL", ha="center", fontsize=8, color="gray")
+
     ax.set_xlabel("Step")
     ax.set_ylabel("Learning Rate")
-    ax.set_title("Learning Rate Schedule (cosine decay with warmup)", fontsize=12, fontweight="bold")
-    ax.text(T * 0.5, ax.get_ylim()[1] * 0.95, "SPECIAL", ha="center", fontsize=9, color="gray")
-    ax.text(T + U * 0.5, ax.get_ylim()[1] * 0.95, "ALL-BUT-SPECIAL", ha="center", fontsize=8, color="gray")
+    ax.set_title("Learning Rate Schedule (three-phase cosine)", fontsize=12, fontweight="bold")
+    ax.legend(fontsize=8, loc="upper right", ncol=2)
     ax.grid(True, alpha=0.2)
     fig.tight_layout()
     fig.savefig(plots_dir / "lr_schedule.png", dpi=150, bbox_inches="tight")
@@ -649,13 +663,14 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     pdf.chart(plots_dir / "lr_schedule.png", w=240)
     warmup_iters = bcfg['warmup_iters']
     lr_max = bcfg['lr']
-    lr_min = bcfg['min_lr']
-    total_train_reversion = total_steps + reversion_steps
+    lr_pe = bcfg.get('lr_pretrain_end_frac', 0.3)
+    lr_be = bcfg.get('lr_burst_end_frac', 0.1)
+    lr_re = bcfg.get('lr_reversion_end_frac', 0.01)
     pdf.body(
-        f"Cosine decay with linear warmup. Ramps up during the first "
-        f"{warmup_iters} steps, then decays from {lr_max} to "
-        f"{lr_min} over {total_train_reversion} steps. The reversion phase continues the same "
-        f"schedule -- the model keeps learning on other classes data at a low rate.")
+        f"Three-phase cosine schedule. Linear warmup for {warmup_iters} steps to {lr_max:.0e}, "
+        f"then cosine decay to {lr_max*lr_pe:.0e} over pretrain ({pre_burst_steps} steps), "
+        f"to {lr_max*lr_be:.0e} over burst, and to {lr_max*lr_re:.0e} over reversion "
+        f"({reversion_steps} steps). Burst phase length varies per schedule.")
 
     pdf.add_page()
     pdf.stitle("Summary: Forgetting Speed by Schedule")
@@ -1121,7 +1136,7 @@ def main():
     plot_overlay_all_schedules(results, plots_dir, sched_data=sched_data)
 
     print("LR schedule...")
-    plot_lr_schedule(cfg["base_cfg"], plots_dir)
+    plot_lr_schedule(cfg["base_cfg"], plots_dir, schedules=cfg.get("schedules"))
 
     print("Task distributions...")
     plot_task_distributions(run_dir)
