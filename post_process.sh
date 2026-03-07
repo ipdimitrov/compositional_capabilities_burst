@@ -79,6 +79,19 @@ post_process() {
         echo "  Skipping ADL (run_adl=False)"
     fi
 
+    echo "  Running basin metrics (noise robustness, weight drift, loss surface)..."
+    "${PYTHON}" burst/basin_metrics.py "${run_dir}" \
+        --out-dir "${run_dir}/results/basin_metrics" \
+        --n-seeds 3 \
+        || { echo "FAIL: basin_metrics.py"; fail=1; }
+
+    echo "  Running EWC Fisher-weighted displacement analysis..."
+    "${PYTHON}" burst/ewc_metrics.py "${run_dir}" \
+        --out-dir "${run_dir}/results/ewc_metrics" \
+        --n-fisher-batches 200 \
+        --n-seeds 3 \
+        || { echo "FAIL: ewc_metrics.py"; fail=1; }
+
     wait "${pid_plot}" || { echo "FAIL: plot.py"; fail=1; }
 
     if [ "${fail}" -eq 0 ]; then

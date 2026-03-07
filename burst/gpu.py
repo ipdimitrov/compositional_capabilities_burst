@@ -128,6 +128,21 @@ class GpuConfig:
         by_compute = max(2, min(32, int(math.sqrt(self.tflops_bf16) * 0.5)))
         return min(by_vram, by_compute)
 
+    @property
+    def frankenstein_workers(self) -> int:
+        """Concurrent model copies for batched frankenstein eval.
+
+        Each copy is inference-only (no grads, no optimizer) so the
+        footprint is just model weights + KV-cache + activations.
+        Shared CUDA context across all copies (single process).
+        """
+        if self.vram_gb == 0:
+            return 1
+        per_model_mb = MODEL_PLUS_ACTS_MB
+        by_vram = max(1, int((self.usable_vram_mb - CUDA_CONTEXT_MB) * 0.85 / per_model_mb))
+        by_compute = max(2, min(32, int(math.sqrt(self.tflops_bf16) * 0.6)))
+        return min(by_vram, by_compute)
+
     def summary(self) -> str:
         return (
             f"GPU: {self.gpu_name}\n"
@@ -135,7 +150,8 @@ class GpuConfig:
             f"ratio: {self.ratio:.1f} TFLOPS/GB\n"
             f"  train_workers={self.train_workers}  "
             f"probe_workers={self.probe_workers}  "
-            f"gradsim_workers={self.gradsim_workers}"
+            f"gradsim_workers={self.gradsim_workers}  "
+            f"frankenstein_workers={self.frankenstein_workers}"
         )
 
     def shell_exports(self) -> str:
@@ -143,6 +159,7 @@ class GpuConfig:
             f'export N_WORKERS={self.train_workers}\n'
             f'export PROBE_WORKERS={self.probe_workers}\n'
             f'export GRADSIM_WORKERS={self.gradsim_workers}\n'
+            f'export FRANK_WORKERS={self.frankenstein_workers}\n'
             f'export GPU_VRAM_GB={self.vram_gb}\n'
             f'export GPU_TFLOPS={self.tflops_bf16}\n'
         )

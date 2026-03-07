@@ -77,6 +77,86 @@ def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
 
 
 @torch.no_grad()
+def _batch_eval_hybrids(
+    cfg: dict,
+    hybrid_sds: list[dict[str, torch.Tensor]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
+    prompt_len: int,
+    max_concurrent: int | None = None,
+) -> list[tuple[float, float]]:
+    """Evaluate many hybrid state-dicts in parallel using CUDA streams.
+
+    Returns list of (burst_acc, other_acc) in the same order as hybrid_sds.
+    """
+    if max_concurrent is None:
+        from burst.gpu import gpu_cfg
+        max_concurrent = gpu_cfg.frankenstein_workers
+
+    if DEVICE != "cuda" or len(hybrid_sds) <= 1:
+        results = []
+        net = make_net_bare(cfg)
+        for sd in hybrid_sds:
+            net.load_state_dict(sd)
+            results.append((
+                _free_gen_acc(net, burst_sub, prompt_len),
+                _free_gen_acc(net, other_sub, prompt_len),
+            ))
+        return results
+
+    burst_t = torch.as_tensor(burst_sub, dtype=torch.long, device=DEVICE)
+    other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
+    B_burst, L = burst_t.shape
+    B_other = other_t.shape[0]
+    burst_target = burst_t[:, -6:]
+    other_target = other_t[:, -6:]
+    burst_prompt = burst_t[:, :prompt_len]
+    other_prompt = other_t[:, :prompt_len]
+    n_new = L - prompt_len
+
+    results: list[tuple[float, float]] = [(-1.0, -1.0)] * len(hybrid_sds)
+
+    for chunk_start in range(0, len(hybrid_sds), max_concurrent):
+        chunk = hybrid_sds[chunk_start : chunk_start + max_concurrent]
+        n_chunk = len(chunk)
+
+        nets = [make_net_bare(cfg) for _ in range(n_chunk)]
+        streams = [torch.cuda.Stream() for _ in range(n_chunk)]
+
+        for i, (net, sd, stream) in enumerate(zip(nets, chunk, streams)):
+            with torch.cuda.stream(stream):
+                net.load_state_dict(sd)
+                net.eval()
+
+        torch.cuda.synchronize()
+
+        burst_accs = [0.0] * n_chunk
+        other_accs = [0.0] * n_chunk
+
+        for i, (net, stream) in enumerate(zip(nets, streams)):
+            with torch.cuda.stream(stream):
+                gen = net.generate(burst_prompt, n_new)
+                burst_accs[i] = (gen[:, -6:] == burst_target).all(dim=1).float().mean().item()
+
+        torch.cuda.synchronize()
+
+        for i, (net, stream) in enumerate(zip(nets, streams)):
+            with torch.cuda.stream(stream):
+                gen = net.generate(other_prompt, n_new)
+                other_accs[i] = (gen[:, -6:] == other_target).all(dim=1).float().mean().item()
+
+        torch.cuda.synchronize()
+
+        for i in range(n_chunk):
+            results[chunk_start + i] = (burst_accs[i], other_accs[i])
+
+        del nets, streams
+        torch.cuda.empty_cache()
+
+    return results
+
+
+@torch.no_grad()
 def _cross_entropy_loss(net: nanoGPT, docs_BL: np.ndarray) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
@@ -239,20 +319,24 @@ def compute_frankenstein(
     for sched, seeds in preloaded.items():
         per_seed: list[dict] = []
         for sc in seeds[:n_seeds]:
-            net = make_net_bare(sc.cfg)
-            all_hybrids: list[tuple[str, dict]] = []
+            directions: list[str] = []
+            hybrid_sds: list[dict] = []
             for k in cut_points:
-                all_hybrids.append(("pre_bottom", _build_hybrid_sd(sc.sd_pre, sc.sd_peak, k)))
-                all_hybrids.append(("post_bottom", _build_hybrid_sd(sc.sd_peak, sc.sd_pre, k)))
+                directions.append("pre_bottom")
+                hybrid_sds.append(_build_hybrid_sd(sc.sd_pre, sc.sd_peak, k))
+                directions.append("post_bottom")
+                hybrid_sds.append(_build_hybrid_sd(sc.sd_peak, sc.sd_pre, k))
+
+            evals = _batch_eval_hybrids(
+                sc.cfg, hybrid_sds, burst_sub, other_sub, prompt_len)
 
             seed_data: dict[str, list[float]] = {
                 "pre_bottom_burst": [], "pre_bottom_other": [],
                 "post_bottom_burst": [], "post_bottom_other": [],
             }
-            for direction, hybrid_sd in all_hybrids:
-                net.load_state_dict(hybrid_sd)
-                seed_data[f"{direction}_burst"].append(_free_gen_acc(net, burst_sub, prompt_len))
-                seed_data[f"{direction}_other"].append(_free_gen_acc(net, other_sub, prompt_len))
+            for direction, (b_acc, o_acc) in zip(directions, evals):
+                seed_data[f"{direction}_burst"].append(b_acc)
+                seed_data[f"{direction}_other"].append(o_acc)
 
             per_seed.append(seed_data)
             print(f"  {sc.label}: frankenstein done", flush=True)
@@ -289,20 +373,25 @@ def compute_cross_burst_frankenstein(
         for sc_a, sc_b in zip(seeds_a, seeds_b):
             if len(per_seed) >= n_seeds:
                 break
-            net = make_net_bare(sc_a.cfg)
-            all_hybrids: list[tuple[str, dict]] = []
+
+            directions: list[str] = []
+            hybrid_sds: list[dict] = []
             for k in cut_points:
-                all_hybrids.append(("a_bottom", _build_hybrid_sd(sc_a.sd_peak, sc_b.sd_peak, k)))
-                all_hybrids.append(("b_bottom", _build_hybrid_sd(sc_b.sd_peak, sc_a.sd_peak, k)))
+                directions.append("a_bottom")
+                hybrid_sds.append(_build_hybrid_sd(sc_a.sd_peak, sc_b.sd_peak, k))
+                directions.append("b_bottom")
+                hybrid_sds.append(_build_hybrid_sd(sc_b.sd_peak, sc_a.sd_peak, k))
+
+            evals = _batch_eval_hybrids(
+                sc_a.cfg, hybrid_sds, burst_sub, other_sub, prompt_len)
 
             seed_data: dict[str, list[float]] = {
                 "a_bottom_burst": [], "a_bottom_other": [],
                 "b_bottom_burst": [], "b_bottom_other": [],
             }
-            for direction, hybrid_sd in all_hybrids:
-                net.load_state_dict(hybrid_sd)
-                seed_data[f"{direction}_burst"].append(_free_gen_acc(net, burst_sub, prompt_len))
-                seed_data[f"{direction}_other"].append(_free_gen_acc(net, other_sub, prompt_len))
+            for direction, (b_acc, o_acc) in zip(directions, evals):
+                seed_data[f"{direction}_burst"].append(b_acc)
+                seed_data[f"{direction}_other"].append(o_acc)
 
             per_seed.append(seed_data)
             print(f"  {sc_a.label} x {sc_b.label}: cross-frankenstein done", flush=True)
@@ -851,16 +940,24 @@ def _aggregate_layer_metric(all_results: list[dict], key: str,
             for ln, vals in per_layer.items():
                 filtered = [v for v, p in zip(vals, phases) if p == phase_filter]
                 if filtered:
-                    layer_vals.setdefault(ln, []).append(float(np.nanmean(filtered)))
+                    arr = np.asarray(filtered)
+                    valid = arr[~np.isnan(arr)]
+                    mean_val = float(valid.mean()) if len(valid) > 0 else float("nan")
+                    layer_vals.setdefault(ln, []).append(mean_val)
                     layer_end_vals.setdefault(ln, []).append(float(filtered[-1]))
 
         if not layer_vals:
             results[sched] = {}
             continue
 
+        def _safe_nanmean(vs: list[float]) -> float:
+            arr = np.asarray(vs)
+            valid = arr[~np.isnan(arr)]
+            return float(valid.mean()) if len(valid) > 0 else float("nan")
+
         results[sched] = {
-            "mean_per_layer": {ln: float(np.nanmean(vs)) for ln, vs in layer_vals.items()},
-            "end_per_layer": {ln: float(np.nanmean(vs)) for ln, vs in layer_end_vals.items()},
+            "mean_per_layer": {ln: _safe_nanmean(vs) for ln, vs in layer_vals.items()},
+            "end_per_layer": {ln: _safe_nanmean(vs) for ln, vs in layer_end_vals.items()},
             "layer_names": layer_names or list(layer_vals.keys()),
         }
 
@@ -1001,18 +1098,19 @@ def compute_forgetting_grad_alignment(
                                        other_tgt.reshape(-1))
             loss.backward()
 
-            # Flat gradient of other-class loss at peak
-            g_other = torch.cat([
-                p.grad.detach().view(-1).float()
-                for p in net.parameters() if p.grad is not None
-            ])
-
-            # Reversion direction: theta_pre - theta_peak (flat)
-            rev_dir = torch.cat([
-                (sc.sd_pre_cpu[k].to(DEVICE).float() - sc.sd_peak[k].float()).view(-1)
-                for k in sc.sd_pre_cpu
-                if k in sc.sd_peak
-            ])
+            grad_parts = []
+            rev_parts = []
+            for name, p in net.named_parameters():
+                if p.grad is None:
+                    continue
+                if name not in sc.sd_pre_cpu or name not in sc.sd_peak:
+                    continue
+                grad_parts.append(p.grad.detach().view(-1).float())
+                rev_parts.append(
+                    (sc.sd_pre_cpu[name].to(DEVICE).float() - sc.sd_peak[name].float()).view(-1)
+                )
+            g_other = torch.cat(grad_parts)
+            rev_dir = torch.cat(rev_parts)
 
             cos = F.cosine_similarity(g_other.unsqueeze(0), rev_dir.unsqueeze(0)).item()
             per_seed.append(cos)

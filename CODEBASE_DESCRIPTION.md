@@ -60,47 +60,44 @@ One additional bijection `b*` (index `n_a + 1`) is introduced. The burst tasks a
 
 ---
 
-## The Three Training Phases
+## The Four Training Phases
 
-### Phase 1: Foundation + Burst (T steps, default 500)
+### Phase 0: Pre-burst pretraining (P steps, default 420)
 
-The model trains for `T` total steps. Each step, a batch of size `batch_size` (default 128) is sampled. The batch is a mixture of:
-- **Other-class documents**: drawn uniformly from all `n_a^depth` other tasks.
-- **Burst-class documents**: drawn uniformly from all burst tasks.
+Before any burst data is introduced, one shared model is trained on all-but-special (other-class only) for `pre_burst_steps` steps. This pretrained checkpoint is shared across all seeds for a given schedule, giving every seed an identical starting point.
 
-The number of burst documents per step is controlled by the **schedule** (see below). During the "foundation" sub-phase (before the burst window), `n_target = 0` (no burst data). During the burst window, `n_target > 0`.
+### Phase 1: Burst (T steps, default `BURST_BASE_STEPS = 140`)
 
-### Phase 2: Reversion (U steps, default 500)
+Starting from the shared pretrain checkpoint, each seed trains for `T` burst-phase steps. Each step, a batch of size `batch_size` (default 128) is sampled as a mixture of other-class and burst-class documents. The number of burst documents per step is controlled by the **schedule** (see below). The burst phase length varies inversely with burst concentration so all schedules see the same total number of special-class examples.
 
-After `T` steps, the burst class is completely removed. For all `U` reversion steps, `n_target = 0` — only other-class data is used. This measures how quickly the model forgets the burst capability.
+### Phase 2: Reversion (U steps, default 420)
+
+After the burst phase, the burst class is completely removed. For all `U` reversion steps, only other-class data is used. This measures how quickly the model forgets the burst capability.
 
 ### Learning rate
 
-A single cosine decay schedule with linear warmup runs across all `T + U` steps. Warmup lasts `warmup_iters` (default 50) steps, then decays from `lr` (default 3e-4) to `min_lr` (default 6e-5). The reversion phase continues the same decaying schedule — the model keeps learning on other-class data at a decreasing rate.
+A single cosine decay schedule with linear warmup runs across all `P + T + U` steps. Warmup lasts `warmup_iters` (default 50) steps, then decays from `lr` (default 3e-4) to `min_lr` (default 6e-5).
 
 ---
 
 ## The Schedules
 
-The schedule determines when and how much burst-class data appears in the batch during the `T` training steps. The key parameter is `p_target` (default 0.10), which defines the fraction of a batch that is burst-class. The "burst length" is `burst_len = max(int(p_target * T), 1)` = 50 steps at default settings.
+The schedule determines how much burst-class data appears in each batch during the `T` burst-phase steps. The key parameter is `p_target` (default 0.25). The burst phase length scales inversely with concentration so all schedules deliver the same total burst-class examples: `burst_steps * frac = BURST_BASE_STEPS * 1.0`.
 
-All schedules (except `burst_10`) deliver the same *total amount* of burst-class data; they differ only in *when* it appears.
+`BURST_FRACTIONS = [100, 98, 95, 90, 85, 75, 50, 25]` — `burst_10` has been removed. All schedules now use binomial sampling throughout the full burst phase (rather than a fixed window).
 
 | Schedule | Description |
 |---|---|
-| `burst_100` | 100% burst-class for the last `burst_len` steps. Pure block at the end. |
-| `burst_98` | 98% burst-class in a window at the end. Window size = `burst_len / 0.98`. |
-| `burst_95` | 95% burst-class in a window at the end. |
-| `burst_90` | 90% burst-class in a window at the end. |
-| `burst_85` | 85% burst-class in a window at the end. |
-| `burst_75` | 75% burst-class in a window at the end. |
-| `burst_50` | 50% burst-class in a window at the end. |
-| `burst_25` | 25% burst-class in a window at the end. |
-| `burst_10` | ~10% burst-class drawn randomly throughout all `T` steps (uniform baseline). |
+| `burst_100` | 100% burst-class every step for `BURST_BASE_STEPS` steps. |
+| `burst_98` | 98% burst-class (binomial) for `BURST_BASE_STEPS / 0.98` steps. |
+| `burst_95` | 95% burst-class (binomial) for `BURST_BASE_STEPS / 0.95` steps. |
+| `burst_90` | 90% burst-class (binomial) for `BURST_BASE_STEPS / 0.90` steps. |
+| `burst_85` | 85% burst-class (binomial) for `BURST_BASE_STEPS / 0.85` steps. |
+| `burst_75` | 75% burst-class (binomial) for `BURST_BASE_STEPS / 0.75` steps. |
+| `burst_50` | 50% burst-class (binomial) for `BURST_BASE_STEPS / 0.50` steps. |
+| `burst_25` | 25% burst-class (binomial) for `BURST_BASE_STEPS / 0.25` steps. |
 
-For `burst_X` where X is not 100 and not 10: the window length is `min(burst_len / frac, T)` steps at the end of training, and each step in that window has exactly `round(batch_size * frac)` burst documents.
-
-The schedules are ordered from most concentrated (burst_100) to least concentrated (burst_10) and are colour-coded red→blue in all plots.
+`burst_25` is designated `UNIFORM_SCHEDULE` — the least-concentrated baseline. The schedules are colour-coded red→blue in all plots.
 
 ---
 
@@ -122,7 +119,7 @@ Two accuracy values are tracked:
 
 After training, the following are computed from the `acc_burst` curve:
 
-- **`peak_burst`**: maximum `acc_burst` during the foundation+burst phase.
+- **`peak_burst`**: maximum `acc_burst` during the burst phase.
 - **`reversion_auc`**: area under the `acc_burst` curve during the reversion phase (trapezoidal rule over reversion steps). Lower = faster forgetting.
 - **`life_{pct}`** for thresholds `[0.95, 0.90, 0.85, 0.80, 0.75, 0.70]`: the reversion step at which `acc_burst` first drops to `pct%` of `peak_burst`. Capped at `U` if it never drops that far. Lower = faster forgetting.
 - **`dropoff_abs`** and **`dropoff_pct`**: absolute and percentage drop from `peak_burst` to the final `acc_burst` at end of reversion.
@@ -131,7 +128,7 @@ After training, the following are computed from the `acc_burst` curve:
 
 ## Model Architecture
 
-A nanoGPT-style decoder-only Transformer with:
+A nanoGPT-style decoder-only Transformer (`net/nanogpt.py`) with:
 - `n_layer = 6` transformer blocks
 - `n_embd = 120` model dimension
 - `n_head = 4` attention heads
@@ -139,6 +136,8 @@ A nanoGPT-style decoder-only Transformer with:
 - MLP sublayers enabled
 - `vocab_size = 128` (padded to accommodate all tokens)
 - `context_size = 80` (padded to accommodate full document length)
+
+An LSTM alternative (`net/lstm.py`, `AutoLstm`) exists but is not used in the main experiment pipeline.
 
 Trained with:
 - AdamW optimizer (`beta1=0.9`, `beta2=0.95`, `weight_decay=1e-3`)
@@ -152,34 +151,53 @@ Trained with:
 
 ### Seeds and replication
 
-Each (schedule, seed) pair is an independent run. Default: 10 seeds per schedule, seeds = `SEED_BASE + seed_idx` = `107, 108, ..., 116`. Data generation uses a fixed `DATA_SEED = 999` so all runs share identical task definitions and document pools.
+Each (schedule, seed) pair is an independent run. Default: 10 seeds per schedule, seeds = `SEED_BASE + seed_idx` = `107, 108, ..., 116`. Data generation uses a fixed `DATA_SEED = 999` so all runs share identical task definitions and document pools. Within a schedule, all seeds share the same pretrained checkpoint from Phase 0.
 
 ### Data pools
 
 For each task (identified by its tuple of function indices), `n_docs_per_task = 500` documents are pre-generated. Each document has a freshly sampled random input sequence. Evaluation uses `n_eval_per_task = 500` documents per task. All pools are padded to the same document length.
 
-### run.sh
-
-`run.sh` orchestrates the full experiment pipeline. It calls `run_experiment depth pos` for each (depth, burst_pos) combination:
+### Output folder layout
 
 ```
+data/<date>_<time>_burst_d<depth>_pos<pos>/
+  results/
+    config.json
+    analysis_report.pdf
+    plots/
+    presentation/
+    grad_cosine_sim/
+  logs/
+    all_results.pkl
+    _data.pkl
+    pretrain_ckpt.pt
+    checkpoints/
+    task_distributions/
+    <label>.pkl  (per-run result pickles)
+```
+
+### run.sh
+
+`run.sh` orchestrates the full experiment pipeline. It currently runs depth-3 at all burst positions:
+
+```
+run_experiment 3 1
+run_experiment 3 2
 run_experiment 3 3
-run_experiment 4 1
-run_experiment 4 2
-run_experiment 4 3
-run_experiment 4 4
 ```
 
 Each `run_experiment` call:
-1. Runs `burst/experiment.py --depth D --burst-pos P`, which trains all jobs and saves results to `data/burst_dD_posP_<timestamp>/`.
+1. Runs `burst/experiment.py --depth D --burst-pos P`, which trains all jobs and saves results.
 2. Calls `post_process` (from `post_process.sh`), which runs in parallel:
    - `burst/plot.py` — generates all plots and a PDF report.
    - `burst/probe.py` (if `run_probes=True`) — fits linear probes on saved checkpoints.
    - `scripts/probe_next_token_regimes.py` (if `run_next_token_probes=True`) — next-token probes at specific steps.
    - After probes finish: `burst/plot_probes.py` — plots probe heatmaps.
    - `burst/grad_sim.py` — computes gradient cosine similarities on saved checkpoints.
+   - `burst/adl.py` (if `run_adl=True`, default True) — Activation Difference Lens analysis.
    - `burst/pres_pdf.py` — builds a presentation HTML/PDF.
    - `scripts/organize_run.py` — organises output files for download.
+3. After all run directories are collected, runs `burst/unified_analysis.py` across all of them.
 
 ---
 
@@ -187,15 +205,20 @@ Each `run_experiment` call:
 
 ### `burst/config.py`
 
-Central configuration. All schedules, colours, display labels, and phase names are derived from `BURST_FRACTIONS = [100, 98, 95, 90, 85, 75, 50, 25, 10]`. Editing this list is the only change needed to add/remove schedules.
+Central configuration. All schedules, colours, display labels, and phase names are derived from `BURST_FRACTIONS = [100, 98, 95, 90, 85, 75, 50, 25]`. Editing this list is the only change needed to add/remove schedules.
 
 Key exports:
 - `SCHEDULE_ORDER`: schedules sorted highest-to-lowest burst fraction.
 - `SCHED_COLORS`: red→blue gradient, one colour per schedule.
-- `MIXED_FRACTIONS`: dict mapping schedule name → burst fraction (excludes `burst_100` and `burst_10`).
-- `TrainConfig`: dataclass with all model/training hyperparameters.
-- `ExperimentConfig`: dataclass with n_seeds, n_workers, depth, burst_pos, schedules.
+- `MIXED_FRACTIONS`: dict mapping schedule name → burst fraction (all schedules including `burst_100`).
+- `UNIFORM_SCHEDULE`: `"burst_25"` — the least-concentrated schedule.
+- `BURST_BASE_STEPS`: base burst phase length (140 steps); actual burst length = `BURST_BASE_STEPS / frac`.
+- `burst_steps_for_schedule(schedule)`: returns burst phase length for a given schedule.
+- `TrainConfig`: dataclass with all model/training hyperparameters (includes `pre_burst_steps=420`, `total_steps=BURST_BASE_STEPS`, `reversion_steps=420`).
+- `ExperimentConfig`: dataclass with n_seeds, n_workers, depth, burst_pos, schedules, `run_adl=True`.
 - `reversion_life_key(threshold)` / `reversion_life_label(threshold)`: helpers for naming the life-time metrics.
+- `parse_run_config(cfg)`: extracts depth, burst_pos, n_a, base_cfg from a saved `config.json`.
+- `ordered_schedules(scheds)` / `sched_sort_key(schedule)`: ordering helpers.
 
 ### `burst/experiment.py`
 
@@ -203,11 +226,12 @@ Main entry point. Responsibilities:
 1. Parse CLI args (`--depth`, `--burst-pos`, `--n-a`, `--schedules`, `--n-seeds`, `--n-workers`).
 2. Build all data pools via `build_data()`.
 3. Save data to `_data.pkl`.
-4. Create a job list: one job per (schedule, seed) pair.
-5. Divide jobs into chunks and launch `_worker_batched.py` subprocesses in parallel (up to `n_workers` at a time).
-6. Poll progress files and print live status.
-7. Collect all result `.pkl` files into `all_results.pkl`.
-8. Clean up temporary files.
+4. **Pretrain** one shared model per schedule on other-class only for `pre_burst_steps` steps; save checkpoint to `pretrain_ckpt.pt`.
+5. Create a job list: one job per (schedule, seed) pair, each starting from the shared pretrain checkpoint.
+6. Divide jobs into chunks and launch `_worker_batched.py` subprocesses in parallel (up to `n_workers` at a time).
+7. Poll progress files and print live status.
+8. Collect all result `.pkl` files into `all_results.pkl`.
+9. Clean up temporary files.
 
 `DepthNData` class: generates all bijections, builds the vocabulary, and enumerates all other-class and burst-class task tuples. `_make_doc(task)` generates a single document token sequence for a given task. `gen_pool(tasks, n)` generates `n` documents per task.
 
@@ -215,10 +239,10 @@ Main entry point. Responsibilities:
 
 ### `burst/_worker.py`
 
-Trains a single model on a single (schedule, seed) job. Responsibilities:
+Trains a single model on a single (schedule, seed) job, starting from the shared pretrain checkpoint. Responsibilities:
 1. Load data from shared pickle.
-2. Instantiate nanoGPT and AdamW optimizer.
-3. Run `T` training steps (foundation + burst phase), sampling batches according to `n_target_for_step()`.
+2. Load pretrain checkpoint and instantiate nanoGPT and AdamW optimizer.
+3. Run `T` burst-phase steps, sampling batches according to `n_target_for_step()`.
 4. Run `U` reversion steps (burst class removed).
 5. Save model checkpoints every `CHECKPOINT_EVERY = 10` steps (for grad-sim and probes).
 6. Evaluate with `eval_free_gen()` every `eval_every` steps.
@@ -226,7 +250,7 @@ Trains a single model on a single (schedule, seed) job. Responsibilities:
 8. Compute `peak_burst`, `reversion_auc`, `life_{pct}` metrics.
 9. Save full result dict to `{label}.pkl`.
 
-`n_target_for_step(step, total_steps, schedule, p, batch_size)`: returns the number of burst-class documents for a given step under a given schedule.
+`n_target_for_step(step, total_steps, schedule, p, batch_size)`: returns the number of burst-class documents for a given step. All schedules 25–100% use binomial sampling throughout the full burst phase.
 
 `sample_batch(target_pool, bg_pool, n_target, batch_size)`: samples `n_target` burst documents and `batch_size - n_target` other-class documents, distributing evenly across tasks, then shuffles.
 
@@ -258,11 +282,12 @@ Generic subprocess job pool. `run_job_pool()` launches up to `n_workers` subproc
 ### `burst/train_utils.py`
 
 Shared utilities used by `_worker.py`, `probe.py`, and other scripts:
-- `make_net(cfg)`: instantiates nanoGPT from config dict.
+- `make_net_bare(cfg)` / `make_net(cfg)`: instantiate nanoGPT (compiled version for training).
+- `load_net(cfg, ckpt_path)`: load a nanoGPT from a checkpoint file.
 - `make_optim_cfg(cfg)` / `make_scaler()`: create optimizer config and AMP scaler.
 - `train_step(...)`: single forward+backward+optimizer step with cosine LR update.
 - `retrain_with_callbacks(job, target_pool, bg_pool, on_step, max_step)`: re-runs a full training from scratch, calling `on_step(net, global_step, phase)` at each step. Used by `probe.py` when checkpoints are unavailable.
-- `load_results(run_dir)`: loads `all_results.pkl` and `config.json`.
+- `load_results(run_dir)` / `resolve_run_paths(run_dir)`: load `all_results.pkl` and `config.json`, resolving the new nested `results/` + `logs/` layout.
 - `build_probe_docs(data, doc_len, n_per_task)`: generates balanced Other/Burst probe datasets.
 - `compute_lr_schedule(cfg)`: computes the LR curve as numpy arrays (for plotting).
 
@@ -276,6 +301,16 @@ Post-hoc gradient cosine similarity computation. For each saved checkpoint acros
 5. At 5 "pairwise" steps (begin, mid-burst, end-burst, mid-reversion, end-reversion), also compute a full pairwise cosine similarity matrix across groups: BURST, O_F1...O_Fn (other tasks grouped by function at `burst_pos`), ALL_OTHER, ALL_DATA.
 
 Results are saved per-job to `grad_cosine_sim/{label}.json` and merged back into `all_results.pkl`.
+
+### `burst/adl.py`
+
+**Activation Difference Lens (ADL)** — post-hoc mechanistic analysis based on the Narrow Fine-Tuning paper. For each saved checkpoint, computes:
+
+1. `delta_KTN`: mean activation difference between the checkpoint and the pre-burst model on other-class inputs, at every (layer, token position).
+2. **Logit Lens readability**: projects `delta_KTN` through the unembedding matrix and measures whether burst-relevant token IDs appear in the top-k predictions — tests whether the burst phase leaves a readable fingerprint even on non-burst data.
+3. **Causal ablation**: projects `delta` out of the residual stream at each layer during burst-class generation and measures the accuracy drop — tests whether the burst knowledge is stored as an additive direction (wrapper) rather than a conditional circuit.
+
+Results are saved to `adl/{label}.json` and merged into `all_results.pkl`. Enabled by default (`run_adl=True` in `ExperimentConfig`).
 
 ### `burst/probe.py`
 
@@ -313,17 +348,89 @@ Generates probe visualisation plots from `probe.py` output:
 - **Cross-model comparison heatmaps**: difference heatmaps `(K, T)` comparing probe accuracy between pairs of schedules at end-of-training and end-of-reversion.
 - **Layer × Schedule heatmap**: rows = transformer layers, columns = schedules, values = mean probe accuracy at the final step.
 
+### `burst/plot_utils.py`
+
+Shared plotting utilities. `plotly_to_png_matplotlib(fig_plotly, path)`: converts a Plotly figure to a PNG using matplotlib (used when kaleido is unavailable). `save_png(fig, path)`: wrapper that tries kaleido first, falls back to matplotlib.
+
+### `burst/deep_analysis.py`
+
+Five-metric deep analysis of burstiness runs, operating on saved checkpoints without retraining:
+
+1. **ADL** (Activation Difference Lens) — readability + causal ablation (see `adl.py`).
+2. **Gradient interference magnitude** — from existing `grad_sim_log`.
+3. **EMA interpolation probe** — sharpness of the peak↔reverted cliff via exponential moving average interpolation.
+4. **Critical sharpness** — Hutchinson trace of the Hessian on burst loss.
+5. **Weight delta rank** — SVD of `(W_post - W_pre)` per layer.
+
+Outputs `results.pkl`, per-chart PNGs, and an interactive Plotly dashboard. Can process all valid runs in `data/` in parallel via `--all --n-parallel N`.
+
+### `burst/new_metrics.py`
+
+Ten additional post-hoc mechanistic metrics, complementing `deep_analysis.py`:
+
+From checkpoints:
+1. **Task Vector Transfer** — does `τ = θ_post − θ_pre` transfer to a fresh model?
+2. **Forgetting Trajectory Dim** — PCA dimensionality of the reversion weight path.
+3. **Relearning Efficiency** — burst accuracy recovery after 50 fine-tune steps.
+4. **Linear Mode Connectivity** — loss barrier on the straight path peak→reverted.
+5. **Pruning Robustness** — burst accuracy vs magnitude-based weight sparsity.
+
+From existing data (no checkpoints needed):
+6. **Pairwise Gradient Separation** — BURST vs ALL_OTHER cosine sim across 5 key steps.
+7. **Forgetting Speed Decomposition** — initial slope / plateau / AUC from training curves.
+8. **Per-Layer Interference Localisation** — which layer has most negative cosine sim?
+9. **Gradient Interference Temporal Dynamics** — reversion-phase re-alignment trajectory.
+10. **Burst Position Comparison** — cross-run meta-analysis (pos1 / pos2 / pos3).
+
+### `burst/fingerprint_analysis.py`
+
+Finetuning fingerprint analysis adapted from the "Narrow Fine-Tuning Targets" paper. Two analyses:
+
+1. **Logit Lens on Checkpoint Deltas** — computes `δ̄ = E_x[h^post(x) - h^pre(x)]` on other-class inputs, projects through the unembedding matrix, and checks whether top-k tokens are burst-relevant.
+2. **Activation Steering** — adds `α·δ̄` to the residual stream at layer ℓ during autoregressive generation on other-class prompts, testing whether the burst knowledge is stored as an additive direction.
+
+### `burst/unified_analysis.py`
+
+Unified burstiness analysis dashboard that merges `deep_analysis` (5 metrics) and `new_metrics` (10 metrics) into one script. Adds Frankenstein layer-swap analysis (swapping individual layers between pre-burst and post-burst models), evaluates on both burst and other-class docs, shows individual seed points + error bars, and compares pre-burst vs post-burst models. Accepts multiple run directories and produces a combined dashboard. Called by `run.sh` at the end of all experiments.
+
 ### `burst/pres_charts.py` / `burst/pres_pdf.py`
 
 Generate a presentation-style HTML/PDF with selected key charts and summary tables. Not described in detail here as they are post-processing wrappers.
 
+### `scripts/probe_next_token_regimes.py`
+
+Next-token probes per layer for Other-class vs Burst-class regimes. Two probe types:
+1. **logit_lens** — applies the model's own `ln_f + LM_head` to intermediate layer activations and measures next-token accuracy (no training).
+2. **learned_probe** — trains a small linear layer (`N → 10 digit classes`) with cross-entropy via SGD, then measures accuracy.
+
+Retrains each model to the target step, extracts residual-stream activations at every transformer layer, and produces per-regime accuracy curves, A−B diffs, and diff-in-diffs.
+
+### `scripts/organize_run.py`
+
+Moves heavy files (`.pkl`, `.pt`, checkpoint directories) into a `_heavy/` subdirectory and replaces them with symlinks. This keeps the main run directory lightweight for download while all existing code follows symlinks transparently.
+
+### `net/nanogpt.py`
+
+nanoGPT decoder-only Transformer implementation. Used for all training and analysis.
+
+### `net/lstm.py`
+
+`AutoLstm`: an LSTM-based autoregressive language model with the same interface as nanoGPT. Present for comparison but not used in the main experiment pipeline.
+
+### `net/runner.py`
+
+Shared optimizer and LR schedule utilities: `configure_optimizers()` and `update_cosine_warmup_lr()`.
+
 ### `analysis/load_eval_results.py`
 
-A Jupyter-style analysis script (cells marked with `# %%`) for loading and plotting pre-existing evaluation results from a different experiment format (`data/inorder_eval_step_random50/accs.pkl` and `data/outorder_eval_step_random50/accs.pkl`). Plots:
-- In-order evaluation: token accuracy, strict accuracy, and teacher-forced accuracy over training iterations.
-- Out-of-order evaluation: accuracy as a function of (num_identities, displacement) shown as a heatmap and line plots.
+A Jupyter-style analysis script (cells marked with `# %%`) for loading and plotting pre-existing evaluation results from a different experiment format (`data/inorder_eval_step_random50/accs.pkl` and `data/outorder_eval_step_random50/accs.pkl`). This script is independent of the burst experiment pipeline and reads from a different data directory.
 
-This script is independent of the burst experiment pipeline and reads from a different data directory.
+### `synthetic/`
+
+Data generation utilities:
+- `synthetic/generator.py`: generates bijection functions and document sequences.
+- `synthetic/functions.py`: bijection function definitions.
+- `synthetic/init.py`: `set_seed()` utility for reproducible seeding.
 
 ---
 
@@ -334,11 +441,12 @@ run.sh
   └─ burst/experiment.py --depth D --burst-pos P
        ├─ DepthNData: generate bijections + all task tuples
        ├─ build_data(): generate document pools, save _data.pkl
+       ├─ Pretrain shared model for P steps → pretrain_ckpt.pt
        ├─ Create jobs: (schedule × seed) pairs
        └─ Launch _worker_batched.py subprocesses (parallel)
-            └─ _worker.run() per job:
-                 ├─ Train T steps (foundation + burst per schedule)
-                 ├─ Train U steps (reversion, no burst)
+            └─ _worker.run() per job (starts from pretrain_ckpt):
+                 ├─ Train T burst steps (binomial sampling per schedule)
+                 ├─ Train U reversion steps (no burst)
                  ├─ Save checkpoints every 10 steps
                  ├─ Eval every 25 steps → acc_other, acc_burst
                  ├─ Save task distribution CSVs
@@ -349,8 +457,12 @@ run.sh
        ├─ burst/plot.py → plots/ + analysis_report.pdf
        ├─ burst/probe.py → probes/*.pkl (optional)
        │    └─ burst/plot_probes.py → probes/plots/
+       ├─ scripts/probe_next_token_regimes.py (optional)
        ├─ burst/grad_sim.py → grad_cosine_sim/*.json
+       ├─ burst/adl.py → adl/*.json (default enabled)
        └─ burst/pres_pdf.py → presentation PDF
+
+  └─ burst/unified_analysis.py (all run dirs combined)
 ```
 
 ---
@@ -365,10 +477,12 @@ run.sh
 | `N_A` | 3 | Global default for n_a |
 | `SEED_BASE` | 107 | First training seed |
 | `DATA_SEED` | 999 | Seed for data generation (fixed across all runs) |
-| `total_steps` T | 500 | Foundation + burst training steps |
-| `reversion_steps` U | 500 | Reversion training steps |
+| `BURST_BASE_STEPS` | 140 | Base burst phase length (burst_100 uses this directly) |
+| `pre_burst_steps` P | 420 | Pre-burst pretraining steps (shared checkpoint) |
+| `total_steps` T | 140 | Burst phase steps (= `BURST_BASE_STEPS`) |
+| `reversion_steps` U | 420 | Reversion training steps |
 | `batch_size` | 128 | Documents per training step |
-| `p_target` | 0.10 | Target burst fraction (defines burst_len = 50) |
+| `p_target` | 0.25 | Target burst fraction for uniform schedule |
 | `eval_every` | 25 | Steps between evaluations |
 | `n_seeds` | 10 | Independent seeds per schedule |
 | `n_docs_per_task` | 500 | Training documents per task |
