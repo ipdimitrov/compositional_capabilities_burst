@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, phase_lr, update_phase_lr
+from net.runner import configure_optimizers, phase_lr, update_phase_lr, reset_optimizer_state
 from burst._worker import n_target_for_step, sample_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -129,6 +129,8 @@ def retrain_with_callbacks(
         train_step(batch_np, net, optimizer, scaler, global_step, cfg, cfg["grad_clip"])
         if on_step:
             on_step(net, global_step, "train")
+
+    reset_optimizer_state(optimizer)
 
     reversion_end = min(U, max(0, effective_max - P - T))
     for s in range(reversion_end):

@@ -107,6 +107,20 @@ def phase_lr(
     return _cosine_segment(t_frac, lr_burst_end, lr_reversion_end)
 
 
+def reset_optimizer_state(optimizer: torch.optim.Optimizer) -> None:
+    """Zero all momentum / variance buffers (Adam state) without changing param groups or LR."""
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            state = optimizer.state.get(p)
+            if state is None:
+                continue
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    v.zero_()
+                elif k == "step":
+                    state[k] = 0
+
+
 def update_phase_lr(
     global_step: int,
     optimizer,
