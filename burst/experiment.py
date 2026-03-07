@@ -45,7 +45,7 @@ from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, update_cosine_warmup_lr
+from net.runner import configure_optimizers, update_phase_lr
 from burst.data import BurstDataset, pad_pools_to_same_length
 from burst.config import (
     N_A, SEED_BASE, DATA_SEED,
@@ -224,15 +224,21 @@ def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path,
     if DEVICE == "cuda":
         net = torch.compile(net)
 
-    total_lr_steps = pretrain_steps
     optim_cfg = OmegaConf.create({
         "learning_rate": cfg["lr"], "weight_decay": cfg["weight_decay"],
         "beta1": cfg["beta1"], "beta2": cfg["beta2"],
-        "grad_clip": cfg["grad_clip"], "decay_lr": True,
-        "warmup_iters": cfg["warmup_iters"], "min_lr": cfg["min_lr"],
+        "grad_clip": cfg["grad_clip"],
     })
     optimizer = configure_optimizers(net, optim_cfg)
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE == "cuda")
+
+    P = pretrain_steps
+    warmup = cfg["warmup_iters"]
+    lr_max = cfg["lr"]
+    lr_pe = cfg.get("lr_pretrain_end_frac", 0.3)
+    lr_be = cfg.get("lr_burst_end_frac", 0.1)
+    lr_re = cfg.get("lr_reversion_end_frac", 0.01)
+    T_dummy, U_dummy = cfg.get("total_steps", 80), cfg["reversion_steps"]
 
     bg_ids = list(bg_pool.keys())
     bs = cfg["batch_size"]
@@ -242,7 +248,6 @@ def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path,
         log[k] = []
 
     net.train()
-    it = 0
     for s in range(pretrain_steps):
         per = bs // len(bg_ids)
         rem = bs % len(bg_ids)
@@ -256,7 +261,10 @@ def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path,
 
         dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
-        it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, total_lr_steps)
+        update_phase_lr(
+            s + 1, optimizer, warmup, P, T_dummy, U_dummy,
+            lr_max, lr_pe, lr_be, lr_re,
+        )
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
             logits = net(inp)
