@@ -18,7 +18,7 @@ from omegaconf import OmegaConf
 
 from synthetic.init import set_seed
 from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, update_phase_lr
+from net.runner import configure_optimizers, update_phase_lr, reset_optimizer_state
 from burst.data import BurstDataset
 from burst.config import (
     EVAL_KEYS, MIXED_FRACTIONS,
@@ -254,6 +254,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
             torch.save(raw_net.state_dict(), ckpt_dir / f"step_{s}.pt")
         if (s + 1) % 50 == 0:
             progress_file.write_text(str(s + 1))
+
+    reset_optimizer_state(optimizer)
 
     for s in range(U):
         batch_np, sampled_tasks = sample_batch(target_pool, bg_pool, 0, bs, t_ids, b_ids)
