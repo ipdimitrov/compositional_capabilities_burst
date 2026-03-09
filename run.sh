@@ -33,9 +33,9 @@ run_experiment() {
     RUN_DIRS+=("${run_dir}")
 }
 
-run_experiment 3 1
-run_experiment 3 2
 run_experiment 3 3
+run_experiment 3 2
+run_experiment 3 1
 
 # # depth=4 burst at position 2  (2/4)
 # run_experiment 4 1

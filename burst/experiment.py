@@ -200,13 +200,21 @@ def build_data(cfg: dict, depth: int, burst_pos: int, n_a: int):
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
 
 
-def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path,
-                  eval_docs: dict | None = None, prompt_len: int = 0,
-                  eval_every: int = 25) -> dict:
+def run_pretrain(
+    cfg: dict,
+    pretrain_steps: int,
+    bg_pool: dict,
+    ckpt_path: Path | None = None,
+    eval_docs: dict | None = None,
+    prompt_len: int = 0,
+    eval_every: int = 25,
+    seed: int = DATA_SEED,
+    save_checkpoint: bool = True,
+    progress_prefix: str = "",
+) -> dict:
     """Train one model on all-but-special for pretrain_steps, save checkpoint.
 
-    Uses seed=DATA_SEED so the pretrained model is deterministic and shared
-    across all per-schedule seeds.
+    Uses the provided seed (default DATA_SEED).
 
     Returns a pretrain log dict with step/loss/phase/acc_other/acc_burst lists
     so charts can show the pretraining trajectory.
@@ -214,7 +222,7 @@ def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path,
     from burst._worker import eval_free_gen
     from burst.config import EVAL_KEYS, PHASE_PRE_BURST
 
-    set_seed(DATA_SEED)
+    set_seed(seed)
     net = nanoGPT(OmegaConf.create({
         "compile": False, "vocab_size": cfg["vocab_size"],
         "context_size": cfg["context_size"],
@@ -287,11 +295,15 @@ def run_pretrain(cfg: dict, pretrain_steps: int, bg_pool: dict, ckpt_path: Path,
             net.train()
 
         if (s + 1) % 100 == 0 or s == pretrain_steps - 1:
-            print(f"  pretrain step {s+1}/{pretrain_steps}  loss={loss.item():.4f}", flush=True)
+            prefix = f"{progress_prefix} " if progress_prefix else ""
+            print(f"{prefix}pretrain step {s+1}/{pretrain_steps}  loss={loss.item():.4f}", flush=True)
 
-    raw = getattr(net, "_orig_mod", net)
-    torch.save(raw.state_dict(), ckpt_path)
-    print(f"  Pretrain checkpoint saved: {ckpt_path}", flush=True)
+    if save_checkpoint:
+        if ckpt_path is None:
+            raise ValueError("ckpt_path is required when save_checkpoint=True")
+        raw = getattr(net, "_orig_mod", net)
+        torch.save(raw.state_dict(), ckpt_path)
+        print(f"  Pretrain checkpoint saved: {ckpt_path}", flush=True)
     return log
 
 
