@@ -33,7 +33,7 @@ CLASS_BURST = "burst"
 # Schedules — the ONLY thing you edit to add/remove schedules
 # burst_10 removed: use 25–100% only (sampling-based, variable-length burst)
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 98, 95, 90, 85, 75, 50, 25]
+BURST_FRACTIONS = [100, 98, 95, 90, 80, 50, 40, 25, 20]
 
 UNIFORM_PCT = 25
 
@@ -90,15 +90,15 @@ CURVE_STYLE = {
 # ---------------------------------------------------------------------------
 # Data parameters
 # ---------------------------------------------------------------------------
-N_A = 3
-SEED_BASE = 420
+N_A = 4
+SEED_BASE = 100
 DATA_SEED = 999
 
 # ---------------------------------------------------------------------------
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
-BURST_BASE_STEPS = 80
+BURST_BASE_STEPS = 125
 
 
 def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) -> int:
@@ -132,25 +132,25 @@ class TrainConfig:
 
     lr: float = 3e-4
     lr_pretrain_end_frac: float = 0.3
-    lr_burst_end_frac: float = 0.1
-    lr_reversion_end_frac: float = 0.01
+    lr_burst_end_frac: float = 0.15
+    lr_reversion_end_frac: float = 0.1
     weight_decay: float = 1e-3
-    beta1: float = 0.95
-    beta2: float = 0.95
+    beta1: float = 0.9
+    beta2: float = 0.9
     grad_clip: float = 1.0
     warmup_iters: int = 50
 
     batch_size: int = 128
     grad_sim_batch_size: int = 2048
-    pre_burst_steps: int = 550
+    pre_burst_steps: int = 500
     total_steps: int = BURST_BASE_STEPS
-    p_target: float = 0.25
-    reversion_steps: int = 300
+    p_target: float = 0.2
+    reversion_steps: int = 500
     eval_every: int = 25
     reversion_thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70)
 
-    n_docs_per_task: int = 500
-    n_eval_per_task: int = 500
+    n_docs_per_task: int = 1000
+    n_eval_per_task: int = 1000
 
     def to_dict(self) -> dict:
         return {f.name: getattr(self, f.name) for f in self.__dataclass_fields__.values()}
