@@ -24,14 +24,14 @@ from burst.gpu import gpu_cfg
 
 DEPTH_DEFAULT = 3
 BURST_POS_DEFAULT = 3
-N_SEEDS_DEFAULT = 3
+N_SEEDS_DEFAULT = 2
 
-LR_VALUES = [1e-5, 3e-4, 1e-4]
-LR_PRETRAIN_END_FRAC_VALUES = [0.5, 0.3, 0.1]
-BETA_VALUES = [0.9, 0.95]
-PRE_BURST_STEPS_VALUES = [400, 800]
-N_A_VALUES = [3, 4]
-N_DOCS_PER_TASK_VALUES = [100, 1000]
+LR_VALUES = [3e-3, 1e-3]
+LR_PRETRAIN_END_FRAC_VALUES = [0.5, 0.1] # , 0.3
+BETA_VALUES = [0.9]
+PRE_BURST_STEPS_VALUES = [400, 600]
+N_A_VALUES = [3]
+N_DOCS_PER_TASK_VALUES = [100]
 
 CONFIG_KEYS = [
     "lr",
@@ -208,6 +208,10 @@ def _run_group(args: tuple[tuple[int, int], list[SweepRun], dict[str, Any]]) -> 
         final_i = len(log["step"]) - 1
         acc_other_series = [float(v) for v in log["acc_other"]]
         loss_series = [float(v) for v in log["loss"]]
+        first_step_acc_other_gt_99 = next(
+            (int(step) for step, acc_other in zip(log["step"], acc_other_series) if acc_other > 0.99),
+            None,
+        )
         row = {
             **run.as_param_dict(),
             "doc_len": int(task_info["doc_len"]),
@@ -219,6 +223,7 @@ def _run_group(args: tuple[tuple[int, int], list[SweepRun], dict[str, Any]]) -> 
             "final_acc_burst": float(log["acc_burst"][final_i]),
             "final_loss": float(loss_series[final_i]),
             "peak_acc_other": float(max(acc_other_series)),
+            "first_step_acc_other_gt_99": first_step_acc_other_gt_99,
             "min_loss": float(min(loss_series)),
             "curve_step": [int(s) for s in log["step"]],
             "curve_acc_other": acc_other_series,
@@ -324,6 +329,8 @@ def _build_tables(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dic
             final_loss_std=("final_loss", "std"),
             peak_acc_other_mean=("peak_acc_other", "mean"),
             peak_acc_other_std=("peak_acc_other", "std"),
+            first_step_acc_other_gt_99_mean=("first_step_acc_other_gt_99", "mean"),
+            first_step_acc_other_gt_99_std=("first_step_acc_other_gt_99", "std"),
             n_runs=("seed", "count"),
         )
     )
@@ -343,6 +350,7 @@ def _build_tables(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dic
                 final_loss_mean=("final_loss", "mean"),
                 final_loss_std=("final_loss", "std"),
                 peak_acc_other_mean=("peak_acc_other", "mean"),
+                first_step_acc_other_gt_99_mean=("first_step_acc_other_gt_99", "mean"),
                 n_runs=("seed", "count"),
             )
             .sort_values(param)
@@ -358,6 +366,7 @@ def _build_tables(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dic
                 "best_value": best[param],
                 "final_acc_other_mean": best["final_acc_other_mean"],
                 "final_loss_mean": best["final_loss_mean"],
+                "first_step_acc_other_gt_99_mean": best["first_step_acc_other_gt_99_mean"],
                 "n_runs": int(best["n_runs"]),
             }
         )

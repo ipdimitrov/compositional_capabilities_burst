@@ -52,7 +52,8 @@ from burst.config import (
     CLASS_OTHER, CLASS_BURST,
     ExperimentConfig, TrainConfig,
     reversion_life_key, reversion_life_label,
-    burst_steps_for_schedule, BURST_BASE_STEPS,
+    burst_steps_for_mode, batch_size_for_mode,
+    BURST_BASE_STEPS, BURST_MODES, MODE_CURRENT, MODE_SCALED_BATCH,
 )
 from burst.gpu import gpu_cfg
 
@@ -312,6 +313,7 @@ def main():
     parser.add_argument("--run-tag", default=None)
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--burst-pos", type=int, default=3)
+    parser.add_argument("--burst-mode", choices=BURST_MODES, default=MODE_CURRENT)
     parser.add_argument("--n-a", type=int, default=N_A)
     parser.add_argument("--schedules", nargs="+", default=None)
     parser.add_argument("--n-seeds", type=int, default=None)
@@ -324,6 +326,7 @@ def main():
     exp = ExperimentConfig(
         depth=args.depth,
         burst_pos=args.burst_pos,
+        burst_mode=args.burst_mode,
         run_probes=args.run_probes,
         run_next_token_probes=args.run_next_token_probes,
         run_adl=args.run_adl,
@@ -337,8 +340,10 @@ def main():
 
     base_cfg = exp.base_cfg
 
+    burst_mode = exp.burst_mode
     tag = args.run_tag or datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = Path("data") / f"{tag}_burst_d{exp.depth}_pos{exp.burst_pos}"
+    mode_suffix = f"_{burst_mode}" if burst_mode != MODE_CURRENT else ""
+    run_dir = Path("data") / f"{tag}_burst_d{exp.depth}_pos{exp.burst_pos}{mode_suffix}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     results_dir = run_dir / "results"
@@ -384,13 +389,15 @@ def main():
     pretrain_log_path = str(logs_dir / "pretrain_log.pkl")
     jobs = []
     for sched in exp.schedules:
-        sched_total_steps = burst_steps_for_schedule(sched, BURST_BASE_STEPS)
+        sched_total_steps = burst_steps_for_mode(sched, burst_mode, BURST_BASE_STEPS)
+        sched_batch_size = batch_size_for_mode(sched, burst_mode, base_cfg["batch_size"])
         for seed_idx in range(exp.n_seeds):
             seed = SEED_BASE + seed_idx
             cfg = {**base_cfg, "seed": seed,
                    "vocab_size": cfg_out["vocab_size"],
                    "context_size": cfg_out["context_size"],
-                   "total_steps": sched_total_steps}
+                   "total_steps": sched_total_steps,
+                   "batch_size": sched_batch_size}
             label = f"{sched}_s{seed}"
             jobs.append({
                 "schedule": sched, "seed": seed, "cfg": cfg, "label": label,
@@ -403,6 +410,7 @@ def main():
             "base_cfg": base_cfg, "n_a": n_a, "seed_base": SEED_BASE,
             "n_seeds": exp.n_seeds, "schedules": exp.schedules, "n_jobs": len(jobs),
             "task_info": ti, "depth": exp.depth, "burst_pos": exp.burst_pos,
+            "burst_mode": burst_mode,
             "run_probes": exp.run_probes,
             "run_next_token_probes": exp.run_next_token_probes,
             "run_adl": exp.run_adl,
@@ -410,22 +418,31 @@ def main():
             "pretrain_ckpt": str(pretrain_ckpt_path),
             "jobs": [{"label": j["label"], "schedule": j["schedule"],
                       "seed": j["seed"],
-                      "total_steps": j["cfg"]["total_steps"]} for j in jobs],
+                      "total_steps": j["cfg"]["total_steps"],
+                      "batch_size": j["cfg"]["batch_size"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    n_procs = min(len(jobs), exp.n_workers)
+    if burst_mode == MODE_SCALED_BATCH:
+        max_bs = max(j["cfg"]["batch_size"] for j in jobs)
+        safe_workers = gpu_cfg.train_workers_for_batch_size(max_bs, base_cfg["batch_size"])
+        n_procs = min(len(jobs), safe_workers)
+    else:
+        n_procs = min(len(jobs), exp.n_workers)
     jobs_per_proc = max(1, (len(jobs) + n_procs - 1) // n_procs)
     print(f"  {gpu_cfg.summary()}", flush=True)
     print(f"  Layout: {n_procs} processes x ~{jobs_per_proc} jobs/proc", flush=True)
 
     tc = exp.train
     print(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H", flush=True)
+    print(f"Burst mode: {burst_mode}", flush=True)
     print(f"Jobs: {len(jobs)}, parallel processes: {n_procs}, "
           f"jobs/process: ~{jobs_per_proc}", flush=True)
     print(f"Schedules: {exp.schedules}", flush=True)
     for sched in exp.schedules:
-        T_s = burst_steps_for_schedule(sched, BURST_BASE_STEPS)
-        print(f"  {sched}: burst_steps={T_s}  reversion={tc.reversion_steps}", flush=True)
+        T_s = burst_steps_for_mode(sched, burst_mode, BURST_BASE_STEPS)
+        bs_s = batch_size_for_mode(sched, burst_mode, base_cfg["batch_size"])
+        print(f"  {sched}: burst_steps={T_s}  batch_size={bs_s}  "
+              f"reversion={tc.reversion_steps}", flush=True)
     print()
 
     batched_script = str(Path(__file__).parent / "_worker_batched.py")
@@ -451,7 +468,7 @@ def main():
         next_chunk += 1
 
     max_steps_per_job = max(
-        P + burst_steps_for_schedule(s, BURST_BASE_STEPS) + tc.reversion_steps
+        P + burst_steps_for_mode(s, burst_mode, BURST_BASE_STEPS) + tc.reversion_steps
         for s in exp.schedules
     )
     pbar = tqdm(total=len(jobs) * max_steps_per_job, desc="All jobs", unit="step", ncols=120)

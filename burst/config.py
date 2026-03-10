@@ -9,6 +9,16 @@ Burst phase length scales inversely with burst concentration so that all
 schedules see the same total number of special-class examples:
     burst_steps = BURST_BASE_STEPS * (100 / pct)
 e.g. burst_100 → 200 steps, burst_50 → 400 steps, burst_25 → 800 steps.
+
+Burst modes
+-----------
+  "current"        – original setup: steps scale inversely with concentration
+                     so total special examples are constant; batch_size fixed.
+  "constant_steps" – all schedules run BURST_BASE_STEPS; batch_size fixed.
+                     Only the special:other ratio in each batch differs.
+  "scaled_batch"   – all schedules run BURST_BASE_STEPS; batch_size scales
+                     inversely with concentration so special-per-step is constant
+                     while total data per step grows for dilute schedules.
 """
 from dataclasses import dataclass, field
 import colorsys
@@ -98,11 +108,16 @@ DATA_SEED = 999
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
-BURST_BASE_STEPS = 125
+BURST_BASE_STEPS = 150
+
+MODE_CURRENT = "current"
+MODE_CONSTANT_STEPS = "constant_steps"
+MODE_SCALED_BATCH = "scaled_batch"
+BURST_MODES = (MODE_CURRENT, MODE_CONSTANT_STEPS, MODE_SCALED_BATCH)
 
 
 def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) -> int:
-    """Burst phase length for a given schedule.
+    """Burst phase length for a given schedule (original "current" mode).
 
     All schedules see the same total special-class examples:
         burst_steps * frac = base_steps * 1.0
@@ -114,6 +129,27 @@ def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) 
         frac = MIXED_FRACTIONS[schedule]
         return max(base_steps, int(round(base_steps / frac)))
     return base_steps
+
+
+def burst_steps_for_mode(
+    schedule: str,
+    mode: str = MODE_CURRENT,
+    base_steps: int = BURST_BASE_STEPS,
+) -> int:
+    if mode == MODE_CURRENT:
+        return burst_steps_for_schedule(schedule, base_steps)
+    return base_steps
+
+
+def batch_size_for_mode(
+    schedule: str,
+    mode: str = MODE_CURRENT,
+    base_batch_size: int = 128,
+) -> int:
+    if mode != MODE_SCALED_BATCH:
+        return base_batch_size
+    frac = MIXED_FRACTIONS.get(schedule, 1.0)
+    return max(base_batch_size, int(round(base_batch_size / frac)))
 
 
 MIXED_FRACTIONS["burst_100"] = 1.0
@@ -130,7 +166,7 @@ class TrainConfig:
     vocab_size: int = 128
     context_size: int = 80
 
-    lr: float = 3e-4
+    lr: float = 1e-3
     lr_pretrain_end_frac: float = 0.3
     lr_burst_end_frac: float = 0.15
     lr_reversion_end_frac: float = 0.1
@@ -149,8 +185,8 @@ class TrainConfig:
     eval_every: int = 25
     reversion_thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70)
 
-    n_docs_per_task: int = 1000
-    n_eval_per_task: int = 1000
+    n_docs_per_task: int = 100
+    n_eval_per_task: int = 100
 
     def to_dict(self) -> dict:
         return {f.name: getattr(self, f.name) for f in self.__dataclass_fields__.values()}
@@ -167,12 +203,15 @@ class ExperimentConfig:
     n_workers: int = 0
     depth: int = 3
     burst_pos: int = 3
+    burst_mode: str = MODE_CURRENT
     schedules: list[str] = field(default_factory=lambda: list(SCHEDULE_ORDER))
     run_probes: bool = False
     run_next_token_probes: bool = False
     run_adl: bool = True
 
     def __post_init__(self):
+        if self.burst_mode not in BURST_MODES:
+            raise ValueError(f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}")
         if self.n_workers == 0:
             from burst.gpu import gpu_cfg
             self.n_workers = gpu_cfg.train_workers
