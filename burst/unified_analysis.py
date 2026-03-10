@@ -491,8 +491,9 @@ def compute_ema_dual(
     other_sub: np.ndarray,
     prompt_len: int,
     n_seeds: int = 10,
+    n_alphas: int = 51,
 ) -> dict:
-    alphas = [0.0, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0]
+    alphas = np.linspace(0.0, 1.0, n_alphas).tolist()
     results = {}
 
     for sched, seeds in preloaded.items():
@@ -520,19 +521,26 @@ def compute_ema_dual(
             pre_peak_burst, pre_peak_other = _eval_path(all_pre_peak)
             rev_peak_burst, rev_peak_other = _eval_path(all_rev_peak)
 
-            def _cliff(accs):
-                return next((a for a, acc in zip(alphas, accs) if acc > 0.5), 1.0)
+            def _cliff_alpha(accs, threshold: float = 0.5):
+                for i, acc in enumerate(accs):
+                    if acc > threshold:
+                        if i == 0:
+                            return alphas[0]
+                        a0, a1 = alphas[i - 1], alphas[i]
+                        acc0, acc1 = accs[i - 1], acc
+                        return a0 + (threshold - acc0) / (acc1 - acc0 + 1e-10) * (a1 - a0)
+                return 1.0
 
             per_seed.append({
                 "pre_peak_burst": pre_peak_burst,
                 "pre_peak_other": pre_peak_other,
                 "rev_peak_burst": rev_peak_burst,
                 "rev_peak_other": rev_peak_other,
-                "cliff_pre_peak_burst": _cliff(pre_peak_burst),
-                "cliff_rev_peak_burst": _cliff(rev_peak_burst),
+                "cliff_pre_peak_burst": _cliff_alpha(pre_peak_burst),
+                "cliff_rev_peak_burst": _cliff_alpha(rev_peak_burst),
             })
-            print(f"  {sc.label}: EMA cliff pre↔peak={per_seed[-1]['cliff_pre_peak_burst']:.2f}, "
-                  f"rev↔peak={per_seed[-1]['cliff_rev_peak_burst']:.2f}", flush=True)
+            print(f"  {sc.label}: EMA cliff pre↔peak={per_seed[-1]['cliff_pre_peak_burst']:.3f}, "
+                  f"rev↔peak={per_seed[-1]['cliff_rev_peak_burst']:.3f}", flush=True)
 
         results[sched] = {"alphas": alphas, "per_seed": per_seed}
 
@@ -581,6 +589,231 @@ def compute_pruning_dual(
 
         results[sched] = {"sparsities": sparsities, "per_seed": per_seed}
 
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Per-layer weight drift decomposition
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def compute_weight_drift_per_layer(
+    preloaded: dict[str, list[SeedCheckpoints]],
+    n_layer: int,
+    n_seeds: int = 10,
+) -> dict:
+    """||ΔW_ℓ||_F for each layer, decomposed from total weight drift."""
+    layer_groups = _build_layer_groups(n_layer)
+    layer_group_names = list(layer_groups.keys())
+
+    results = {}
+    for sched, seeds in preloaded.items():
+        per_seed: list[dict] = []
+        for sc in seeds[:n_seeds]:
+            per_layer: dict[str, float] = {}
+            total = 0.0
+            for gname, pnames in layer_groups.items():
+                group_norm_sq = 0.0
+                for pn in pnames:
+                    if pn in sc.sd_peak_cpu and pn in sc.sd_pre_cpu:
+                        diff = sc.sd_peak_cpu[pn].float() - sc.sd_pre_cpu[pn].float()
+                        group_norm_sq += diff.norm().item() ** 2
+                per_layer[gname] = group_norm_sq ** 0.5
+                total += group_norm_sq
+            per_seed.append({"per_layer": per_layer, "total": total ** 0.5})
+            print(f"  {sc.label}: total_drift={total**0.5:.4f}", flush=True)
+        results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Effective rank of ΔW per layer
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def compute_effective_rank_per_layer(
+    preloaded: dict[str, list[SeedCheckpoints]],
+    n_layer: int,
+    n_seeds: int = 10,
+) -> dict:
+    """Effective rank = exp(H(p)) where p_i = σ_i / Σσ_j for SVD of ΔW_ℓ."""
+    layer_groups = _build_layer_groups(n_layer)
+    layer_group_names = list(layer_groups.keys())
+
+    results = {}
+    for sched, seeds in preloaded.items():
+        per_seed: list[dict] = []
+        for sc in seeds[:n_seeds]:
+            per_layer: dict[str, float] = {}
+            for gname, pnames in layer_groups.items():
+                diffs = []
+                for pn in pnames:
+                    if pn in sc.sd_peak_cpu and pn in sc.sd_pre_cpu:
+                        d = sc.sd_peak_cpu[pn].float() - sc.sd_pre_cpu[pn].float()
+                        if d.dim() >= 2:
+                            diffs.append(d.view(d.shape[0], -1))
+                if diffs:
+                    cat = torch.cat(diffs, dim=1)
+                    S = torch.linalg.svdvals(cat)
+                    S = S[S > 1e-10]
+                    if S.numel() > 0:
+                        p = S / S.sum()
+                        eff_rank = float(torch.exp(-(p * p.log()).sum()).item())
+                    else:
+                        eff_rank = 0.0
+                else:
+                    eff_rank = 0.0
+                per_layer[gname] = eff_rank
+            per_seed.append({"per_layer": per_layer})
+            print(f"  {sc.label}: eff_rank done", flush=True)
+        results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
+    return results
+
+
+# ---------------------------------------------------------------------------
+# CKA between pre and post checkpoints per layer
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def compute_cka_per_layer(
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    n_layer: int,
+    n_seeds: int = 10,
+) -> dict:
+    """Linear CKA between pre-burst and peak-burst representations per layer.
+
+    CKA ≈ 1 means representations didn't change; CKA < 1 means they did.
+    """
+    results = {}
+    burst_t = torch.as_tensor(burst_sub, dtype=torch.long, device=DEVICE)
+    inp_t = burst_t[:, :-1]
+
+    for sched, seeds in preloaded.items():
+        per_seed: list[dict] = []
+        for sc in seeds[:n_seeds]:
+            net = make_net_bare(sc.cfg)
+
+            net.load_state_dict(sc.sd_pre)
+            net.eval()
+            pre_acts = _collect_layer_acts(net, inp_t, n_layer)
+
+            net.load_state_dict(sc.sd_peak)
+            net.eval()
+            peak_acts = _collect_layer_acts(net, inp_t, n_layer)
+
+            per_layer: dict[str, float] = {}
+            for layer_name in pre_acts:
+                X = pre_acts[layer_name]
+                Y = peak_acts[layer_name]
+                per_layer[layer_name] = _linear_cka(X, Y)
+
+            per_seed.append({"per_layer": per_layer})
+            print(f"  {sc.label}: CKA done", flush=True)
+        results[sched] = {"per_seed": per_seed, "layer_names": list(pre_acts.keys()) if per_seed else []}
+    return results
+
+
+def _collect_layer_acts(
+    net: nanoGPT,
+    inp_t: torch.Tensor,
+    n_layer: int,
+) -> dict[str, torch.Tensor]:
+    """Collect mean-pooled activations at each transformer block output."""
+    acts: dict[str, torch.Tensor] = {}
+    hooks = []
+
+    def _make_hook(name):
+        def hook_fn(module, input, output):
+            if isinstance(output, tuple):
+                output = output[0]
+            acts[name] = output.detach().float().mean(dim=1).cpu()
+        return hook_fn
+
+    for i in range(n_layer):
+        h = net.transformer.h[i].register_forward_hook(_make_hook(f"block{i}"))
+        hooks.append(h)
+
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        net(inp_t)
+
+    for h in hooks:
+        h.remove()
+
+    return acts
+
+
+def _linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
+    """Linear CKA between two activation matrices (N x D)."""
+    X = X - X.mean(dim=0, keepdim=True)
+    Y = Y - Y.mean(dim=0, keepdim=True)
+    hsic_xy = (X @ X.T * (Y @ Y.T)).sum()
+    hsic_xx = (X @ X.T * (X @ X.T)).sum()
+    hsic_yy = (Y @ Y.T * (Y @ Y.T)).sum()
+    denom = (hsic_xx * hsic_yy).sqrt()
+    if denom < 1e-10:
+        return 1.0
+    return float((hsic_xy / denom).item())
+
+
+# ---------------------------------------------------------------------------
+# Directional pruning (top-k SVD of ΔW)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def compute_directional_pruning(
+    preloaded: dict[str, list[SeedCheckpoints]],
+    burst_sub: np.ndarray,
+    other_sub: np.ndarray,
+    prompt_len: int,
+    n_seeds: int = 10,
+    svd_ks: list[int] | None = None,
+) -> dict:
+    """Prune by removing top-k SVD components of ΔW = θ_peak − θ_pre.
+
+    If the wrapper claim is correct, removing top-5 SVD components of ΔW
+    for burst_100 should destroy burst accuracy, while burst_20 needs many more.
+    """
+    if svd_ks is None:
+        svd_ks = [0, 1, 2, 3, 5, 8, 10, 15, 20, 30]
+
+    results = {}
+    for sched, seeds in preloaded.items():
+        per_seed: list[dict] = []
+        for sc in seeds[:n_seeds]:
+            net = make_net_bare(sc.cfg)
+            burst_accs, other_accs = [], []
+
+            for k in svd_ks:
+                if k == 0:
+                    net.load_state_dict(sc.sd_peak)
+                    burst_accs.append(_free_gen_acc(net, burst_sub, prompt_len))
+                    other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
+                    continue
+
+                pruned_sd = {}
+                for name in sc.sd_peak:
+                    peak_w = sc.sd_peak[name].float()
+                    pre_w = sc.sd_pre[name].float()
+                    delta = peak_w - pre_w
+                    if delta.dim() >= 2 and min(delta.shape) > k:
+                        U, S, Vh = torch.linalg.svd(delta.view(delta.shape[0], -1), full_matrices=False)
+                        S_pruned = S.clone()
+                        S_pruned[:k] = 0.0
+                        delta_pruned = (U * S_pruned.unsqueeze(0)) @ Vh
+                        pruned_sd[name] = (pre_w + delta_pruned.view(delta.shape)).to(sc.sd_peak[name].dtype)
+                    else:
+                        pruned_sd[name] = sc.sd_peak[name]
+
+                net.load_state_dict(pruned_sd)
+                burst_accs.append(_free_gen_acc(net, burst_sub, prompt_len))
+                other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
+
+            per_seed.append({"burst_accs": burst_accs, "other_accs": other_accs})
+            print(f"  {sc.label}: dir_pruning burst@k=0={burst_accs[0]:.3f}, "
+                  f"burst@k=5={burst_accs[svd_ks.index(5)] if 5 in svd_ks else '?':.3f}", flush=True)
+
+        results[sched] = {"svd_ks": svd_ks, "per_seed": per_seed}
     return results
 
 
@@ -788,6 +1021,11 @@ ANALYSIS_METRICS: dict[str, bool] = {
     "grad_attribution":          True,
     # new gradient metric (requires preloaded checkpoints)
     "forgetting_grad_alignment": True,
+    # new mechanistic metrics (require preloaded checkpoints)
+    "weight_drift_per_layer":    True,
+    "effective_rank_per_layer":  True,
+    "cka_per_layer":             True,
+    "directional_pruning":       True,
 }
 
 
@@ -1067,25 +1305,25 @@ def compute_grad_attribution(all_results: list[dict]) -> dict:
 def compute_forgetting_grad_alignment(
     preloaded: dict[str, list[SeedCheckpoints]],
     other_sub: np.ndarray,
+    n_layer: int,
     n_seeds: int = 10,
+    svd_top_k: int = 50,
 ) -> dict:
     """Alignment of other-class gradient at peak-burst with the reversion direction.
 
-    Measures cos(grad_other(theta_peak), theta_pre - theta_peak).
-
-    Positive: other-class gradient at peak actively points back toward pre-burst
-              state — the burst modification is unstable under other-class data.
-    Near zero: other-class gradient is orthogonal to the burst modification —
-               the two live in separate parameter subspaces.
-
-    Returns {sched: {per_seed: [float]}}.
+    Computes both global and per-layer cosine similarity, plus a projected
+    version onto the top-k singular vectors of τ = θ_peak − θ_pre to avoid
+    the curse-of-dimensionality washing out signal in high-D space.
     """
     other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
     other_inp, other_tgt = other_t[:, :-1], other_t[:, 1:]
 
+    layer_groups = _build_layer_groups(n_layer)
+    layer_group_names = list(layer_groups.keys())
+
     results = {}
     for sched, seeds in preloaded.items():
-        per_seed: list[float] = []
+        per_seed: list[dict] = []
         for sc in seeds[:n_seeds]:
             net = make_net_bare(sc.cfg)
             net.load_state_dict(sc.sd_peak)
@@ -1098,26 +1336,77 @@ def compute_forgetting_grad_alignment(
                                        other_tgt.reshape(-1))
             loss.backward()
 
-            grad_parts = []
-            rev_parts = []
+            param_to_group: dict[str, str] = {}
+            for gname, pnames in layer_groups.items():
+                for pn in pnames:
+                    param_to_group[pn] = gname
+
+            grad_parts: list[torch.Tensor] = []
+            rev_parts: list[torch.Tensor] = []
+            per_layer_cos: dict[str, float] = {}
+            per_layer_projected_cos: dict[str, float] = {}
+
+            layer_grad_chunks: dict[str, list[torch.Tensor]] = {g: [] for g in layer_group_names}
+            layer_rev_chunks: dict[str, list[torch.Tensor]] = {g: [] for g in layer_group_names}
+
             for name, p in net.named_parameters():
-                if p.grad is None:
+                if p.grad is None or name not in sc.sd_pre_cpu or name not in sc.sd_peak:
                     continue
-                if name not in sc.sd_pre_cpu or name not in sc.sd_peak:
-                    continue
-                grad_parts.append(p.grad.detach().view(-1).float())
-                rev_parts.append(
-                    (sc.sd_pre_cpu[name].to(DEVICE).float() - sc.sd_peak[name].float()).view(-1)
-                )
+                g_flat = p.grad.detach().view(-1).float()
+                r_flat = (sc.sd_pre_cpu[name].to(DEVICE).float() - sc.sd_peak[name].float()).view(-1)
+                grad_parts.append(g_flat)
+                rev_parts.append(r_flat)
+                grp = param_to_group.get(name)
+                if grp:
+                    layer_grad_chunks[grp].append(g_flat)
+                    layer_rev_chunks[grp].append(r_flat)
+
             g_other = torch.cat(grad_parts)
             rev_dir = torch.cat(rev_parts)
+            global_cos = F.cosine_similarity(g_other.unsqueeze(0), rev_dir.unsqueeze(0)).item()
 
-            cos = F.cosine_similarity(g_other.unsqueeze(0), rev_dir.unsqueeze(0)).item()
-            per_seed.append(cos)
+            for grp in layer_group_names:
+                if layer_grad_chunks[grp]:
+                    g_l = torch.cat(layer_grad_chunks[grp])
+                    r_l = torch.cat(layer_rev_chunks[grp])
+                    per_layer_cos[grp] = F.cosine_similarity(g_l.unsqueeze(0), r_l.unsqueeze(0)).item()
+
+                    k = min(svd_top_k, r_l.shape[0])
+                    if k > 1 and r_l.norm() > 1e-8:
+                        r_2d = r_l.unsqueeze(1)
+                        U, S, _ = torch.svd_lowrank(r_2d, q=k)
+                        proj_g = U @ (U.T @ g_l.unsqueeze(1))
+                        proj_r = U @ (U.T @ r_2d)
+                        per_layer_projected_cos[grp] = F.cosine_similarity(
+                            proj_g.view(1, -1), proj_r.view(1, -1)).item()
+                    else:
+                        per_layer_projected_cos[grp] = per_layer_cos[grp]
+                else:
+                    per_layer_cos[grp] = 0.0
+                    per_layer_projected_cos[grp] = 0.0
+
+            k = min(svd_top_k, rev_dir.shape[0])
+            if k > 1 and rev_dir.norm() > 1e-8:
+                rev_2d = rev_dir.unsqueeze(1)
+                U, S, _ = torch.svd_lowrank(rev_2d, q=k)
+                proj_g = U @ (U.T @ g_other.unsqueeze(1))
+                proj_r = U @ (U.T @ rev_2d)
+                projected_cos = F.cosine_similarity(
+                    proj_g.view(1, -1), proj_r.view(1, -1)).item()
+            else:
+                projected_cos = global_cos
+
+            per_seed.append({
+                "global_cos": global_cos,
+                "projected_cos": projected_cos,
+                "per_layer_cos": per_layer_cos,
+                "per_layer_projected_cos": per_layer_projected_cos,
+            })
             net.zero_grad()
-            print(f"  {sc.label}: forgetting_grad_alignment={cos:.4f}", flush=True)
+            print(f"  {sc.label}: grad_align global={global_cos:.4f}, "
+                  f"projected={projected_cos:.4f}", flush=True)
 
-        results[sched] = {"per_seed": per_seed}
+        results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
 
     return results
 
@@ -1132,8 +1421,16 @@ def compute_sharpness(
     other_sub: np.ndarray,
     n_layer: int,
     n_seeds: int = 10,
-    n_hutchinson: int = 15,
+    n_hutchinson: int = 50,
+    use_sam: bool = True,
+    sam_epsilon: float = 0.01,
+    sam_steps: int = 5,
 ) -> dict:
+    """Sharpness via SAM-style PGD (default) or Hutchinson trace.
+
+    SAM sharpness = max_{||δ||≤ε} L(θ+δ) − L(θ), found by `sam_steps` of PGD.
+    More stable than the Hutchinson trace estimator and avoids negative values.
+    """
     layer_groups = _build_layer_groups(n_layer)
     layer_group_names = list(layer_groups.keys())
 
@@ -1149,64 +1446,157 @@ def compute_sharpness(
         for sc in seeds[:n_seeds]:
             net = make_net_bare(sc.cfg)
             net.load_state_dict(sc.sd_peak)
-            net.train()
+            V = sc.cfg["vocab_size"]
 
-            param_to_group: dict[str, str] = {}
-            for gname, pnames in layer_groups.items():
-                for pn in pnames:
-                    if pn in dict(net.named_parameters()):
-                        param_to_group[pn] = gname
+            if use_sam:
+                burst_global, burst_layers = _sam_sharpness(
+                    net, sc.sd_peak, burst_inp, burst_tgt, V,
+                    layer_groups, layer_group_names,
+                    epsilon=sam_epsilon, steps=sam_steps)
+                other_global, other_layers = _sam_sharpness(
+                    net, sc.sd_peak, other_inp, other_tgt, V,
+                    layer_groups, layer_group_names,
+                    epsilon=sam_epsilon, steps=sam_steps)
+            else:
+                net.train()
+                param_to_group: dict[str, str] = {}
+                for gname, pnames in layer_groups.items():
+                    for pn in pnames:
+                        if pn in dict(net.named_parameters()):
+                            param_to_group[pn] = gname
 
-            params = [(n, p) for n, p in net.named_parameters() if p.requires_grad]
-            param_names = [n for n, _ in params]
-            param_tensors = [p for _, p in params]
+                params = [(n, p) for n, p in net.named_parameters() if p.requires_grad]
+                param_names = [n for n, _ in params]
+                param_tensors = [p for _, p in params]
 
-            def _hutchinson_trace(inp_t, tgt_t):
-                V = sc.cfg["vocab_size"]
-                global_traces = []
-                layer_traces: dict[str, list[float]] = {g: [] for g in layer_group_names}
-
-                with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-                    for _ in range(n_hutchinson):
-                        net.zero_grad()
-                        logits = net(inp_t).float()
-                        loss = F.cross_entropy(logits.reshape(-1, V), tgt_t.reshape(-1))
-                        grads = torch.autograd.grad(loss, param_tensors, create_graph=True)
-
-                        v_list = [torch.randint_like(p, 0, 2).float() * 2 - 1 for p in param_tensors]
-                        gv = sum((g * v).sum() for g, v in zip(grads, v_list))
-                        hvp = torch.autograd.grad(gv, param_tensors, retain_graph=False)
-
-                        total_trace = 0.0
-                        per_group_trace: dict[str, float] = {g: 0.0 for g in layer_group_names}
-                        for pn, hv, v in zip(param_names, hvp, v_list):
-                            t = (hv * v).sum().item()
-                            total_trace += t
-                            g = param_to_group.get(pn)
-                            if g:
-                                per_group_trace[g] += t
-
-                        global_traces.append(total_trace)
-                        for g in layer_group_names:
-                            layer_traces[g].append(per_group_trace[g])
-                        net.zero_grad()
-
-                return float(np.mean(global_traces)), {g: float(np.mean(layer_traces[g])) for g in layer_group_names}
-
-            burst_global, burst_layers = _hutchinson_trace(burst_inp, burst_tgt)
-            other_global, other_layers = _hutchinson_trace(other_inp, other_tgt)
+                burst_global, burst_layers = _hutchinson_trace(
+                    net, param_tensors, param_names, param_to_group,
+                    layer_group_names, burst_inp, burst_tgt, V, n_hutchinson)
+                other_global, other_layers = _hutchinson_trace(
+                    net, param_tensors, param_names, param_to_group,
+                    layer_group_names, other_inp, other_tgt, V, n_hutchinson)
 
             per_seed.append({
                 "burst_global": burst_global,
                 "other_global": other_global,
                 "burst_layers": burst_layers,
                 "other_layers": other_layers,
+                "method": "sam" if use_sam else "hutchinson",
             })
-            print(f"  {sc.label}: sharpness burst={burst_global:.1f}, other={other_global:.1f}", flush=True)
+            print(f"  {sc.label}: sharpness burst={burst_global:.4f}, other={other_global:.4f} "
+                  f"({'SAM' if use_sam else 'Hutchinson'})", flush=True)
 
         results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
 
     return results
+
+
+def _sam_sharpness(
+    net: nanoGPT,
+    sd_base: dict[str, torch.Tensor],
+    inp_t: torch.Tensor,
+    tgt_t: torch.Tensor,
+    vocab_size: int,
+    layer_groups: dict[str, list[str]],
+    layer_group_names: list[str],
+    epsilon: float = 0.01,
+    steps: int = 5,
+) -> tuple[float, dict[str, float]]:
+    """SAM-style sharpness: max_{||δ||≤ε} L(θ+δ) − L(θ) via PGD."""
+    net.eval()
+    with torch.no_grad():
+        logits_base = net(inp_t).float()
+        loss_base = F.cross_entropy(logits_base.reshape(-1, vocab_size), tgt_t.reshape(-1)).item()
+
+    net.train()
+    delta = {k: torch.zeros_like(v, requires_grad=True) for k, v in sd_base.items() if v.is_floating_point()}
+    step_size = epsilon / steps * 2
+
+    for _ in range(steps):
+        perturbed = {k: sd_base[k] + delta[k] if k in delta else sd_base[k] for k in sd_base}
+        net.load_state_dict(perturbed)
+        net.zero_grad()
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            logits = net(inp_t).float()
+            loss = F.cross_entropy(logits.reshape(-1, vocab_size), tgt_t.reshape(-1))
+        grads = torch.autograd.grad(loss, list(delta.values()), retain_graph=False)
+        with torch.no_grad():
+            all_grad = torch.cat([g.view(-1) for g in grads])
+            grad_norm = all_grad.norm()
+            if grad_norm > 0:
+                for d, g in zip(delta.values(), grads):
+                    d.add_(step_size * g / grad_norm)
+            all_delta = torch.cat([d.view(-1) for d in delta.values()])
+            delta_norm = all_delta.norm()
+            if delta_norm > epsilon:
+                scale = epsilon / delta_norm
+                for d in delta.values():
+                    d.mul_(scale)
+
+    with torch.no_grad():
+        perturbed = {k: sd_base[k] + delta[k] if k in delta else sd_base[k] for k in sd_base}
+        net.load_state_dict(perturbed)
+        net.eval()
+        logits_pert = net(inp_t).float()
+        loss_pert = F.cross_entropy(logits_pert.reshape(-1, vocab_size), tgt_t.reshape(-1)).item()
+
+    global_sharpness = loss_pert - loss_base
+
+    param_to_group: dict[str, str] = {}
+    for gname, pnames in layer_groups.items():
+        for pn in pnames:
+            param_to_group[pn] = gname
+
+    per_layer: dict[str, float] = {g: 0.0 for g in layer_group_names}
+    for k, d in delta.items():
+        g = param_to_group.get(k)
+        if g:
+            per_layer[g] += d.detach().norm().item()
+
+    net.load_state_dict(sd_base)
+    return global_sharpness, per_layer
+
+
+def _hutchinson_trace(
+    net: nanoGPT,
+    param_tensors: list[torch.Tensor],
+    param_names: list[str],
+    param_to_group: dict[str, str],
+    layer_group_names: list[str],
+    inp_t: torch.Tensor,
+    tgt_t: torch.Tensor,
+    vocab_size: int,
+    n_hutchinson: int,
+) -> tuple[float, dict[str, float]]:
+    global_traces = []
+    layer_traces: dict[str, list[float]] = {g: [] for g in layer_group_names}
+
+    with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+        for _ in range(n_hutchinson):
+            net.zero_grad()
+            logits = net(inp_t).float()
+            loss = F.cross_entropy(logits.reshape(-1, vocab_size), tgt_t.reshape(-1))
+            grads = torch.autograd.grad(loss, param_tensors, create_graph=True)
+
+            v_list = [torch.randint_like(p, 0, 2).float() * 2 - 1 for p in param_tensors]
+            gv = sum((g * v).sum() for g, v in zip(grads, v_list))
+            hvp = torch.autograd.grad(gv, param_tensors, retain_graph=False)
+
+            total_trace = 0.0
+            per_group_trace: dict[str, float] = {g: 0.0 for g in layer_group_names}
+            for pn, hv, v in zip(param_names, hvp, v_list):
+                t = (hv * v).sum().item()
+                total_trace += t
+                g = param_to_group.get(pn)
+                if g:
+                    per_group_trace[g] += t
+
+            global_traces.append(total_trace)
+            for g in layer_group_names:
+                layer_traces[g].append(per_group_trace[g])
+            net.zero_grad()
+
+    return float(np.mean(global_traces)), {g: float(np.mean(layer_traces[g])) for g in layer_group_names}
 
 
 # ---------------------------------------------------------------------------
@@ -1297,9 +1687,9 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
 
         for path_key, path_label, burst_key, other_key in [
             ("pre_peak", "Pre-Burst → Peak-Burst", "pre_peak_burst", "pre_peak_other"),
-            ("rev_peak", "Reverted → Peak-Burst", "rev_peak_burst", "rev_peak_other"),
         ]:
-            fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class", "Other Classes"])
+            fig = make_subplots(rows=1, cols=3,
+                                subplot_titles=["Burst Class", "Other Classes", "Δ (Burst − Other)"])
             for sched in schedules:
                 d = ema[sched]
                 ps = d["per_seed"]
@@ -1307,6 +1697,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     continue
                 burst_mean = [float(np.mean([s[burst_key][i] for s in ps])) for i in range(len(alphas))]
                 other_mean = [float(np.mean([s[other_key][i] for s in ps])) for i in range(len(alphas))]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
                 fig.add_trace(go.Scatter(
                     x=alphas, y=burst_mean, name=sched,
                     line=dict(color=_color(sched), width=2), mode="lines+markers",
@@ -1317,13 +1708,20 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     line=dict(color=_color(sched), width=2), mode="lines+markers",
                     showlegend=False,
                 ), row=1, col=2)
+                fig.add_trace(go.Scatter(
+                    x=alphas, y=diff_mean, name=sched,
+                    line=dict(color=_color(sched), width=2), mode="lines+markers",
+                    showlegend=False,
+                ), row=1, col=3)
             fig.update_layout(
                 title=f"EMA Interpolation: {path_label} — {rn}<br>"
                       f"<sup>α=0: start model, α=1: peak burst. Sharp cliff = shallow wrapper.</sup>",
                 template="plotly_white", height=500,
             )
             fig.update_xaxes(title_text="α")
-            fig.update_yaxes(title_text="Accuracy")
+            fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
+            fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
+            fig.update_yaxes(title_text="Δ Accuracy", row=1, col=3)
             _add(f"ema_{path_key}_{rn}", f"EMA {path_label} ({rn})", fig)
 
         cliff_vals = {s: [p["cliff_pre_peak_burst"] for p in ema[s]["per_seed"]] for s in schedules}
@@ -1349,9 +1747,10 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
 
         for path_key, path_label, burst_key, other_key in [
             ("pre_peak", "Pre-Burst → Peak-Burst", "pre_peak_burst", "pre_peak_other"),
-            ("peak_rev", "Peak-Burst → Post-Reversion", "peak_rev_burst", "peak_rev_other"),
         ]:
-            fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class Loss", "Other Classes Loss"])
+            fig = make_subplots(rows=1, cols=3,
+                                subplot_titles=["Burst Class Loss", "Other Classes Loss",
+                                                "Δ (Burst − Other) Loss"])
             for sched in schedules:
                 d = lmc[sched]
                 ps = d["per_seed"]
@@ -1359,6 +1758,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     continue
                 burst_mean = [float(np.mean([s[burst_key][i] for s in ps])) for i in range(len(alphas))]
                 other_mean = [float(np.mean([s[other_key][i] for s in ps])) for i in range(len(alphas))]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
                 fig.add_trace(go.Scatter(
                     x=alphas, y=burst_mean, name=sched,
                     line=dict(color=_color(sched), width=2), mode="lines+markers",
@@ -1369,20 +1769,25 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     line=dict(color=_color(sched), width=2), mode="lines+markers",
                     showlegend=False,
                 ), row=1, col=2)
+                fig.add_trace(go.Scatter(
+                    x=alphas, y=diff_mean, name=sched,
+                    line=dict(color=_color(sched), width=2), mode="lines+markers",
+                    showlegend=False,
+                ), row=1, col=3)
             fig.update_layout(
                 title=f"LMC Loss Barrier: {path_label} — {rn}<br>"
                       f"<sup>High barrier = different basins (deep). Low = same ridge (shallow).</sup>",
                 template="plotly_white", height=500,
             )
             fig.update_xaxes(title_text="α")
-            fig.update_yaxes(title_text="Cross-Entropy Loss")
+            fig.update_yaxes(title_text="Cross-Entropy Loss", row=1, col=1)
+            fig.update_yaxes(title_text="Cross-Entropy Loss", row=1, col=2)
+            fig.update_yaxes(title_text="Δ Loss", row=1, col=3)
             _add(f"lmc_{path_key}_{rn}", f"LMC {path_label} ({rn})", fig)
 
         for barrier_key, barrier_label in [
             ("barrier_pre_peak_burst", "Pre↔Peak Burst-Class"),
             ("barrier_pre_peak_other", "Pre↔Peak Other-Class"),
-            ("barrier_peak_rev_burst", "Peak↔Rev Burst-Class"),
-            ("barrier_peak_rev_other", "Peak↔Rev Other-Class"),
         ]:
             vals = {s: [p[barrier_key] for p in lmc[s]["per_seed"]] for s in schedules}
             fig_b = go.Figure()
@@ -1409,13 +1814,15 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             ("pre_bottom", "Pre-Burst Bottom → Post-Burst Top", "pre_bottom_burst", "pre_bottom_other"),
             ("post_bottom", "Post-Burst Bottom → Pre-Burst Top", "post_bottom_burst", "post_bottom_other"),
         ]:
-            fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class", "Other Classes"])
+            fig = make_subplots(rows=1, cols=3,
+                                subplot_titles=["Burst Class", "Other Classes", "Δ (Burst − Other)"])
             for sched in schedules:
                 ps = frank[sched]["per_seed"]
                 if not ps:
                     continue
                 burst_mean = [float(np.mean([s[burst_key][i] for s in ps])) for i in range(len(cut_points))]
                 other_mean = [float(np.mean([s[other_key][i] for s in ps])) for i in range(len(cut_points))]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
                 fig.add_trace(go.Scatter(
                     x=cut_labels, y=burst_mean, name=sched,
                     line=dict(color=_color(sched), width=2), mode="lines+markers",
@@ -1426,6 +1833,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     line=dict(color=_color(sched), width=2), mode="lines+markers",
                     showlegend=False,
                 ), row=1, col=2)
+                fig.add_trace(go.Scatter(
+                    x=cut_labels, y=diff_mean, name=sched,
+                    line=dict(color=_color(sched), width=2), mode="lines+markers",
+                    showlegend=False,
+                ), row=1, col=3)
             fig.update_layout(
                 title=f"Frankenstein: {dir_label} — {rn}<br>"
                       "<sup>Cut point = last block from bottom model. "
@@ -1433,8 +1845,63 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 template="plotly_white", height=500,
             )
             fig.update_xaxes(title_text="Last Block from Bottom Model")
-            fig.update_yaxes(title_text="Accuracy")
+            fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
+            fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
+            fig.update_yaxes(title_text="Δ Accuracy", row=1, col=3)
             _add(f"frank_{direction}_{rn}", f"Frankenstein {dir_label} ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 3b: Frankenstein Localisation Gap
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        frank = results.get("frankenstein", {}).get(rn, {})
+        if not frank:
+            continue
+        schedules = sorted(frank.keys(), key=_sched_order)
+        cut_points = frank[schedules[0]]["cut_points"]
+        cut_labels = ["emb"] + [f"block {i}" for i in range(len(cut_points) - 1)]
+
+        fig_gap = go.Figure()
+        deepest_gaps: dict[str, float] = {}
+        for sched in schedules:
+            ps = frank[sched]["per_seed"]
+            if not ps:
+                continue
+            n_cuts = len(cut_points)
+            post_top_burst = [float(np.mean([s["pre_bottom_burst"][i] for s in ps])) for i in range(n_cuts)]
+            pre_top_burst = [float(np.mean([s["post_bottom_burst"][i] for s in ps])) for i in range(n_cuts)]
+            loc_gap = [pt - pb for pt, pb in zip(post_top_burst, pre_top_burst)]
+            fig_gap.add_trace(go.Scatter(
+                x=cut_labels, y=loc_gap, name=sched,
+                line=dict(color=_color(sched), width=2), mode="lines+markers",
+            ))
+            deepest_gaps[sched] = loc_gap[-1]
+
+        fig_gap.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig_gap.update_layout(
+            title=f"Frankenstein Localisation Gap — {rn}<br>"
+                  "<sup>LocGap = (pre-bottom+post-top) − (post-bottom+pre-top) burst acc. "
+                  "Positive = knowledge in later layers (wrapper). Sign-flip ≈ burst_30.</sup>",
+            xaxis_title="Split Depth",
+            yaxis_title="Localisation Gap",
+            template="plotly_white", height=500,
+        )
+        _add(f"frank_loc_gap_{rn}", f"Frankenstein Localisation Gap ({rn})", fig_gap)
+
+        fig_bar = go.Figure(go.Bar(
+            x=list(deepest_gaps.keys()),
+            y=list(deepest_gaps.values()),
+            marker_color=[_color(s) for s in deepest_gaps.keys()],
+        ))
+        fig_bar.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig_bar.update_layout(
+            title=f"Localisation Gap at Deepest Split — {rn}<br>"
+                  "<sup>Positive = wrapper (later layers). Negative = deep integration.</sup>",
+            xaxis_title="Schedule",
+            yaxis_title="LocGap (deepest split)",
+            template="plotly_white", height=500,
+        )
+        _add(f"frank_loc_gap_bar_{rn}", f"Localisation Gap Bar ({rn})", fig_bar)
 
     # ------------------------------------------------------------------
     # Section 4: Cross-Burst Frankenstein
@@ -1452,11 +1919,14 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             cut_points = pair_data["cut_points"]
             cut_labels = ["emb"] + [f"block {i}" for i in range(len(cut_points) - 1)]
 
-            fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class", "Other Classes"])
+            fig = make_subplots(rows=1, cols=3,
+                                subplot_titles=["Burst Class", "Other Classes", "Δ (Burst − Other)"])
             a_burst = [float(np.mean([s["a_bottom_burst"][i] for s in ps])) for i in range(len(cut_points))]
             a_other = [float(np.mean([s["a_bottom_other"][i] for s in ps])) for i in range(len(cut_points))]
             b_burst = [float(np.mean([s["b_bottom_burst"][i] for s in ps])) for i in range(len(cut_points))]
             b_other = [float(np.mean([s["b_bottom_other"][i] for s in ps])) for i in range(len(cut_points))]
+            a_diff = [b - o for b, o in zip(a_burst, a_other)]
+            b_diff = [b - o for b, o in zip(b_burst, b_other)]
 
             fig.add_trace(go.Scatter(x=cut_labels, y=a_burst, name=f"{sa} bottom",
                                      line=dict(color=_color(sa), width=2), mode="lines+markers"), row=1, col=1)
@@ -1468,13 +1938,21 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             fig.add_trace(go.Scatter(x=cut_labels, y=b_other, name=f"{sb} bottom",
                                      line=dict(color=_color(sb), width=2, dash="dash"), mode="lines+markers",
                                      showlegend=False), row=1, col=2)
+            fig.add_trace(go.Scatter(x=cut_labels, y=a_diff, name=f"{sa} bottom",
+                                     line=dict(color=_color(sa), width=2, dash="dot"), mode="lines+markers",
+                                     showlegend=False), row=1, col=3)
+            fig.add_trace(go.Scatter(x=cut_labels, y=b_diff, name=f"{sb} bottom",
+                                     line=dict(color=_color(sb), width=2, dash="dot"), mode="lines+markers",
+                                     showlegend=False), row=1, col=3)
             fig.update_layout(
                 title=f"Cross-Burst Frankenstein: {sa} × {sb} — {rn}<br>"
                       "<sup>Swapping layers between post-burst models of different schedules</sup>",
                 template="plotly_white", height=500,
             )
             fig.update_xaxes(title_text="Last Block from Bottom Model")
-            fig.update_yaxes(title_text="Accuracy")
+            fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
+            fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
+            fig.update_yaxes(title_text="Δ Accuracy", row=1, col=3)
             _add(f"xfrank_{pair_key}_{rn}", f"Cross-Frank {sa}×{sb} ({rn})", fig)
 
     # ------------------------------------------------------------------
@@ -1492,6 +1970,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             fig.update_layout(
                 title=f"Task Vector Transfer: {class_label} — {rn}",
                 xaxis_title="Schedule", yaxis_title="Accuracy After Transfer",
+                yaxis_range=[0, 1],
                 template="plotly_white", height=500,
             )
             _add(f"transfer_{class_key}_{rn}", f"Transfer {class_label} ({rn})", fig)
@@ -1506,13 +1985,15 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         schedules = sorted(pr.keys(), key=_sched_order)
         sparsities = pr[schedules[0]]["sparsities"]
 
-        fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class", "Other Classes"])
+        fig = make_subplots(rows=1, cols=3,
+                            subplot_titles=["Burst Class", "Other Classes", "Δ (Burst − Other)"])
         for sched in schedules:
             ps = pr[sched]["per_seed"]
             if not ps:
                 continue
             burst_mean = [float(np.mean([s["burst_accs"][i] for s in ps])) for i in range(len(sparsities))]
             other_mean = [float(np.mean([s["other_accs"][i] for s in ps])) for i in range(len(sparsities))]
+            diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
             fig.add_trace(go.Scatter(
                 x=[s * 100 for s in sparsities], y=burst_mean, name=sched,
                 line=dict(color=_color(sched), width=2), mode="lines+markers",
@@ -1522,13 +2003,20 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 line=dict(color=_color(sched), width=2), mode="lines+markers",
                 showlegend=False,
             ), row=1, col=2)
+            fig.add_trace(go.Scatter(
+                x=[s * 100 for s in sparsities], y=diff_mean, name=sched,
+                line=dict(color=_color(sched), width=2), mode="lines+markers",
+                showlegend=False,
+            ), row=1, col=3)
         fig.update_layout(
             title=f"Pruning Robustness — {rn}<br>"
                   "<sup>Robust to pruning = deep. Fragile = shallow wrapper.</sup>",
             template="plotly_white", height=500,
         )
         fig.update_xaxes(title_text="Sparsity (%)")
-        fig.update_yaxes(title_text="Accuracy")
+        fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
+        fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
+        fig.update_yaxes(title_text="Δ Accuracy", row=1, col=3)
         _add(f"pruning_{rn}", f"Pruning Robustness ({rn})", fig)
 
     # ------------------------------------------------------------------
@@ -1540,7 +2028,8 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             continue
         schedules = sorted(rl.keys(), key=_sched_order)
 
-        fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class", "Other Classes"])
+        fig = make_subplots(rows=1, cols=3,
+                            subplot_titles=["Burst Class", "Other Classes", "Δ (Burst − Other)"])
         for sched in schedules:
             ps = rl[sched]["per_seed"]
             if not ps:
@@ -1548,6 +2037,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             steps = ps[0]["steps"]
             burst_mean = [float(np.mean([s["burst_accs"][i] for s in ps])) for i in range(len(steps))]
             other_mean = [float(np.mean([s["other_accs"][i] for s in ps])) for i in range(len(steps))]
+            diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
             fig.add_trace(go.Scatter(
                 x=steps, y=burst_mean, name=sched,
                 line=dict(color=_color(sched), width=2), mode="lines+markers",
@@ -1557,13 +2047,20 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 line=dict(color=_color(sched), width=2), mode="lines+markers",
                 showlegend=False,
             ), row=1, col=2)
+            fig.add_trace(go.Scatter(
+                x=steps, y=diff_mean, name=sched,
+                line=dict(color=_color(sched), width=2), mode="lines+markers",
+                showlegend=False,
+            ), row=1, col=3)
         fig.update_layout(
             title=f"Relearning After Reversion — {rn}<br>"
                   "<sup>Fast reacquisition = shallow (pathway suppressed, not destroyed)</sup>",
             template="plotly_white", height=500,
         )
         fig.update_xaxes(title_text="Relearning Step")
-        fig.update_yaxes(title_text="Accuracy")
+        fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
+        fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
+        fig.update_yaxes(title_text="Δ Accuracy", row=1, col=3)
         _add(f"relearning_{rn}", f"Relearning ({rn})", fig)
 
         _trapz = getattr(np, "trapezoid", np.trapz)
@@ -1725,6 +2222,22 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             )
             _add(f"sharpness_global_{class_key}_{rn}", f"Sharpness {class_label} ({rn})", fig)
 
+        diff_vals = {}
+        for s in schedules:
+            ps = sharp[s].get("per_seed", [])
+            if ps:
+                diff_vals[s] = [p.get("burst_global", 0) - p.get("other_global", 0) for p in ps]
+        if diff_vals:
+            fig_diff = go.Figure()
+            _bar_with_seeds(fig_diff, list(diff_vals.keys()), diff_vals)
+            fig_diff.update_layout(
+                title=f"Sharpness Δ (Burst − Other) at Peak Burst — {rn}<br>"
+                      "<sup>Positive = burst class has sharper loss landscape than other classes</sup>",
+                xaxis_title="Schedule", yaxis_title="Δ Hessian Trace",
+                template="plotly_white", height=500,
+            )
+            _add(f"sharpness_global_diff_{rn}", f"Sharpness Δ ({rn})", fig_diff)
+
     # ------------------------------------------------------------------
     # Section 13: Critical Sharpness — Per-Layer Heatmap
     # ------------------------------------------------------------------
@@ -1766,6 +2279,32 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             )
             _add(f"sharpness_layer_{class_key}_{rn}", f"Per-Layer Sharpness {class_label} ({rn})", fig)
 
+        z_diff = []
+        for sched in schedules:
+            ps = sharp[sched].get("per_seed", [])
+            if not ps:
+                z_diff.append([float("nan")] * len(layer_group_names))
+                continue
+            row = []
+            for lg in layer_group_names:
+                burst_v = float(np.mean([p["burst_layers"].get(lg, 0) for p in ps]))
+                other_v = float(np.mean([p["other_layers"].get(lg, 0) for p in ps]))
+                row.append(burst_v - other_v)
+            z_diff.append(row)
+
+        fig_hm_diff = go.Figure(go.Heatmap(
+            z=z_diff, x=layer_group_names, y=schedules,
+            colorscale="RdBu_r", zmid=0,
+            colorbar=dict(title="Δ Hessian Trace"),
+        ))
+        fig_hm_diff.update_layout(
+            title=f"Per-Layer Sharpness Δ (Burst − Other) — {rn}<br>"
+                  "<sup>Red = burst sharper; Blue = other sharper</sup>",
+            xaxis_title="Layer Group", yaxis_title="Schedule",
+            template="plotly_white", height=500,
+        )
+        _add(f"sharpness_layer_diff_{rn}", f"Per-Layer Sharpness Δ ({rn})", fig_hm_diff)
+
         for class_key, class_label in [("burst_layers", "Burst Class"), ("other_layers", "Other Classes")]:
             fig = go.Figure()
             for sched in schedules:
@@ -1784,6 +2323,26 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 template="plotly_white", height=500,
             )
             _add(f"sharpness_profile_{class_key}_{rn}", f"Sharpness Profile {class_label} ({rn})", fig)
+
+        fig_diff = go.Figure()
+        for sched in schedules:
+            ps = sharp[sched].get("per_seed", [])
+            if not ps:
+                continue
+            burst_means = [float(np.mean([p["burst_layers"].get(lg, 0) for p in ps])) for lg in layer_group_names]
+            other_means = [float(np.mean([p["other_layers"].get(lg, 0) for p in ps])) for lg in layer_group_names]
+            diff_means = [b - o for b, o in zip(burst_means, other_means)]
+            fig_diff.add_trace(go.Scatter(
+                x=layer_group_names, y=diff_means, name=sched,
+                line=dict(color=_color(sched), width=2), mode="lines+markers",
+            ))
+        fig_diff.update_layout(
+            title=f"Per-Layer Sharpness Δ (Burst − Other) — {rn}<br>"
+                  "<sup>Positive = burst class has sharper curvature at that layer</sup>",
+            xaxis_title="Layer Group", yaxis_title="Δ Hessian Trace",
+            template="plotly_white", height=500,
+        )
+        _add(f"sharpness_profile_diff_{rn}", f"Sharpness Profile Δ ({rn})", fig_diff)
 
     # ------------------------------------------------------------------
     # Section 14: Cross-Run Burst Position Comparison
@@ -2011,28 +2570,191 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             _add(f"grad_attribution_final_{rn}", f"Grad Attribution Final ({rn})", fig)
 
     # ------------------------------------------------------------------
-    # Section 20: Forgetting Gradient Alignment
+    # Section 20: Forgetting Gradient Alignment (global + projected + per-layer)
     # ------------------------------------------------------------------
     for rn in run_names:
         fga = results.get("forgetting_grad_alignment", {}).get(rn, {})
         if not fga:
             continue
         schedules = sorted(fga.keys(), key=_sched_order)
-        vals = {s: fga[s]["per_seed"] for s in schedules if fga.get(s) and fga[s].get("per_seed")}
-        if not vals:
+
+        global_vals = {}
+        projected_vals = {}
+        for s in schedules:
+            ps = fga.get(s, {}).get("per_seed", [])
+            if ps and isinstance(ps[0], dict):
+                global_vals[s] = [p["global_cos"] for p in ps]
+                projected_vals[s] = [p["projected_cos"] for p in ps]
+            elif ps:
+                global_vals[s] = ps
+
+        if global_vals:
+            fig = make_subplots(rows=1, cols=2, subplot_titles=["Global Cosine", "Projected (top-k SVD)"])
+            _bar_with_seeds(fig, list(global_vals.keys()), global_vals, row=1, col=1)
+            if projected_vals:
+                _bar_with_seeds(fig, list(projected_vals.keys()), projected_vals, row=1, col=2)
+            fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+            fig.update_layout(
+                title=f"Forgetting Gradient Alignment at Peak Burst — {rn}<br>"
+                      "<sup>Left: raw cosine (curse of dimensionality → ~0). "
+                      "Right: projected onto top-k SVD of τ.</sup>",
+                template="plotly_white", height=500,
+            )
+            _add(f"forgetting_grad_alignment_{rn}", f"Forgetting Grad Alignment ({rn})", fig)
+
+        layer_group_names = fga.get(schedules[0], {}).get("layer_group_names", [])
+        ps0 = fga.get(schedules[0], {}).get("per_seed", [])
+        if layer_group_names and ps0 and isinstance(ps0[0], dict) and "per_layer_projected_cos" in ps0[0]:
+            fig_heat = go.Figure()
+            z_data = []
+            for s in schedules:
+                ps = fga[s]["per_seed"]
+                row = [float(np.mean([p["per_layer_projected_cos"].get(g, 0) for p in ps]))
+                       for g in layer_group_names]
+                z_data.append(row)
+            fig_heat.add_trace(go.Heatmap(
+                z=z_data, x=layer_group_names, y=schedules,
+                colorscale="RdBu", zmid=0,
+                colorbar=dict(title="Projected Cosine"),
+            ))
+            fig_heat.update_layout(
+                title=f"Per-Layer Forgetting Grad Alignment (Projected) — {rn}",
+                xaxis_title="Layer Group", yaxis_title="Schedule",
+                template="plotly_white", height=500,
+            )
+            _add(f"fga_per_layer_{rn}", f"Per-Layer Grad Alignment ({rn})", fig_heat)
+
+    # ------------------------------------------------------------------
+    # Section 21: Per-Layer Weight Drift Heatmap
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        wdpl = results.get("weight_drift_per_layer", {}).get(rn, {})
+        if not wdpl:
             continue
-        fig = go.Figure()
-        _bar_with_seeds(fig, list(vals.keys()), vals)
-        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+        schedules = sorted(wdpl.keys(), key=_sched_order)
+        layer_group_names = wdpl[schedules[0]].get("layer_group_names", [])
+        if not layer_group_names:
+            continue
+
+        z_data = []
+        for s in schedules:
+            ps = wdpl[s]["per_seed"]
+            row = [float(np.mean([p["per_layer"].get(g, 0) for p in ps])) for g in layer_group_names]
+            z_data.append(row)
+
+        fig = go.Figure(go.Heatmap(
+            z=z_data, x=layer_group_names, y=schedules,
+            colorscale="YlOrRd",
+            colorbar=dict(title="||ΔW||_F"),
+        ))
         fig.update_layout(
-            title=f"Forgetting Gradient Alignment at Peak Burst — {rn}<br>"
-                  "<sup>cos(grad_other(theta_peak), theta_pre - theta_peak). "
-                  "Positive: other-class gradient actively reverts burst modification. "
-                  "Near zero: burst lives in orthogonal subspace.</sup>",
-            xaxis_title="Schedule", yaxis_title="Cosine Alignment",
+            title=f"Per-Layer Weight Drift — {rn}<br>"
+                  "<sup>||θ_peak − θ_pre||_F per layer group. "
+                  "Wrapper → change concentrated in later layers for high burst.</sup>",
+            xaxis_title="Layer Group", yaxis_title="Schedule",
             template="plotly_white", height=500,
         )
-        _add(f"forgetting_grad_alignment_{rn}", f"Forgetting Grad Alignment ({rn})", fig)
+        _add(f"weight_drift_per_layer_{rn}", f"Per-Layer Weight Drift ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 22: Effective Rank of ΔW Per Layer
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        erpl = results.get("effective_rank_per_layer", {}).get(rn, {})
+        if not erpl:
+            continue
+        schedules = sorted(erpl.keys(), key=_sched_order)
+        layer_group_names = erpl[schedules[0]].get("layer_group_names", [])
+        if not layer_group_names:
+            continue
+
+        z_data = []
+        for s in schedules:
+            ps = erpl[s]["per_seed"]
+            row = [float(np.mean([p["per_layer"].get(g, 0) for p in ps])) for g in layer_group_names]
+            z_data.append(row)
+
+        fig = go.Figure(go.Heatmap(
+            z=z_data, x=layer_group_names, y=schedules,
+            colorscale="Viridis",
+            colorbar=dict(title="Effective Rank"),
+        ))
+        fig.update_layout(
+            title=f"Effective Rank of ΔW Per Layer — {rn}<br>"
+                  "<sup>exp(H(σ/Σσ)). Low rank in later layers for high burst = wrapper.</sup>",
+            xaxis_title="Layer Group", yaxis_title="Schedule",
+            template="plotly_white", height=500,
+        )
+        _add(f"effective_rank_per_layer_{rn}", f"Effective Rank ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 23: CKA Per Layer
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        cka = results.get("cka_per_layer", {}).get(rn, {})
+        if not cka:
+            continue
+        schedules = sorted(cka.keys(), key=_sched_order)
+        layer_names = cka[schedules[0]].get("layer_names", [])
+        if not layer_names:
+            continue
+
+        z_data = []
+        for s in schedules:
+            ps = cka[s]["per_seed"]
+            row = [float(np.mean([p["per_layer"].get(g, 1.0) for p in ps])) for g in layer_names]
+            z_data.append(row)
+
+        fig = go.Figure(go.Heatmap(
+            z=z_data, x=layer_names, y=schedules,
+            colorscale="RdYlGn", zmin=0, zmax=1,
+            colorbar=dict(title="CKA"),
+        ))
+        fig.update_layout(
+            title=f"CKA (Pre vs Peak) Per Layer — {rn}<br>"
+                  "<sup>CKA≈1: representations unchanged. CKA<1: representations changed. "
+                  "burst_100 should show CKA<1 only in later layers.</sup>",
+            xaxis_title="Layer", yaxis_title="Schedule",
+            template="plotly_white", height=500,
+        )
+        _add(f"cka_per_layer_{rn}", f"CKA Per Layer ({rn})", fig)
+
+    # ------------------------------------------------------------------
+    # Section 24: Directional Pruning (top-k SVD of ΔW)
+    # ------------------------------------------------------------------
+    for rn in run_names:
+        dp = results.get("directional_pruning", {}).get(rn, {})
+        if not dp:
+            continue
+        schedules = sorted(dp.keys(), key=_sched_order)
+        svd_ks = dp[schedules[0]]["svd_ks"]
+
+        fig = make_subplots(rows=1, cols=2,
+                            subplot_titles=["Burst Accuracy", "Other Accuracy"])
+        for sched in schedules:
+            ps = dp[sched]["per_seed"]
+            if not ps:
+                continue
+            burst_mean = [float(np.mean([s["burst_accs"][i] for s in ps])) for i in range(len(svd_ks))]
+            other_mean = [float(np.mean([s["other_accs"][i] for s in ps])) for i in range(len(svd_ks))]
+            fig.add_trace(go.Scatter(
+                x=svd_ks, y=burst_mean, name=sched,
+                line=dict(color=_color(sched), width=2), mode="lines+markers",
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=svd_ks, y=other_mean, name=sched,
+                line=dict(color=_color(sched), width=2), mode="lines+markers",
+                showlegend=False,
+            ), row=1, col=2)
+        fig.update_layout(
+            title=f"Directional Pruning (Remove Top-k SVD of ΔW) — {rn}<br>"
+                  "<sup>If wrapper: burst_100 loses accuracy at small k. "
+                  "burst_20 needs many more components removed.</sup>",
+            template="plotly_white", height=500,
+        )
+        fig.update_xaxes(title_text="k (SVD components removed)")
+        fig.update_yaxes(title_text="Accuracy", range=[0, 1])
+        _add(f"directional_pruning_{rn}", f"Directional Pruning ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Assemble HTML
@@ -2085,6 +2807,10 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         f.write("".join(html_parts))
     print(f"\nDashboard saved: {html_path}", flush=True)
     print(f"Charts saved: {charts_dir}", flush=True)
+
+    from burst.plot_utils import write_text_report
+    write_text_report(all_figs, out_dir / "dashboard.txt",
+                      dashboard_title="Unified Burstiness Analysis Dashboard")
 
 
 # ---------------------------------------------------------------------------
@@ -2520,6 +3246,10 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path):
     print(f"Extended metrics dashboard saved: {html_path}", flush=True)
     print(f"PNG charts saved: {charts_dir}", flush=True)
 
+    from burst.plot_utils import write_text_report
+    write_text_report(all_figs, out_dir / "extended_metrics.txt",
+                      dashboard_title="Extended Metrics Dashboard")
+
 
 # ---------------------------------------------------------------------------
 # Main pipeline
@@ -2621,6 +3351,8 @@ def analyse_run(
         "ema_dual", "lmc_dual", "frankenstein", "cross_frankenstein",
         "transfer_dual", "pruning_dual", "trajectory_dim", "relearning_dual",
         "sharpness", "forgetting_grad_alignment",
+        "weight_drift_per_layer", "effective_rank_per_layer",
+        "cka_per_layer", "directional_pruning",
     ))
 
     if not ckpt_root.exists():
@@ -2686,7 +3418,27 @@ def analyse_run(
     if ANALYSIS_METRICS.get("forgetting_grad_alignment", True):
         print("\n[18/18] Forgetting gradient alignment at peak burst...", flush=True)
         result["forgetting_grad_alignment"] = compute_forgetting_grad_alignment(
-            preloaded, other_sub, n_seeds=n_seeds)
+            preloaded, other_sub, n_layer=n_layer, n_seeds=n_seeds)
+
+    if ANALYSIS_METRICS.get("weight_drift_per_layer", True):
+        print("\n[19/24] Per-layer weight drift decomposition...", flush=True)
+        result["weight_drift_per_layer"] = compute_weight_drift_per_layer(
+            preloaded, n_layer=n_layer, n_seeds=n_seeds)
+
+    if ANALYSIS_METRICS.get("effective_rank_per_layer", True):
+        print("\n[20/24] Effective rank of ΔW per layer...", flush=True)
+        result["effective_rank_per_layer"] = compute_effective_rank_per_layer(
+            preloaded, n_layer=n_layer, n_seeds=n_seeds)
+
+    if ANALYSIS_METRICS.get("cka_per_layer", True):
+        print("\n[21/24] CKA between pre and post checkpoints per layer...", flush=True)
+        result["cka_per_layer"] = compute_cka_per_layer(
+            preloaded, burst_sub, n_layer=n_layer, n_seeds=n_seeds)
+
+    if ANALYSIS_METRICS.get("directional_pruning", True):
+        print("\n[22/24] Directional pruning (top-k SVD of ΔW)...", flush=True)
+        result["directional_pruning"] = compute_directional_pruning(
+            preloaded, burst_sub, other_sub, prompt_len, n_seeds=n_seeds)
 
     return result
 
@@ -2701,7 +3453,7 @@ def main():
     parser.add_argument("--relearn-steps", type=int, default=50)
     parser.add_argument("--frank-seeds", type=int, default=10)
     parser.add_argument("--xfrank-seeds", type=int, default=10)
-    parser.add_argument("--n-hutchinson", type=int, default=15)
+    parser.add_argument("--n-hutchinson", type=int, default=50)
     parser.add_argument("--subsample-n", type=int, default=256)
     args = parser.parse_args()
 
