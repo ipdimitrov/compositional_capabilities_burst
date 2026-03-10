@@ -1237,56 +1237,8 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         _add_fig("relearning_auc", fig)
 
     # ------------------------------------------------------------------
-    # Chart 4: Linear Mode Connectivity
+    # Chart 4: Linear Mode Connectivity (Peak→Reverted removed — use unified_analysis for pre→peak LMC)
     # ------------------------------------------------------------------
-    for analysis in existing_analyses:
-        run_name = analysis["run_name"]
-        lmc = new_results.get("linear_mode_connectivity", {}).get(run_name, {})
-        if not lmc:
-            continue
-        schedules = sorted(lmc.keys(), key=_sched_order)
-        fig = go.Figure()
-        for sched in schedules:
-            d = lmc[sched]
-            fig.add_trace(go.Scatter(
-                x=d["alphas"], y=d["mean_loss_curve"],
-                name=sched,
-                line=dict(color=_color(sched), width=2),
-                mode="lines+markers",
-            ))
-        fig.update_layout(
-            title=f"Linear Mode Connectivity — {run_name}<br>"
-                  "<sup>α=0: peak burst model; α=1: post-reversion model. "
-                  "High barrier = different basins (deep). Low barrier = same ridge (shallow).</sup>",
-            xaxis_title="α (0 = peak burst, 1 = post-reversion)",
-            yaxis_title="Burst-class Cross-Entropy Loss",
-            legend_title="Schedule",
-            template="plotly_white", height=500,
-        )
-        _add_fig("linear_mode_connectivity", fig)
-
-    # LMC barrier bar chart
-    for analysis in existing_analyses:
-        run_name = analysis["run_name"]
-        lmc = new_results.get("linear_mode_connectivity", {}).get(run_name, {})
-        if not lmc:
-            continue
-        schedules = sorted(lmc.keys(), key=_sched_order)
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=schedules,
-            y=[lmc[s]["barrier"] for s in schedules],
-            marker_color=[_color(s) for s in schedules],
-            name=run_name,
-        ))
-        fig.update_layout(
-            title=f"LMC Barrier Height — {run_name}<br>"
-                  "<sup>Higher barrier = peak and reverted models are in different basins (deep learning)</sup>",
-            xaxis_title="Schedule",
-            yaxis_title="Loss Barrier",
-            template="plotly_white", height=500,
-        )
-        _add_fig("lmc_barrier", fig)
 
     # ------------------------------------------------------------------
     # Chart 5: Pruning Robustness
@@ -1312,6 +1264,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                   "Robust = deep; fragile = shallow wrapper.</sup>",
             xaxis_title="Weight Sparsity (%)",
             yaxis_title="Burst Accuracy",
+            yaxis_range=[0, 1],
             legend_title="Schedule",
             template="plotly_white", height=500,
         )
@@ -1759,6 +1712,11 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         f.write("".join(html_parts))
     print(f"\nDashboard saved: {html_path}", flush=True)
     print(f"Charts saved: {charts_dir}", flush=True)
+
+    from burst.plot_utils import write_text_report
+    write_text_report(all_figs, out_dir / "dashboard.txt",
+                      dashboard_title="Burstiness: 10 New Mechanistic Metrics",
+                      descriptions=_METRIC_DESCRIPTIONS)
 
 
 # ---------------------------------------------------------------------------

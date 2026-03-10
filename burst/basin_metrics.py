@@ -255,6 +255,146 @@ def compute_noise_robustness(
 
 
 # ---------------------------------------------------------------------------
+# Metric 1b: Directed Noise Robustness (along burst weight-delta)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def compute_directed_noise_robustness(
+    ckpt_root: Path,
+    all_results: list[dict],
+    burst_docs_BL: np.ndarray,
+    other_docs_BL: np.ndarray,
+    prompt_len: int,
+    n_seeds: int = 3,
+    epsilons: list[float] | None = None,
+    n_eval_docs: int = 256,
+) -> dict:
+    """Directed noise along the burst weight-delta τ = θ_peak − θ_pre.
+
+    For each epsilon, evaluates:
+      θ' = θ_peak + ε * τ/||τ||   (undo direction)
+      θ' = θ_peak + ε * r/||r||   (random orthogonal direction)
+
+    If learning is shallow, undo-direction noise kills accuracy faster than
+    random-direction noise. The ratio is the "narrowness" measure.
+    """
+    if epsilons is None:
+        epsilons = [0.0, 0.001, 0.002, 0.004, 0.006, 0.008, 0.01, 0.015, 0.02, 0.03, 0.05]
+
+    jobs_by_schedule: dict[str, list[dict]] = {}
+    for r in all_results:
+        jobs_by_schedule.setdefault(r["schedule"], []).append(r)
+
+    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+
+    n_burst = min(n_eval_docs, burst_docs_BL.shape[0])
+    burst_idx = np.random.choice(burst_docs_BL.shape[0], n_burst, replace=False)
+    burst_eval = burst_docs_BL[burst_idx]
+
+    results = {}
+
+    for sched in schedules:
+        sched_results = jobs_by_schedule[sched]
+        undo_curves: list[list[float]] = []
+        random_curves: list[list[float]] = []
+        seeds_done = 0
+
+        for r in sched_results:
+            if seeds_done >= n_seeds:
+                break
+            label = r["label"]
+            ckpt_dir = ckpt_root / label
+            if not ckpt_dir.exists():
+                continue
+            files = _ckpt_files(ckpt_dir)
+            if not files:
+                continue
+
+            T = r["config"]["total_steps"]
+            available = sorted(files.keys())
+            pre_step = available[0]
+            peak_step = min(available, key=lambda x: abs(x - (T - 1)))
+            cfg = r["config"]
+
+            sd_pre = {k: v.float() for k, v in torch.load(
+                str(files[pre_step]), map_location="cpu", weights_only=True).items()}
+            sd_peak = {k: v.float() for k, v in torch.load(
+                str(files[peak_step]), map_location="cpu", weights_only=True).items()}
+
+            tau_flat = torch.cat([(sd_peak[k] - sd_pre[k]).view(-1) for k in sd_peak])
+            tau_norm = tau_flat.norm()
+            if tau_norm < 1e-10:
+                continue
+            tau_unit = tau_flat / tau_norm
+
+            rand_dir = torch.randn_like(tau_flat)
+            rand_dir -= (rand_dir @ tau_unit) * tau_unit
+            rand_norm = rand_dir.norm()
+            if rand_norm < 1e-10:
+                continue
+            rand_unit = rand_dir / rand_norm
+
+            net = load_net(cfg, str(files[peak_step]))
+
+            undo_accs: list[float] = []
+            rand_accs: list[float] = []
+
+            for eps in epsilons:
+                if eps == 0.0:
+                    acc = _free_gen_acc(net, burst_eval, prompt_len)
+                    undo_accs.append(acc)
+                    rand_accs.append(acc)
+                    continue
+
+                sd_undo = {}
+                sd_rand = {}
+                offset = 0
+                for k in sd_peak:
+                    numel = sd_peak[k].numel()
+                    t_chunk = tau_unit[offset:offset + numel].view(sd_peak[k].shape)
+                    r_chunk = rand_unit[offset:offset + numel].view(sd_peak[k].shape)
+                    sd_undo[k] = (sd_peak[k] + eps * t_chunk).to(DEVICE)
+                    sd_rand[k] = (sd_peak[k] + eps * r_chunk).to(DEVICE)
+                    offset += numel
+
+                net.load_state_dict(sd_undo)
+                undo_accs.append(_free_gen_acc(net, burst_eval, prompt_len))
+
+                net.load_state_dict(sd_rand)
+                rand_accs.append(_free_gen_acc(net, burst_eval, prompt_len))
+
+            undo_curves.append(undo_accs)
+            random_curves.append(rand_accs)
+            seeds_done += 1
+            print(f"  {label}: undo@ε=0.01={undo_accs[epsilons.index(0.01)] if 0.01 in epsilons else '?':.3f}, "
+                  f"rand@ε=0.01={rand_accs[epsilons.index(0.01)] if 0.01 in epsilons else '?':.3f}", flush=True)
+
+        if undo_curves:
+            mean_undo = [float(np.mean([c[i] for c in undo_curves])) for i in range(len(epsilons))]
+            mean_rand = [float(np.mean([c[i] for c in random_curves])) for i in range(len(epsilons))]
+            narrowness = []
+            for u, r in zip(mean_undo, mean_rand):
+                base = mean_undo[0] if mean_undo[0] > 0 else 1.0
+                drop_u = base - u
+                drop_r = base - r
+                narrowness.append(drop_u / (drop_r + 1e-10) if drop_r > 1e-10 else 0.0)
+        else:
+            mean_undo = mean_rand = [float("nan")] * len(epsilons)
+            narrowness = [float("nan")] * len(epsilons)
+
+        results[sched] = {
+            "epsilons": epsilons,
+            "mean_undo_accs": mean_undo,
+            "mean_random_accs": mean_rand,
+            "narrowness_ratio": narrowness,
+            "undo_curves": undo_curves,
+            "random_curves": random_curves,
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Metric 2: Weight Drift vs Forgetting Correlation
 # ---------------------------------------------------------------------------
 
@@ -496,8 +636,8 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         if nr:
             schedules = sorted(nr.keys(), key=_sched_order)
 
-            # Burst accuracy vs sigma
-            fig = go.Figure()
+            # Burst accuracy vs sigma (with burst−other difference on secondary axis)
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
             for sched in schedules:
                 d = nr[sched]
                 fig.add_trace(go.Scatter(
@@ -506,21 +646,33 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     line=dict(color=_color(sched), width=2),
                     mode="lines+markers",
                     error_y=dict(array=d["std_burst_accs"], visible=True, thickness=1),
-                ))
+                ), secondary_y=False)
+                diff = [b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"])]
+                diff_std = [float(np.sqrt(sb**2 + so**2))
+                            for sb, so in zip(d["std_burst_accs"], d["std_other_accs"])]
+                fig.add_trace(go.Scatter(
+                    x=d["sigmas"], y=diff,
+                    name=f"{sched} Δ(burst−other)",
+                    line=dict(color=_color(sched), width=2, dash="dot"),
+                    mode="lines+markers",
+                    error_y=dict(array=diff_std, visible=True, thickness=1),
+                    legendgroup=sched,
+                ), secondary_y=True)
             fig.add_vline(x=0.004, line_dash="dash", line_color="gray",
                           annotation_text="σ=0.004 (Kim et al. safety threshold)")
             fig.update_layout(
                 title=f"Burst Accuracy Under Gaussian Weight Noise — {run_name}<br>"
-                      "<sup>Bursty models should lose burst accuracy at smaller σ (narrower basin)</sup>",
+                      "<sup>Solid: burst acc. Dotted: Δ(burst−other) with CI on secondary axis</sup>",
                 xaxis_title="Noise σ",
-                yaxis_title="Burst Accuracy",
                 legend_title="Schedule",
                 template="plotly_white", height=500,
             )
+            fig.update_yaxes(title_text="Burst Accuracy", secondary_y=False)
+            fig.update_yaxes(title_text="Δ(Burst − Other)", secondary_y=True)
             _add(f"noise_burst_{run_name}", fig)
 
-            # Other accuracy vs sigma (should be robust across all schedules)
-            fig = go.Figure()
+            # Other accuracy vs sigma (with burst−other difference on secondary axis)
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
             for sched in schedules:
                 d = nr[sched]
                 fig.add_trace(go.Scatter(
@@ -528,17 +680,30 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     name=sched,
                     line=dict(color=_color(sched), width=2),
                     mode="lines+markers",
-                ))
+                    error_y=dict(array=d["std_other_accs"], visible=True, thickness=1),
+                ), secondary_y=False)
+                diff = [b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"])]
+                diff_std = [float(np.sqrt(sb**2 + so**2))
+                            for sb, so in zip(d["std_burst_accs"], d["std_other_accs"])]
+                fig.add_trace(go.Scatter(
+                    x=d["sigmas"], y=diff,
+                    name=f"{sched} Δ(burst−other)",
+                    line=dict(color=_color(sched), width=2, dash="dot"),
+                    mode="lines+markers",
+                    error_y=dict(array=diff_std, visible=True, thickness=1),
+                    legendgroup=sched,
+                ), secondary_y=True)
             fig.add_vline(x=0.004, line_dash="dash", line_color="gray",
                           annotation_text="σ=0.004")
             fig.update_layout(
                 title=f"Other-Class Accuracy Under Gaussian Weight Noise — {run_name}<br>"
-                      "<sup>Should be more robust than burst accuracy (wider basin)</sup>",
+                      "<sup>Solid: other acc. Dotted: Δ(burst−other) with CI on secondary axis</sup>",
                 xaxis_title="Noise σ",
-                yaxis_title="Other-Class Accuracy",
                 legend_title="Schedule",
                 template="plotly_white", height=500,
             )
+            fig.update_yaxes(title_text="Other-Class Accuracy", secondary_y=False)
+            fig.update_yaxes(title_text="Δ(Burst − Other)", secondary_y=True)
             _add(f"noise_other_{run_name}", fig)
 
             # Differential sensitivity: burst drop / other drop at σ=0.004
@@ -548,20 +713,62 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                                for s in schedules]
                 other_drops = [nr[s]["mean_other_accs"][0] - nr[s]["mean_other_accs"][sigma_idx]
                                for s in schedules]
-                fig = make_subplots(rows=1, cols=2,
-                                    subplot_titles=["Burst Accuracy Drop at σ=0.004",
-                                                    "Other Accuracy Drop at σ=0.004"])
+                diff_drops = [b - o for b, o in zip(burst_drops, other_drops)]
+                fig = make_subplots(rows=1, cols=3,
+                                    subplot_titles=["Burst Accuracy Drop",
+                                                    "Other Accuracy Drop",
+                                                    "Δ(Burst − Other) Drop"])
                 colors = [_color(s) for s in schedules]
                 fig.add_trace(go.Bar(x=schedules, y=burst_drops,
                                      marker_color=colors, showlegend=False), row=1, col=1)
                 fig.add_trace(go.Bar(x=schedules, y=other_drops,
                                      marker_color=colors, showlegend=False), row=1, col=2)
+                fig.add_trace(go.Bar(x=schedules, y=diff_drops,
+                                     marker_color=colors, showlegend=False), row=1, col=3)
                 fig.update_layout(
                     title=f"Differential Noise Sensitivity at σ=0.004 — {run_name}<br>"
-                          "<sup>Larger burst drop = narrower burst basin (shallower learning)</sup>",
+                          "<sup>Larger burst drop = narrower burst basin. "
+                          "Right panel: burst drop minus other drop.</sup>",
                     template="plotly_white", height=500,
                 )
                 _add(f"noise_differential_{run_name}", fig)
+
+        # ------------------------------------------------------------------
+        # Metric 1b: Directed Noise Robustness
+        # ------------------------------------------------------------------
+        dn = run_data.get("directed_noise", {})
+        if dn:
+            schedules = sorted(dn.keys(), key=_sched_order)
+            fig = make_subplots(rows=1, cols=2,
+                                subplot_titles=["Undo vs Random Direction", "Narrowness Ratio"])
+            for sched in schedules:
+                d = dn[sched]
+                fig.add_trace(go.Scatter(
+                    x=d["epsilons"], y=d["mean_undo_accs"],
+                    name=f"{sched} undo", line=dict(color=_color(sched), width=2),
+                    mode="lines+markers",
+                ), row=1, col=1)
+                fig.add_trace(go.Scatter(
+                    x=d["epsilons"], y=d["mean_random_accs"],
+                    name=f"{sched} random", line=dict(color=_color(sched), width=2, dash="dot"),
+                    mode="lines+markers", showlegend=False,
+                ), row=1, col=1)
+                fig.add_trace(go.Scatter(
+                    x=d["epsilons"], y=d["narrowness_ratio"],
+                    name=sched, line=dict(color=_color(sched), width=2),
+                    mode="lines+markers", showlegend=False,
+                ), row=1, col=2)
+            fig.update_layout(
+                title=f"Directed Noise: Undo vs Random — {run_name}<br>"
+                      "<sup>Solid: undo direction. Dotted: random orthogonal. "
+                      "Ratio > 1 = narrow/shallow basin.</sup>",
+                template="plotly_white", height=500,
+            )
+            fig.update_xaxes(title_text="ε", row=1, col=1)
+            fig.update_xaxes(title_text="ε", row=1, col=2)
+            fig.update_yaxes(title_text="Burst Accuracy", row=1, col=1)
+            fig.update_yaxes(title_text="Narrowness (undo_drop / rand_drop)", row=1, col=2)
+            _add(f"directed_noise_{run_name}", fig)
 
         # ------------------------------------------------------------------
         # Metric 2: Weight Drift Correlation
@@ -620,18 +827,22 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             # Sharpness comparison: burst vs other per schedule
             burst_sharpness = [ls[s]["burst_sharpness"] for s in schedules]
             other_sharpness = [ls[s]["other_sharpness"] for s in schedules]
-            fig = make_subplots(rows=1, cols=2,
+            diff_sharpness = [b - o for b, o in zip(burst_sharpness, other_sharpness)]
+            fig = make_subplots(rows=1, cols=3,
                                 subplot_titles=["Burst Prompt Sharpness",
-                                                "Other Prompt Sharpness"])
+                                                "Other Prompt Sharpness",
+                                                "Δ(Burst − Other) Sharpness"])
             colors = [_color(s) for s in schedules]
             fig.add_trace(go.Bar(x=schedules, y=burst_sharpness,
                                  marker_color=colors, showlegend=False), row=1, col=1)
             fig.add_trace(go.Bar(x=schedules, y=other_sharpness,
                                  marker_color=colors, showlegend=False), row=1, col=2)
+            fig.add_trace(go.Bar(x=schedules, y=diff_sharpness,
+                                 marker_color=colors, showlegend=False), row=1, col=3)
             fig.update_layout(
                 title=f"Loss Surface Sharpness at Peak Burst — {run_name}<br>"
                       "<sup>max(loss) − centre(loss) over ±{:.3f} perturbation range. "
-                      "Higher = narrower basin.</sup>".format(SURFACE_RANGE),
+                      "Higher = narrower basin. Right: burst − other.</sup>".format(SURFACE_RANGE),
                 template="plotly_white", height=500,
             )
             _add(f"loss_surface_sharpness_{run_name}", fig)
@@ -643,6 +854,19 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 alphas = d["alphas"]
                 betas = d["betas"]
 
+                burst_arr = np.array(d["mean_burst_surface"])
+                other_arr = np.array(d["mean_other_surface"])
+                burst_span = float(np.nanmax(burst_arr) - np.nanmin(burst_arr))
+                other_span = float(np.nanmax(other_arr) - np.nanmin(other_arr))
+                shared_span = max(burst_span, other_span)
+
+                burst_mid = (float(np.nanmax(burst_arr)) + float(np.nanmin(burst_arr))) / 2
+                other_mid = (float(np.nanmax(other_arr)) + float(np.nanmin(other_arr))) / 2
+                burst_zmin = burst_mid - shared_span / 2
+                burst_zmax = burst_mid + shared_span / 2
+                other_zmin = other_mid - shared_span / 2
+                other_zmax = other_mid + shared_span / 2
+
                 fig = make_subplots(
                     rows=1, cols=2,
                     subplot_titles=["Burst Prompts", "Other Prompts"],
@@ -651,18 +875,20 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     z=d["mean_burst_surface"],
                     x=alphas, y=betas,
                     colorscale="Viridis",
+                    zmin=burst_zmin, zmax=burst_zmax,
                     colorbar=dict(title="CE Loss", x=0.45),
                 ), row=1, col=1)
                 fig.add_trace(go.Heatmap(
                     z=d["mean_other_surface"],
                     x=alphas, y=betas,
                     colorscale="Viridis",
+                    zmin=other_zmin, zmax=other_zmax,
                     colorbar=dict(title="CE Loss", x=1.0),
                 ), row=1, col=2)
                 fig.update_layout(
                     title=f"Loss Surface at Peak Burst — {run_name} / {sched}<br>"
                           "<sup>Filter-normalised 2D slice (Li et al. 2018). "
-                          "Narrow = fragile basin.</sup>",
+                          "Narrow = fragile basin. Both subplots share the same colour span.</sup>",
                     template="plotly_white", height=500,
                 )
                 _add(f"loss_surface_2d_{run_name}_{sched}", fig)
@@ -707,6 +933,10 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
     with open(html_path, "w") as f:
         f.write("".join(html_parts))
     print(f"\nDashboard saved: {html_path}", flush=True)
+
+    from burst.plot_utils import write_text_report
+    write_text_report(all_figs, out_dir / "dashboard.txt",
+                      dashboard_title="Basin Geometry Metrics (Kim et al. 2025)")
 
 
 # ---------------------------------------------------------------------------
@@ -755,7 +985,13 @@ def analyse_run(
         n_seeds=n_seeds, sigmas=noise_sigmas,
     )
 
-    print("\n[2/3] Weight drift vs forgetting correlation...", flush=True)
+    print("\n[1b/4] Directed noise robustness (undo vs random direction)...", flush=True)
+    result["directed_noise"] = compute_directed_noise_robustness(
+        ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len,
+        n_seeds=n_seeds,
+    )
+
+    print("\n[2/4] Weight drift vs forgetting correlation...", flush=True)
     result["weight_drift"] = compute_weight_drift_correlation(
         ckpt_root, all_results, n_seeds=None,
     )
