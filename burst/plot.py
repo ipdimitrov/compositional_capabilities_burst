@@ -19,7 +19,7 @@ from burst.config import (
     PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION,
     ordered_schedules, sched_sort_key,
     TrainConfig, reversion_life_key, reversion_life_label,
-    parse_run_config, burst_steps_for_schedule, BURST_BASE_STEPS,
+    parse_run_config, burst_steps_for_mode, BURST_BASE_STEPS, MODE_CURRENT,
 )
 
 W, H = 297, 210
@@ -91,7 +91,7 @@ def _schedule_bar(ax, T, U, sched, p, bs, seed, P=0):
         _bar_label(ax, P + (s + e) / 2, txt)
 
 
-def plot_lr_schedule(cfg, plots_dir, schedules=None):
+def plot_lr_schedule(cfg, plots_dir, schedules=None, burst_mode=MODE_CURRENT):
     P = cfg.get("pre_burst_steps", 0)
     U = cfg["reversion_steps"]
     warmup = cfg["warmup_iters"]
@@ -101,12 +101,12 @@ def plot_lr_schedule(cfg, plots_dir, schedules=None):
 
     fig, ax = plt.subplots(figsize=(14, 5))
     for sched in ordered_schedules(schedules):
-        T_s = burst_steps_for_schedule(sched, BURST_BASE_STEPS)
+        T_s = burst_steps_for_mode(sched, burst_mode, BURST_BASE_STEPS)
         steps, lrs = compute_lr_schedule(cfg, pretrain_steps=P, burst_steps=T_s)
         color = SCHED_COLORS.get(sched, "#1565C0")
         ax.plot(steps, lrs, color=color, lw=2, label=sched, alpha=0.85)
 
-    T_ref = burst_steps_for_schedule(schedules[0], BURST_BASE_STEPS)
+    T_ref = burst_steps_for_mode(schedules[0], burst_mode, BURST_BASE_STEPS)
     ax.axvline(P, color="black", lw=1.5, ls="--", alpha=0.6)
     ax.axvline(warmup, color="gray", lw=1, ls=":", alpha=0.4)
 
@@ -1136,7 +1136,8 @@ def main():
     plot_overlay_all_schedules(results, plots_dir, sched_data=sched_data)
 
     print("LR schedule...")
-    plot_lr_schedule(cfg["base_cfg"], plots_dir, schedules=cfg.get("schedules"))
+    plot_lr_schedule(cfg["base_cfg"], plots_dir, schedules=cfg.get("schedules"),
+                     burst_mode=cfg.get("burst_mode", MODE_CURRENT))
 
     print("Task distributions...")
     plot_task_distributions(run_dir)

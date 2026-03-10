@@ -143,6 +143,21 @@ class GpuConfig:
         by_compute = max(2, min(32, int(math.sqrt(self.tflops_bf16) * 0.6)))
         return min(by_vram, by_compute)
 
+    def train_workers_for_batch_size(self, batch_size: int, base_batch_size: int = 128) -> int:
+        """Safe worker count when batch_size exceeds the default.
+
+        Extra activation memory per worker scales roughly linearly with
+        batch_size.  We keep the same compute cap and re-check the VRAM cap
+        with the adjusted per-process footprint.
+        """
+        if self.vram_gb == 0:
+            return 1
+        extra_mb = max(0, (batch_size - base_batch_size)) * 0.1
+        per_proc_mb = CUDA_CONTEXT_MB + MODEL_PLUS_ACTS_MB + extra_mb
+        by_vram = self._cap_by_vram(int(per_proc_mb))
+        by_compute = max(4, min(64, int(math.sqrt(self.tflops_bf16))))
+        return min(by_vram, by_compute)
+
     def summary(self) -> str:
         return (
             f"GPU: {self.gpu_name}\n"

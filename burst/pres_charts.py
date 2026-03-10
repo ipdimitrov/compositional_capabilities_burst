@@ -14,7 +14,7 @@ from burst.config import (
     SCHED_COLORS as PALETTE, SCHED_DISPLAY as SCHED_SHORT,
     SCHEDULE_ORDER, ordered_schedules as _ordered,
     TrainConfig, reversion_life_key, reversion_life_label,
-    burst_steps_for_schedule as _burst_T,
+    burst_steps_for_mode as _burst_T_mode, MODE_CURRENT,
 )
 
 
@@ -68,7 +68,8 @@ def _sched_T(groups: dict) -> dict[str, int]:
 
 def _T_for(sched: str, bcfg: dict) -> int:
     """Burst length T for a schedule, using base_steps from bcfg."""
-    return _burst_T(sched, bcfg["total_steps"])
+    mode = bcfg.get("_burst_mode", MODE_CURRENT)
+    return _burst_T_mode(sched, mode, bcfg["total_steps"])
 
 
 def _style(ax, xl="", yl="", t=""):
@@ -83,7 +84,7 @@ def _style(ax, xl="", yl="", t=""):
 
 
 def schedule_bars(pdir, results, cfg):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U, bs, p = bcfg["reversion_steps"], bcfg["batch_size"], bcfg["p_target"]
     groups = _group(results)
@@ -126,7 +127,7 @@ def schedule_bars(pdir, results, cfg):
 
 def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left",
             groups=None, align="absolute"):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
     if groups is None:
@@ -186,7 +187,7 @@ def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left",
 
 
 def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0, groups=None):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     if groups is None:
         groups = _group(results)
@@ -268,19 +269,19 @@ def auc_diff(pdir, results, cfg, groups=None):
 
 
 def lr_schedule(pdir, cfg):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
     schedules = cfg.get("schedules", list(SCHEDULE_ORDER))
 
     fig, ax = plt.subplots(figsize=(14, 5))
     for sched in _ordered(schedules):
-        T_s = _burst_T(sched)
+        T_s = _T_for(sched, bcfg)
         steps, lrs = _compute_lr(bcfg, pretrain_steps=P, burst_steps=T_s)
         ax.plot(steps, lrs, color=PALETTE.get(sched, "#1565C0"), lw=2.5,
                 label=SCHED_SHORT.get(sched, sched), alpha=0.85)
 
-    T_ref = _burst_T(schedules[0])
+    T_ref = _T_for(schedules[0], bcfg)
     ax.axvline(P, color="black", lw=1.5, ls="--", alpha=0.6)
     ylim = ax.get_ylim()
     ax.text(P * 0.5, ylim[1] * 0.92, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
@@ -301,7 +302,7 @@ def lr_schedule(pdir, cfg):
 
 
 def reversion_zoom(pdir, results, cfg, groups=None, fname="reversion_zoom.png"):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
     if groups is None:
@@ -341,7 +342,7 @@ def reversion_zoom(pdir, results, cfg, groups=None, fname="reversion_zoom.png"):
 
 
 def summary_table(pdir, results, cfg, groups=None):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     if groups is None:
         groups = _group(results)
@@ -396,7 +397,7 @@ def summary_table(pdir, results, cfg, groups=None):
 
 
 def per_sched(pdir, results, cfg, groups=None, align="absolute"):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
     if groups is None:
@@ -470,7 +471,7 @@ def _interp_gs(gs_groups, scheds, key="burst_vs_other"):
 
 
 def grad_cosine_sim_overlay(pdir, cfg, gs_records):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
@@ -508,7 +509,7 @@ def grad_cosine_sim_overlay(pdir, cfg, gs_records):
 
 
 def grad_cosine_sim_by_schedule(pdir, cfg, gs_records):
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
     if not scheds:
@@ -558,7 +559,7 @@ def grad_cosine_sim_by_schedule(pdir, cfg, gs_records):
 
 def grad_cosine_per_seed(pdir, cfg, gs_records):
     """Individual seed traces for each schedule — shows variance."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
@@ -592,7 +593,7 @@ def grad_cosine_per_seed(pdir, cfg, gs_records):
 
 def grad_cosine_rate_of_change(pdir, cfg, gs_records):
     """Derivative of cosine similarity over time — shows where alignment shifts fastest."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
@@ -630,7 +631,7 @@ def grad_cosine_rate_of_change(pdir, cfg, gs_records):
 
 def grad_cosine_phase_comparison(pdir, cfg, gs_records):
     """Grouped bar chart: mean cosine sim during burst phase vs reversion phase, per schedule."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
     if not scheds:
@@ -683,7 +684,7 @@ def grad_cosine_phase_comparison(pdir, cfg, gs_records):
 
 def grad_cosine_vs_auc_scatter(pdir, cfg, gs_records, results):
     """Scatter: end-of-burst cosine similarity vs reversion AUC, one dot per seed x schedule."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     if not gs_records or not results:
         return None
 
@@ -740,7 +741,7 @@ def grad_cosine_vs_auc_scatter(pdir, cfg, gs_records, results):
 
 def grad_cosine_mean_over_phases_bars(pdir, cfg, gs_records):
     """Stacked-style bar: mean cosine sim at start, mid-burst, end-burst, mid-reversion, end-reversion."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
@@ -1010,7 +1011,7 @@ def _collect_pairwise_series(gs_records, scheds_grouped):
 
 def pairwise_grad_cosine_evolution_by_metric(pdir, cfg, gs_records):
     """One plot per metric, one line per schedule, error bars across seeds."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
 
     gs_groups = _group_gs(gs_records)
@@ -1064,7 +1065,7 @@ def pairwise_grad_cosine_evolution_by_metric(pdir, cfg, gs_records):
 
 def pairwise_grad_cosine_evolution_per_schedule(pdir, cfg, gs_records):
     """One subplot per schedule, each showing all metric lines over time."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
 
     gs_groups = _group_gs(gs_records)
@@ -1155,7 +1156,7 @@ def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
     if not probe_results:
         return []
 
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     T = meta["total_steps"]
     U = meta["reversion_steps"]
     n_layers = meta["n_layers"]
@@ -1221,7 +1222,7 @@ def probe_dynamics_aggregated(pdir, probe_results, meta, cfg):
     if not probe_results:
         return None
 
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     T = meta["total_steps"]
     n_layers = meta["n_layers"]
 
@@ -1383,7 +1384,7 @@ def _load_per_layer_data(gs_records) -> tuple[list[str], dict]:
 
 def grad_cosine_per_layer_overlay(pdir, cfg, gs_records):
     """One chart per schedule: all layers overlaid as lines over time."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
@@ -1424,7 +1425,7 @@ def grad_cosine_per_layer_overlay(pdir, cfg, gs_records):
 
 def grad_cosine_per_layer_all_scheds(pdir, cfg, gs_records):
     """One chart per layer: all schedules overlaid — easy cross-schedule comparison."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
@@ -1464,7 +1465,7 @@ def grad_cosine_layer_step_heatmap(pdir, cfg, gs_records):
 
     Shows how cossim evolves over time for every layer simultaneously.
     """
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return []
@@ -1522,7 +1523,7 @@ def grad_cosine_layer_schedule_heatmap(pdir, cfg, gs_records):
 
     Best for comparing which layers differ most across schedules.
     """
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
@@ -1586,7 +1587,7 @@ def grad_cosine_layer_change_heatmap(pdir, cfg, gs_records):
 
     Highlights where and when gradient alignment shifts fastest per layer.
     """
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return []
@@ -1649,7 +1650,7 @@ def grad_cosine_layer_change_heatmap(pdir, cfg, gs_records):
 
 def grad_cosine_layer_end_burst_bars(pdir, cfg, gs_records):
     """Grouped bar chart: one group per layer, bars per schedule — end-of-burst snapshot."""
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return None
@@ -1716,7 +1717,7 @@ def adl_delta_norm_overlay(pdir, cfg, adl_records):
     """Mean delta norm (summed over layers) over training steps, one line per schedule."""
     if not adl_records:
         return None
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     groups = _group_adl(adl_records)
     scheds = _ordered(groups.keys())
@@ -1754,7 +1755,7 @@ def adl_readability_overlay(pdir, cfg, adl_records):
     """Mean readability (averaged over layers and token positions) over steps."""
     if not adl_records:
         return None
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     groups = _group_adl(adl_records)
     scheds = _ordered(groups.keys())
@@ -1794,7 +1795,7 @@ def adl_causal_ablation_overlay(pdir, cfg, adl_records):
     """Mean accuracy drop from ablating the delta direction, over steps."""
     if not adl_records:
         return None
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     groups = _group_adl(adl_records)
     scheds = _ordered(groups.keys())
@@ -1833,7 +1834,7 @@ def adl_end_burst_bars(pdir, cfg, adl_records):
     """Bar chart: readability and ablation drop at end-of-burst, one bar per schedule."""
     if not adl_records:
         return None
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     groups = _group_adl(adl_records)
     scheds = _ordered(groups.keys())
 
@@ -1897,7 +1898,7 @@ def adl_readability_vs_auc(pdir, cfg, adl_records, results):
     """Scatter: end-of-burst ADL readability vs reversion AUC (one dot per seed x schedule)."""
     if not adl_records:
         return None
-    bcfg = cfg.get("base_cfg", cfg)
+    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     groups = _group_adl(adl_records)
     res_by_label = {r["label"]: r for r in results}
 
