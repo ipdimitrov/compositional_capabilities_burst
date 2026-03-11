@@ -451,7 +451,8 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
 
     Groups:
       BURST       -- all burst-class tasks pooled
-      O_F1..O_Fn  -- other-class tasks grouped by function at burst_pos
+      O_F{i}      -- other-class tasks grouped by function at burst_pos
+                     (bijection indices (burst_pos-1)*n_a+1 .. burst_pos*n_a)
       ALL_OTHER   -- all other-class tasks pooled
       ALL_DATA    -- everything pooled
     """
@@ -460,8 +461,11 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
 
     burst_pos_idx = 1 + (depth - burst_pos)
 
+    # Functions at burst_pos have bijection indices in this range
+    bp_fn_indices = list(range((burst_pos - 1) * n_a + 1, burst_pos * n_a + 1))
+
     group_docs: dict[str, list[np.ndarray]] = {"BURST": []}
-    for fi in range(1, n_a + 1):
+    for fi in bp_fn_indices:
         group_docs[f"O_F{fi}"] = []
 
     for task, docs in task_docs.items():
@@ -478,13 +482,13 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
                 group_docs[key].append(docs)
 
     other_sub_docs = []
-    for fi in range(1, n_a + 1):
+    for fi in bp_fn_indices:
         other_sub_docs.extend(group_docs[f"O_F{fi}"])
     group_docs["ALL_OTHER"] = list(other_sub_docs)
     group_docs["ALL_DATA"] = group_docs["BURST"] + group_docs["ALL_OTHER"]
 
     label_order = ["BURST"]
-    label_order += [f"O_F{fi}" for fi in range(1, n_a + 1)]
+    label_order += [f"O_F{fi}" for fi in bp_fn_indices]
     label_order += ["ALL_OTHER", "ALL_DATA"]
 
     grad_vecs = []

@@ -49,13 +49,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _burst_token_ids(cfg: dict, n_a: int) -> list[int]:
+def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     n_alphabets = cfg.get("n_alphabets", 10)
     vocab_size = cfg.get("vocab_size", 128)
     special_count = 3
     alphabet_start = special_count
     func_start = alphabet_start + n_alphabets
-    burst_func_id = func_start + n_a + 1
+    burst_func_id = func_start + n_a * depth + 1
     value_ids = list(range(alphabet_start, alphabet_start + n_alphabets))
     return [i for i in [burst_func_id] + value_ids if i < vocab_size]
 
@@ -372,6 +372,7 @@ def analyse_run(
     rc = parse_run_config(run_cfg)
     base_cfg = rc["base_cfg"]
     n_a = rc["n_a"]
+    depth = rc["depth"]
     T = base_cfg["total_steps"]
 
     with open(logs_dir / "_data.pkl", "rb") as f:
@@ -425,7 +426,7 @@ def analyse_run(
                 continue
 
             cfg = r["config"]
-            burst_ids = _burst_token_ids(cfg, n_a)
+            burst_ids = _burst_token_ids(cfg, n_a, depth)
 
             pre_step = available[0]
             peak_step = min(available, key=lambda x: abs(x - (T - 1)))

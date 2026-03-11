@@ -126,7 +126,7 @@ def schedule_bars(pdir, results, cfg):
 
 
 def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left",
-            groups=None, align="absolute"):
+            groups=None, align="absolute", clamp_01=None):
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
@@ -134,12 +134,16 @@ def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left",
         groups = _group(results)
     Ts = _sched_T(groups)
     fig, ax = plt.subplots(figsize=(14, 7))
+    all_vals_flat = []
     for sched in _ordered(groups.keys()):
         runs = groups[sched]
         T_s = Ts[sched]
         burst_end_s = P + T_s
         steps = np.array(runs[0]["log"]["step"])
-        vals = np.array([np.array(r["log"][key]) for r in runs])
+        try:
+            vals = np.array([np.array(r["log"][key]) for r in runs])
+        except (KeyError, ValueError):
+            continue
         m = np.mean(vals, axis=0)
         n_s = len(runs)
         ci = 1.96 * np.std(vals, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals, axis=0)
@@ -149,6 +153,7 @@ def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left",
             x = steps
         ax.plot(x, m, color=PALETTE[sched], lw=2.5, label=SCHED_SHORT[sched])
         ax.fill_between(x, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
+        all_vals_flat.extend(m.tolist())
 
     T_max = max(Ts.values())
     burst_end_max = P + T_max
@@ -176,7 +181,9 @@ def overlay(pdir, results, cfg, key, yl, title, fname, loc="center left",
         ax.set_xlim(0, total)
         xl = "Steps from Burst Start" if align == "start" else "Step"
 
-    ax.set_ylim(-0.05, 1.05)
+    is_acc = key.startswith("acc_") or clamp_01 is True
+    if is_acc:
+        ax.set_ylim(-0.05, 1.05)
     _style(ax, xl, yl, title)
     ax.legend(fontsize=11, loc=loc, framealpha=0.9, edgecolor="gray")
     fig.tight_layout()
@@ -1963,6 +1970,11 @@ def generate_all(run_dir, results, cfg):
                                   "Other Classes Accuracy (free generation)",
                                   f"Other Classes Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
                                   f"overlay_other{al_suffix}.png", loc="lower right", groups=gr, align=al)
+        print(f"  Training loss overlay ({al})...")
+        cp[f"overlay_loss{al_suffix}"] = overlay(pdir, results, cfg, "loss",
+                                  "Training Loss",
+                                  f"Training Loss\n(mean +/- 95% CI, n={ns} seeds)",
+                                  f"overlay_loss{al_suffix}.png", loc="upper right", groups=gr, align=al)
     print("  Reversion AUC bars...")
     cp["auc_bars"] = bar_chart(pdir, results, cfg, auc_metric,
                                "Reversion AUC (higher = slower forgetting)",

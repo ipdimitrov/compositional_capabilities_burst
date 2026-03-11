@@ -66,13 +66,13 @@ KEY_STEPS = [0, 499, 749, 999]
 # Model loading
 # ---------------------------------------------------------------------------
 
-def _burst_token_ids(cfg: dict, n_a: int) -> list[int]:
+def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     n_alphabets = cfg.get("n_alphabets", 10)
     vocab_size = cfg.get("vocab_size", 128)
     special_count = 3
     alphabet_start = special_count
     func_start = alphabet_start + n_alphabets
-    burst_func_id = func_start + n_a + 1
+    burst_func_id = func_start + n_a * depth + 1
     value_ids = list(range(alphabet_start, alphabet_start + n_alphabets))
     return [i for i in [burst_func_id] + value_ids if i < vocab_size]
 
@@ -185,6 +185,7 @@ def compute_adl_for_label(
     ckpt_dir: Path,
     cfg: dict,
     n_a: int,
+    depth: int,
     other_docs_BL: np.ndarray,
     burst_docs_BL: np.ndarray,
     prompt_len: int,
@@ -208,7 +209,7 @@ def compute_adl_for_label(
 
     pre_burst_step = steps_to_run[0]
     net_pre = load_net(cfg, str(ckpt_files[pre_burst_step]))
-    burst_ids = _burst_token_ids(cfg, n_a)
+    burst_ids = _burst_token_ids(cfg, n_a, depth)
 
     results = []
     for step in steps_to_run:
@@ -699,7 +700,7 @@ def analyse_run(
             cfg = r["config"]
 
             adl_result = compute_adl_for_label(
-                label, ckpt_dir, cfg, n_a,
+                label, ckpt_dir, cfg, n_a, depth,
                 other_docs_BL, burst_docs_BL, prompt_len,
                 n_samples=adl_n_samples,
             )
