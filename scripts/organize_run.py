@@ -1,10 +1,15 @@
 """Move heavy files (pickles, checkpoints) into _heavy/ and leave symlinks.
 
+Also mirrors results/ and logs/ into a top-level data/{results,logs,_heavy}/<run_name>/
+structure so users can download only the top-level results/ folder to get all runs.
+
 Usage: python scripts/organize_run.py <run_dir>
 
-After running, the main run directory contains only lightweight files (PNGs,
-JSONs, CSVs, PDFs, HTML) plus symlinks to the heavy originals in _heavy/.
-All existing code follows symlinks transparently.
+After running:
+  <run_dir>/                    (original, symlinks to _heavy for heavy files)
+  data/results/<run_name>/      (symlink to <run_dir>/results/)
+  data/logs/<run_name>/         (symlink to <run_dir>/logs/)
+  data/_heavy/<run_name>/       (symlink to <run_dir>/_heavy/)
 """
 import sys
 import shutil
@@ -57,6 +62,29 @@ def organize(run_dir: Path):
     )
     print(f"\n  Download folder: {light_size / 1e6:.1f} MB")
     print(f"  Heavy (excluded): {heavy_size / 1e6:.1f} MB")
+
+    _mirror_to_top_level(run_dir)
+
+
+def _mirror_to_top_level(run_dir: Path):
+    """Create top-level data/{results,logs,_heavy}/<run_name>/ symlinks.
+
+    This lets users download only data/results/ to get all run outputs.
+    """
+    data_dir = run_dir.parent
+    run_name = run_dir.name
+
+    for folder_name in ("results", "logs", "_heavy"):
+        src = run_dir / folder_name
+        if not src.exists():
+            continue
+        top_level_parent = data_dir / folder_name
+        top_level_parent.mkdir(exist_ok=True)
+        link = top_level_parent / run_name
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(src.resolve())
+        print(f"  mirrored {folder_name}/{run_name}/ -> {src}")
 
 
 if __name__ == "__main__":

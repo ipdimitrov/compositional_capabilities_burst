@@ -223,26 +223,23 @@ def _free_gen_accuracy_with_ablation(
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
-def _burst_token_ids(cfg: dict, n_a: int) -> list[int]:
+def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     """Return token IDs associated with the burst function b*.
 
-    In the vocabulary: X0..X{n_alphabets-1} are value tokens,
-    F0..F{n_a+1} are function tokens.  b* = F{n_a+1}.
-    Vocab layout (from experiment.py): PAD=0, then special tokens, then
-    alphabet tokens, then function tokens.
+    Vocab layout: X0..X{n_alphabets-1}, then F0..F{n_a*depth+1}, then specials.
+    b* = F{n_a*depth+1} (last function token, one per position × n_a + 1).
 
     We return the function token for b* plus all value tokens (X0..X9),
     since burst accuracy is measured on output value tokens.
     """
     n_alphabets = cfg.get("n_alphabets", 10)
     vocab_size = cfg.get("vocab_size", 128)
-    n_funcs = n_a + 2
 
     special_count = 3
     alphabet_start = special_count
     func_start = alphabet_start + n_alphabets
 
-    burst_func_id = func_start + n_a + 1
+    burst_func_id = func_start + n_a * depth + 1
     value_ids = list(range(alphabet_start, alphabet_start + n_alphabets))
 
     ids = [burst_func_id] + value_ids
@@ -265,6 +262,7 @@ def _worker_main():
 
     cfg = job["cfg"]
     n_a = job["n_a"]
+    depth = job["depth"]
     ckpt_path = job["ckpt_path"]
     pre_burst_ckpt = job["pre_burst_ckpt"]
     step = job["step"]
@@ -276,7 +274,7 @@ def _worker_main():
 
     delta_KTN = compute_delta_KTN(net_checkpoint, net_pre_burst, other_docs_BL, n_samples=bs)
 
-    burst_ids = _burst_token_ids(cfg, n_a)
+    burst_ids = _burst_token_ids(cfg, n_a, depth)
     readability = logit_lens_readability(net_checkpoint, delta_KTN, burst_ids)
 
     ablation = causal_ablation_accuracy(
@@ -395,6 +393,7 @@ def main():
                 "pre_burst_ckpt": pre_burst_ckpt,
                 "cfg": cfg,
                 "n_a": n_a,
+                "depth": depth,
             })
 
     if not jobs:

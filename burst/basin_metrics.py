@@ -587,16 +587,20 @@ def compute_loss_surface(
             print(f"  {label}: burst_sharpness={burst_sharpness:.4f}, "
                   f"other_sharpness={other_sharpness:.4f}", flush=True)
 
+        centre_i = grid_size // 2
         if burst_surfaces:
             mean_burst_surface = np.mean(burst_surfaces, axis=0)
             mean_other_surface = np.mean(other_surfaces, axis=0)
-            centre_i = grid_size // 2
             burst_sharpness = float(mean_burst_surface.max() - mean_burst_surface[centre_i, centre_i])
             other_sharpness = float(mean_other_surface.max() - mean_other_surface[centre_i, centre_i])
+            per_seed_burst_sharpness = [float(s.max() - s[centre_i, centre_i]) for s in burst_surfaces]
+            per_seed_other_sharpness = [float(s.max() - s[centre_i, centre_i]) for s in other_surfaces]
         else:
             mean_burst_surface = np.full((grid_size, grid_size), float("nan"))
             mean_other_surface = np.full((grid_size, grid_size), float("nan"))
             burst_sharpness = other_sharpness = float("nan")
+            per_seed_burst_sharpness = []
+            per_seed_other_sharpness = []
 
         results[sched] = {
             "alphas": alphas.tolist(),
@@ -605,6 +609,8 @@ def compute_loss_surface(
             "mean_other_surface": mean_other_surface.tolist(),
             "burst_sharpness": burst_sharpness,
             "other_sharpness": other_sharpness,
+            "per_seed_burst_sharpness": per_seed_burst_sharpness,
+            "per_seed_other_sharpness": per_seed_other_sharpness,
         }
 
     return results
@@ -636,75 +642,87 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         if nr:
             schedules = sorted(nr.keys(), key=_sched_order)
 
-            # Burst accuracy vs sigma (with burst−other difference on secondary axis)
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            # Burst accuracy vs sigma
+            fig = go.Figure()
+            fig_burst_delta = go.Figure()
             for sched in schedules:
                 d = nr[sched]
+                diff = [b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"])]
+                diff_std = [float(np.sqrt(sb**2 + so**2))
+                            for sb, so in zip(d["std_burst_accs"], d["std_other_accs"])]
                 fig.add_trace(go.Scatter(
                     x=d["sigmas"], y=d["mean_burst_accs"],
                     name=sched,
                     line=dict(color=_color(sched), width=2),
                     mode="lines+markers",
                     error_y=dict(array=d["std_burst_accs"], visible=True, thickness=1),
-                ), secondary_y=False)
-                diff = [b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"])]
-                diff_std = [float(np.sqrt(sb**2 + so**2))
-                            for sb, so in zip(d["std_burst_accs"], d["std_other_accs"])]
-                fig.add_trace(go.Scatter(
+                ))
+                fig_burst_delta.add_trace(go.Scatter(
                     x=d["sigmas"], y=diff,
-                    name=f"{sched} Δ(burst−other)",
-                    line=dict(color=_color(sched), width=2, dash="dot"),
+                    name=sched,
+                    line=dict(color=_color(sched), width=2),
                     mode="lines+markers",
                     error_y=dict(array=diff_std, visible=True, thickness=1),
-                    legendgroup=sched,
-                ), secondary_y=True)
+                ))
             fig.add_vline(x=0.004, line_dash="dash", line_color="gray",
                           annotation_text="σ=0.004 (Kim et al. safety threshold)")
             fig.update_layout(
-                title=f"Burst Accuracy Under Gaussian Weight Noise — {run_name}<br>"
-                      "<sup>Solid: burst acc. Dotted: Δ(burst−other) with CI on secondary axis</sup>",
-                xaxis_title="Noise σ",
+                title=f"Burst Accuracy Under Gaussian Weight Noise — {run_name}",
+                xaxis_title="Noise σ", yaxis_title="Burst Accuracy",
                 legend_title="Schedule",
                 template="plotly_white", height=500,
             )
-            fig.update_yaxes(title_text="Burst Accuracy", secondary_y=False)
-            fig.update_yaxes(title_text="Δ(Burst − Other)", secondary_y=True)
             _add(f"noise_burst_{run_name}", fig)
+            fig_burst_delta.add_vline(x=0.004, line_dash="dash", line_color="gray",
+                                      annotation_text="σ=0.004")
+            fig_burst_delta.update_layout(
+                title=f"Noise Δ (Burst − Other) Under Gaussian Weight Noise — {run_name}",
+                xaxis_title="Noise σ", yaxis_title="Δ(Burst − Other)",
+                legend_title="Schedule",
+                template="plotly_white", height=500,
+            )
+            _add(f"noise_burst_delta_{run_name}", fig_burst_delta)
 
-            # Other accuracy vs sigma (with burst−other difference on secondary axis)
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            # Other accuracy vs sigma
+            fig = go.Figure()
+            fig_other_delta = go.Figure()
             for sched in schedules:
                 d = nr[sched]
+                diff = [b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"])]
+                diff_std = [float(np.sqrt(sb**2 + so**2))
+                            for sb, so in zip(d["std_burst_accs"], d["std_other_accs"])]
                 fig.add_trace(go.Scatter(
                     x=d["sigmas"], y=d["mean_other_accs"],
                     name=sched,
                     line=dict(color=_color(sched), width=2),
                     mode="lines+markers",
                     error_y=dict(array=d["std_other_accs"], visible=True, thickness=1),
-                ), secondary_y=False)
-                diff = [b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"])]
-                diff_std = [float(np.sqrt(sb**2 + so**2))
-                            for sb, so in zip(d["std_burst_accs"], d["std_other_accs"])]
-                fig.add_trace(go.Scatter(
+                ))
+                fig_other_delta.add_trace(go.Scatter(
                     x=d["sigmas"], y=diff,
-                    name=f"{sched} Δ(burst−other)",
-                    line=dict(color=_color(sched), width=2, dash="dot"),
+                    name=sched,
+                    line=dict(color=_color(sched), width=2),
                     mode="lines+markers",
                     error_y=dict(array=diff_std, visible=True, thickness=1),
-                    legendgroup=sched,
-                ), secondary_y=True)
+                ))
             fig.add_vline(x=0.004, line_dash="dash", line_color="gray",
                           annotation_text="σ=0.004")
             fig.update_layout(
-                title=f"Other-Class Accuracy Under Gaussian Weight Noise — {run_name}<br>"
-                      "<sup>Solid: other acc. Dotted: Δ(burst−other) with CI on secondary axis</sup>",
-                xaxis_title="Noise σ",
+                title=f"Other-Class Accuracy Under Gaussian Weight Noise — {run_name}",
+                xaxis_title="Noise σ", yaxis_title="Other-Class Accuracy",
                 legend_title="Schedule",
                 template="plotly_white", height=500,
             )
-            fig.update_yaxes(title_text="Other-Class Accuracy", secondary_y=False)
-            fig.update_yaxes(title_text="Δ(Burst − Other)", secondary_y=True)
             _add(f"noise_other_{run_name}", fig)
+            fig_other_delta.add_vline(x=0.004, line_dash="dash", line_color="gray",
+                                      annotation_text="σ=0.004")
+            fig_other_delta.update_layout(
+                title=f"Noise Δ (Burst − Other) [Other-Class View] — {run_name}",
+                xaxis_title="Noise σ", yaxis_title="Δ(Burst − Other)",
+                legend_title="Schedule",
+                template="plotly_white", height=500,
+            )
+            _add(f"noise_other_delta_{run_name}", fig_other_delta)
 
             # Differential sensitivity: burst drop / other drop at σ=0.004
             sigma_idx = NOISE_SIGMAS.index(0.004) if 0.004 in NOISE_SIGMAS else -1
@@ -714,24 +732,33 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 other_drops = [nr[s]["mean_other_accs"][0] - nr[s]["mean_other_accs"][sigma_idx]
                                for s in schedules]
                 diff_drops = [b - o for b, o in zip(burst_drops, other_drops)]
-                fig = make_subplots(rows=1, cols=3,
-                                    subplot_titles=["Burst Accuracy Drop",
-                                                    "Other Accuracy Drop",
-                                                    "Δ(Burst − Other) Drop"])
                 colors = [_color(s) for s in schedules]
-                fig.add_trace(go.Bar(x=schedules, y=burst_drops,
-                                     marker_color=colors, showlegend=False), row=1, col=1)
-                fig.add_trace(go.Bar(x=schedules, y=other_drops,
-                                     marker_color=colors, showlegend=False), row=1, col=2)
-                fig.add_trace(go.Bar(x=schedules, y=diff_drops,
-                                     marker_color=colors, showlegend=False), row=1, col=3)
-                fig.update_layout(
-                    title=f"Differential Noise Sensitivity at σ=0.004 — {run_name}<br>"
-                          "<sup>Larger burst drop = narrower burst basin. "
-                          "Right panel: burst drop minus other drop.</sup>",
+                fig_diff_burst = go.Figure(go.Bar(x=schedules, y=burst_drops,
+                                                  marker_color=colors, showlegend=False))
+                fig_diff_burst.update_layout(
+                    title=f"Noise Sensitivity (Burst Drop) at σ=0.004 — {run_name}<br>"
+                          "<sup>Larger drop = narrower burst basin.</sup>",
+                    xaxis_title="Schedule", yaxis_title="Burst Accuracy Drop",
                     template="plotly_white", height=500,
                 )
-                _add(f"noise_differential_{run_name}", fig)
+                _add(f"noise_differential_burst_{run_name}", fig_diff_burst)
+                fig_diff_other = go.Figure(go.Bar(x=schedules, y=other_drops,
+                                                  marker_color=colors, showlegend=False))
+                fig_diff_other.update_layout(
+                    title=f"Noise Sensitivity (Other Drop) at σ=0.004 — {run_name}",
+                    xaxis_title="Schedule", yaxis_title="Other Accuracy Drop",
+                    template="plotly_white", height=500,
+                )
+                _add(f"noise_differential_other_{run_name}", fig_diff_other)
+                fig_diff_delta = go.Figure(go.Bar(x=schedules, y=diff_drops,
+                                                  marker_color=colors, showlegend=False))
+                fig_diff_delta.update_layout(
+                    title=f"Noise Sensitivity Δ (Burst − Other Drop) at σ=0.004 — {run_name}<br>"
+                          "<sup>Positive = burst basin narrower than other-class basin.</sup>",
+                    xaxis_title="Schedule", yaxis_title="Δ(Burst − Other) Drop",
+                    template="plotly_white", height=500,
+                )
+                _add(f"noise_differential_delta_{run_name}", fig_diff_delta)
 
         # ------------------------------------------------------------------
         # Metric 1b: Directed Noise Robustness
@@ -824,31 +851,60 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         if ls:
             schedules = sorted(ls.keys(), key=_sched_order)
 
-            # Sharpness comparison: burst vs other per schedule
+            # Sharpness comparison: burst vs other per schedule (separate figures with CI)
+            colors = [_color(s) for s in schedules]
+
+            def _ci95(vals):
+                if len(vals) > 1:
+                    return 1.96 * float(np.std(vals, ddof=1) / np.sqrt(len(vals)))
+                return 0.0
+
             burst_sharpness = [ls[s]["burst_sharpness"] for s in schedules]
             other_sharpness = [ls[s]["other_sharpness"] for s in schedules]
+            burst_ci = [_ci95(ls[s].get("per_seed_burst_sharpness", [])) for s in schedules]
+            other_ci = [_ci95(ls[s].get("per_seed_other_sharpness", [])) for s in schedules]
             diff_sharpness = [b - o for b, o in zip(burst_sharpness, other_sharpness)]
-            fig = make_subplots(rows=1, cols=3,
-                                subplot_titles=["Burst Prompt Sharpness",
-                                                "Other Prompt Sharpness",
-                                                "Δ(Burst − Other) Sharpness"])
-            colors = [_color(s) for s in schedules]
-            fig.add_trace(go.Bar(x=schedules, y=burst_sharpness,
-                                 marker_color=colors, showlegend=False), row=1, col=1)
-            fig.add_trace(go.Bar(x=schedules, y=other_sharpness,
-                                 marker_color=colors, showlegend=False), row=1, col=2)
-            fig.add_trace(go.Bar(x=schedules, y=diff_sharpness,
-                                 marker_color=colors, showlegend=False), row=1, col=3)
-            fig.update_layout(
-                title=f"Loss Surface Sharpness at Peak Burst — {run_name}<br>"
+            diff_ci = [float(np.sqrt(bc**2 + oc**2)) for bc, oc in zip(burst_ci, other_ci)]
+
+            fig_sharp_burst = go.Figure(go.Bar(
+                x=schedules, y=burst_sharpness, marker_color=colors, showlegend=False,
+                error_y=dict(type="data", array=burst_ci, visible=True),
+            ))
+            fig_sharp_burst.update_layout(
+                title=f"Loss Surface Sharpness (Burst) at Peak Burst — {run_name}<br>"
                       "<sup>max(loss) − centre(loss) over ±{:.3f} perturbation range. "
-                      "Higher = narrower basin. Right: burst − other.</sup>".format(SURFACE_RANGE),
+                      "Higher = narrower basin. Error bars = 95% CI across seeds.</sup>".format(SURFACE_RANGE),
+                xaxis_title="Schedule", yaxis_title="Sharpness",
                 template="plotly_white", height=500,
             )
-            _add(f"loss_surface_sharpness_{run_name}", fig)
+            _add(f"loss_surface_sharpness_burst_{run_name}", fig_sharp_burst)
+            fig_sharp_other = go.Figure(go.Bar(
+                x=schedules, y=other_sharpness, marker_color=colors, showlegend=False,
+                error_y=dict(type="data", array=other_ci, visible=True),
+            ))
+            fig_sharp_other.update_layout(
+                title=f"Loss Surface Sharpness (Other) at Peak Burst — {run_name}<br>"
+                      "<sup>max(loss) − centre(loss) over ±{:.3f} perturbation range. "
+                      "Error bars = 95% CI across seeds.</sup>".format(SURFACE_RANGE),
+                xaxis_title="Schedule", yaxis_title="Sharpness",
+                template="plotly_white", height=500,
+            )
+            _add(f"loss_surface_sharpness_other_{run_name}", fig_sharp_other)
+            fig_sharp_delta = go.Figure(go.Bar(
+                x=schedules, y=diff_sharpness, marker_color=colors, showlegend=False,
+                error_y=dict(type="data", array=diff_ci, visible=True),
+            ))
+            fig_sharp_delta.update_layout(
+                title=f"Loss Surface Sharpness Δ (Burst − Other) at Peak Burst — {run_name}<br>"
+                      "<sup>Positive = burst basin narrower than other-class basin. "
+                      "Error bars = 95% CI across seeds.</sup>",
+                xaxis_title="Schedule", yaxis_title="Δ Sharpness",
+                template="plotly_white", height=500,
+            )
+            _add(f"loss_surface_sharpness_delta_{run_name}", fig_sharp_delta)
 
-            # 2D heatmaps for extreme schedules (burst_100 vs burst_25)
-            extreme_scheds = [s for s in ["burst_100", "burst_25"] if s in ls]
+            # 2D heatmaps for all schedules
+            extreme_scheds = list(ls.keys())
             for sched in extreme_scheds:
                 d = ls[sched]
                 alphas = d["alphas"]

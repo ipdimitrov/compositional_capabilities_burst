@@ -43,7 +43,7 @@ The model is trained autoregressively on this sequence (next-token prediction). 
 
 Tokens are:
 - `X0 ... X{n_alphabets-1}`: alphabet symbols (values)
-- `F0 ... F{n_a+1}`: function identifiers (`F0` = identity, `F1..F{n_a}` = "other" functions, `F{n_a+1}` = `b*` the burst function)
+- `F0 ... F{n_a*depth+1}`: function identifiers (`F0` = identity, `F1..F{n_a*depth}` = position-specific background functions, `F{n_a*depth+1}` = `b*` the burst function)
 - `<space>`, `<PAD>`, `S`: special tokens
 
 ---
@@ -52,11 +52,11 @@ Tokens are:
 
 ### Other class (background / foundation)
 
-There are `n_a` (default 3) ordinary bijections. The "other" tasks are all `n_a^depth` possible depth-N chains built from these functions. For depth=3 and n_a=3 that is 27 tasks. These are the tasks the model trains on throughout the entire experiment.
+Each depth position `p` (1-indexed) has its own dedicated set of `n_a` (default 3) bijections that are never shared with other positions. Position `p` uses bijection indices `(p-1)*n_a + 1` through `p*n_a`. The "other" tasks are all `n_a^depth` possible depth-N chains where each position draws from its own function set. For depth=3 and n_a=3 that is 27 tasks. These are the tasks the model trains on throughout the entire experiment.
 
 ### Burst class (the novel capability)
 
-One additional bijection `b*` (index `n_a + 1`) is introduced. The burst tasks are all `n_a^{depth-1}` chains where `b*` occupies a specific position `burst_pos` (1-indexed, 1 = outermost, depth = innermost) and all other positions range over the `n_a` ordinary functions. For depth=3, n_a=3, burst_pos=3, that is 9 burst tasks. The burst class is entirely novel — the model has never seen `b*` before the burst phase.
+One additional bijection `b*` (index `n_a*depth + 1`) is introduced. The burst tasks are all `n_a^{depth-1}` chains where `b*` occupies a specific position `burst_pos` (1-indexed, 1 = outermost, depth = innermost) and all other positions range over their own position-specific background functions. For depth=3, n_a=3, burst_pos=3, that is 9 burst tasks. The burst class is entirely novel — the model has never seen `b*` before the burst phase. Crucially, the same function can never appear at two different positions, matching the paper's non-overlapping design.
 
 ---
 
@@ -233,7 +233,7 @@ Main entry point. Responsibilities:
 8. Collect all result `.pkl` files into `all_results.pkl`.
 9. Clean up temporary files.
 
-`DepthNData` class: generates all bijections, builds the vocabulary, and enumerates all other-class and burst-class task tuples. `_make_doc(task)` generates a single document token sequence for a given task. `gen_pool(tasks, n)` generates `n` documents per task.
+`DepthNData` class: generates all bijections, builds the vocabulary, and enumerates all other-class and burst-class task tuples. Bijection layout: `bijections[0]` = identity (F0), `bijections[(p-1)*n_a+1 .. p*n_a]` = the `n_a` background functions exclusive to position `p`, `bijections[n_a*depth+1]` = b*. `pos_fns[p]` maps each position to its dedicated function index list. `_build_splits` uses `itertools.product(*per_pos)` where each factor is the position-specific function list, so the same function index can never appear at two different positions. `_make_doc(task)` generates a single document token sequence for a given task. `gen_pool(tasks, n)` generates `n` documents per task.
 
 `build_data()`: calls `DepthNData`, generates training and evaluation pools, pads all pools to the same document length, computes `prompt_len` (the number of tokens to feed as prompt during evaluation), and adjusts `vocab_size` and `context_size` to fit.
 
@@ -298,7 +298,7 @@ Post-hoc gradient cosine similarity computation. For each saved checkpoint acros
 2. Compute the gradient vector for burst-class documents: do a forward+backward pass on a sample of burst docs, flatten all parameter gradients into a single vector.
 3. Compute the gradient vector for other-class documents similarly.
 4. Compute cosine similarity between the two gradient vectors (`burst_vs_other`).
-5. At 5 "pairwise" steps (begin, mid-burst, end-burst, mid-reversion, end-reversion), also compute a full pairwise cosine similarity matrix across groups: BURST, O_F1...O_Fn (other tasks grouped by function at `burst_pos`), ALL_OTHER, ALL_DATA.
+5. At 5 "pairwise" steps (begin, mid-burst, end-burst, mid-reversion, end-reversion), also compute a full pairwise cosine similarity matrix across groups: BURST, O_F{i} for each `i` in `range((burst_pos-1)*n_a+1, burst_pos*n_a+1)` (other tasks grouped by their position-specific function at `burst_pos`), ALL_OTHER, ALL_DATA.
 
 Results are saved per-job to `grad_cosine_sim/{label}.json` and merged back into `all_results.pkl`.
 
@@ -309,6 +309,8 @@ Results are saved per-job to `grad_cosine_sim/{label}.json` and merged back into
 1. `delta_KTN`: mean activation difference between the checkpoint and the pre-burst model on other-class inputs, at every (layer, token position).
 2. **Logit Lens readability**: projects `delta_KTN` through the unembedding matrix and measures whether burst-relevant token IDs appear in the top-k predictions — tests whether the burst phase leaves a readable fingerprint even on non-burst data.
 3. **Causal ablation**: projects `delta` out of the residual stream at each layer during burst-class generation and measures the accuracy drop — tests whether the burst knowledge is stored as an additive direction (wrapper) rather than a conditional circuit.
+
+`_burst_token_ids(cfg, n_a, depth)`: computes the vocab token ID of b* as `func_start + n_a * depth + 1` (where `func_start = n_alphabets` and the vocab layout is `X0..X{n_alphabets-1}`, then `F0..F{n_a*depth+1}`, then specials).
 
 Results are saved to `adl/{label}.json` and merged into `all_results.pkl`. Enabled by default (`run_adl=True` in `ExperimentConfig`).
 
@@ -359,7 +361,7 @@ Five-metric deep analysis of burstiness runs, operating on saved checkpoints wit
 1. **ADL** (Activation Difference Lens) — readability + causal ablation (see `adl.py`).
 2. **Gradient interference magnitude** — from existing `grad_sim_log`.
 3. **EMA interpolation probe** — sharpness of the peak↔reverted cliff via exponential moving average interpolation.
-4. **Critical sharpness** — Hutchinson trace of the Hessian on burst loss.
+4. **Critical sharpness** — Hutchinson trace of the Hessian on burst loss (deep_analysis.py). In unified_analysis.py: λ_c = 2/η_c via forward-pass line search along the burst direction Δθ = θ_peak − θ_pre (Kalra & Barkeshli 2024).
 5. **Weight delta rank** — SVD of `(W_post - W_pre)` per layer.
 
 Outputs `results.pkl`, per-chart PNGs, and an interactive Plotly dashboard. Can process all valid runs in `data/` in parallel via `--all --n-parallel N`.
@@ -388,6 +390,8 @@ Finetuning fingerprint analysis adapted from the "Narrow Fine-Tuning Targets" pa
 
 1. **Logit Lens on Checkpoint Deltas** — computes `δ̄ = E_x[h^post(x) - h^pre(x)]` on other-class inputs, projects through the unembedding matrix, and checks whether top-k tokens are burst-relevant.
 2. **Activation Steering** — adds `α·δ̄` to the residual stream at layer ℓ during autoregressive generation on other-class prompts, testing whether the burst knowledge is stored as an additive direction.
+
+`_burst_token_ids(cfg, n_a, depth)`: identical to the one in `adl.py` — b*'s vocab token ID is `func_start + n_a * depth + 1`.
 
 ### `burst/unified_analysis.py`
 
@@ -473,7 +477,7 @@ run.sh
 |---|---|---|
 | `n_alphabets` | 10 | Size of the symbol alphabet |
 | `seq_len` | 6 | Length of each input/output sequence |
-| `n_a` | 3 | Number of "other" bijection functions |
+| `n_a` | 3 | Number of background bijection functions **per position** |
 | `N_A` | 3 | Global default for n_a |
 | `SEED_BASE` | 107 | First training seed |
 | `DATA_SEED` | 999 | Seed for data generation (fixed across all runs) |

@@ -96,7 +96,7 @@ def save_png(fig, path: str, width: int = 1200, height: int = 600) -> None:
 
 def _fmt(v: Any, precision: int = 5) -> str:
     if isinstance(v, float):
-        if abs(v) < 1e-6:
+        if v == 0.0:
             return "0"
         return f"{v:.{precision}g}"
     return str(v)

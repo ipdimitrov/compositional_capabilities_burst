@@ -73,8 +73,13 @@ class NpEncoder(json.JSONEncoder):
 class DepthNData:
     """Pure-bijection depth-N composition data generator.
 
-    bijections[0] = identity. bijections[1..N_A] = other-class functions.
-    bijections[N_A+1] = b* (novel burst function).
+    Each position p (1-indexed) has its own dedicated set of n_a bijections,
+    matching the paper's design where F^(l) are non-overlapping across positions.
+
+    Bijection layout:
+      bijections[0]                      = identity (F0, unused in tasks)
+      bijections[(p-1)*n_a + 1 .. p*n_a] = background functions for position p
+      bijections[n_a*depth + 1]          = b* (novel burst function)
 
     burst_pos (1-indexed): which position in the chain gets b*.
 
@@ -92,9 +97,19 @@ class DepthNData:
         self.burst_pos = burst_pos
         rng = np.random.RandomState(seed)
 
+        # bijections[0] = identity; then n_a per position; then b*
         self.bijections = [np.arange(n_alph)]
-        for _ in range(n_a + 1):
+        for _ in range(n_a * depth + 1):
             self.bijections.append(rng.permutation(n_alph))
+
+        # b* is the last bijection
+        self.b_star = n_a * depth + 1
+
+        # position p (1-indexed) uses bijection indices pos_fns[p]
+        self.pos_fns: dict[int, list[int]] = {
+            p: list(range((p - 1) * n_a + 1, p * n_a + 1))
+            for p in range(1, depth + 1)
+        }
 
         self._build_vocab()
         self._build_splits(rng)
@@ -118,19 +133,25 @@ class DepthNData:
         self.vocab_size = idx
 
     def _build_splits(self, rng):
-        na, b_star = self.n_a, self.n_a + 1
-        r = list(range(1, na + 1))
         D, bp = self.depth, self.burst_pos
 
-        other_combos = list(itertools.product(r, repeat=D))
+        # Other-class tasks: at each position p, pick one function from pos_fns[p]
+        # All combinations of (f_pos1, f_pos2, ..., f_posD) where f_posp in pos_fns[p]
+        per_pos = [self.pos_fns[p] for p in range(1, D + 1)]
+        other_combos = list(itertools.product(*per_pos))
         rng.shuffle(other_combos)
         self.other_train = [(CLASS_OTHER,) + combo for combo in other_combos]
 
-        remaining_combos = list(itertools.product(r, repeat=D - 1))
+        # Burst tasks: same as other but position bp is replaced by b*
+        non_burst_positions = [p for p in range(1, D + 1) if p != bp]
+        per_pos_no_bp = [self.pos_fns[p] for p in non_burst_positions]
+        remaining_combos = list(itertools.product(*per_pos_no_bp))
         burst_tasks = []
         for combo in remaining_combos:
             fns = list(combo)
-            fns.insert(D - bp, b_star)
+            # insert b* at the correct slot (positions are listed outermost-first,
+            # so position bp sits at index D - bp from the left)
+            fns.insert(D - bp, self.b_star)
             burst_tasks.append((CLASS_BURST,) + tuple(fns))
         self.burst_train = burst_tasks
 
@@ -378,11 +399,20 @@ def main():
     pretrain_cfg = {**base_cfg,
                     "vocab_size": cfg_out["vocab_size"],
                     "context_size": cfg_out["context_size"]}
-    print(f"\nPretraining shared checkpoint ({P} steps on all-but-special)...", flush=True)
-    pretrain_log = run_pretrain(
-        pretrain_cfg, P, bp, pretrain_ckpt_path,
-        eval_docs=ed, prompt_len=pl, eval_every=base_cfg["eval_every"],
-    )
+    pretrain_attempt = 0
+    while True:
+        pretrain_attempt += 1
+        print(f"\nPretraining shared checkpoint ({P} steps on all-but-special)"
+              f" — attempt {pretrain_attempt}...", flush=True)
+        pretrain_log = run_pretrain(
+            pretrain_cfg, P, bp, pretrain_ckpt_path,
+            eval_docs=ed, prompt_len=pl, eval_every=base_cfg["eval_every"],
+        )
+        peak_acc_other = max(pretrain_log.get("acc_other", [0.0]))
+        if peak_acc_other >= 0.99:
+            print(f"  Pretrain OK: peak acc_other={peak_acc_other:.4f}", flush=True)
+            break
+        print(f"  Pretrain acc_other={peak_acc_other:.4f} < 0.99, retrying...", flush=True)
     with open(logs_dir / "pretrain_log.pkl", "wb") as f:
         pickle.dump(pretrain_log, f)
 

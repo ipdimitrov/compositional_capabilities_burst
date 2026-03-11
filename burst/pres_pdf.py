@@ -586,7 +586,7 @@ def build(rd, res, cfg, cp):
         seed_base = cfg.get("seed_base", 107)
         parts.append(_section("Appendix"))
         parts.append(f"<p>Depth={depth}, burst_pos={burst_pos}. Doc={doc_len}, prompt={prompt_len}</p>")
-        parts.append(f"<p>Bijections: permutations of 0-9. [0]=id, [1-{n_a}]=other, [{n_a+1}]=b*. Data seed={seed_base}.</p>")
+        parts.append(f"<p>Bijections: permutations of 0-9. [0]=id, [1-{n_a*depth}]=other ({n_a} per position), [{n_a*depth+1}]=b*. Data seed={seed_base}.</p>")
         parts.append(f"<p>Seeds: {seed_base}-{seed_base+ns-1}.</p>")
     _try(_appendix, "Appendix")
 

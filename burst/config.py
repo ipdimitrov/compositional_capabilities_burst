@@ -178,7 +178,7 @@ class TrainConfig:
 
     batch_size: int = 128
     grad_sim_batch_size: int = 2048
-    pre_burst_steps: int = 500
+    pre_burst_steps: int = 600
     total_steps: int = BURST_BASE_STEPS
     p_target: float = 0.2
     reversion_steps: int = 500
@@ -199,7 +199,7 @@ class TrainConfig:
 @dataclass
 class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
-    n_seeds: int = 3
+    n_seeds: int = 5
     n_workers: int = 0
     depth: int = 3
     burst_pos: int = 3

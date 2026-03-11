@@ -10,7 +10,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
-from fpdf import FPDF
 from collections import defaultdict, Counter
 from burst._worker import n_target_for_step
 from burst.train_utils import load_results, compute_lr_schedule
@@ -21,9 +20,6 @@ from burst.config import (
     TrainConfig, reversion_life_key, reversion_life_label,
     parse_run_config, burst_steps_for_mode, BURST_BASE_STEPS, MODE_CURRENT,
 )
-
-W, H = 297, 210
-
 
 def _bar_label(ax, x, text):
     ax.text(x, 0.5, text, ha="center", va="center", fontsize=5,
@@ -358,8 +354,8 @@ def _build_sched_data(results):
     for r in results:
         sched = r["schedule"]
         steps = np.array(r["log"]["step"])
-        for k in EVAL_KEYS:
-            vals = np.array(r["log"].get(k, [0.0] * len(steps)))
+        for k in list(EVAL_KEYS) + ["loss"]:
+            vals = np.array(r["log"].get(k, [float("nan")] * len(steps)))
             sched_data[sched][k].append((steps, vals))
     return sched_data
 
@@ -468,104 +464,83 @@ def plot_overlay_all_schedules(results, plots_dir, sched_data=None):
     T_max = max(sched_Ts.values())
     burst_end_max = P + T_max
 
+    def _overlay_plot(ax, sched_data, key, sched_Ts, P, T_max, U_ov, burst_end_max, align):
+        for sched in ordered_schedules(sched_data.keys()):
+            c = SCHED_COLORS.get(sched, "gray")
+            T_s = sched_Ts[sched]
+            burst_end_s = P + T_s
+            runs = sched_data[sched][key]
+            if len(runs) == 0:
+                continue
+            steps_ref = runs[0][0]
+            all_vals = np.array([vals for _, vals in runs])
+            mean_vals = np.nanmean(all_vals, axis=0)
+            std_vals = np.nanstd(all_vals, axis=0)
+            n_seeds = len(runs)
+            ci = 1.96 * std_vals / np.sqrt(n_seeds) if n_seeds > 1 else std_vals
+            x = steps_ref - (P + T_s) if align == "end" else steps_ref
+            ax.plot(x, mean_vals, color=c, lw=2.5, label=sched)
+            ax.fill_between(x, mean_vals - ci, mean_vals + ci, color=c, alpha=0.2)
+        total = P + T_max + U_ov
+        if align == "end":
+            ax.axvline(0, color="gray", ls="--", alpha=0.6, lw=2)
+            if P > 0:
+                ax.text(-burst_end_max + P * 0.5, ax.get_ylim()[0] * 0.9, "PRE",
+                        ha="center", fontsize=10, color="gray", fontweight="bold")
+            ax.text(-T_max * 0.3, ax.get_ylim()[0] * 0.9, "SPECIAL",
+                    ha="center", fontsize=12, color="gray", fontweight="bold")
+            ax.text(U_ov * 0.5, ax.get_ylim()[0] * 0.9, "ALL-BUT-SPECIAL",
+                    ha="center", fontsize=12, color="gray", fontweight="bold")
+            ax.set_xlim(-burst_end_max, U_ov)
+            ax.set_xlabel("Steps from Burst End", fontsize=13)
+        else:
+            if P > 0:
+                ax.axvline(P, color="gray", ls="--", alpha=0.6, lw=2)
+                ax.text(P * 0.5, ax.get_ylim()[0] * 0.9, "ALL-BUT-SPECIAL",
+                        ha="center", fontsize=10, color="gray", fontweight="bold")
+            ax.text(P + T_max * 0.5, ax.get_ylim()[0] * 0.9, "SPECIAL",
+                    ha="center", fontsize=12, color="gray", fontweight="bold")
+            ax.text(burst_end_max + U_ov * 0.5, ax.get_ylim()[0] * 0.9, "ALL-BUT-SPECIAL",
+                    ha="center", fontsize=11, color="gray", fontweight="bold")
+            ax.set_xlim(0, total)
+            ax.set_xlabel("Steps from Burst Start" if align == "start" else "Step", fontsize=13)
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(dict(zip(labels, handles)).values(),
+                  dict(zip(labels, handles)).keys(), fontsize=10, loc="best", framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+
     for align in ["absolute", "start", "end"]:
         for ki, k in enumerate(EVAL_KEYS):
             fig, ax = plt.subplots(figsize=(11.7, 8.3))
             fig.suptitle(f"All Schedules - {CURVE_STYLE[k]['label']}\n(mean +/- 95% CI across seeds)",
                          fontsize=16, fontweight="bold")
-
-            for sched in ordered_schedules(sched_data.keys()):
-                c = SCHED_COLORS.get(sched, "gray")
-                T_s = sched_Ts[sched]
-                burst_end_s = P + T_s
-                runs = sched_data[sched][k]
-                if len(runs) == 0:
-                    continue
-
-                steps_ref = runs[0][0]
-                all_vals = np.array([vals for _, vals in runs])
-                mean_vals = np.mean(all_vals, axis=0)
-                std_vals = np.std(all_vals, axis=0)
-                n_seeds = len(runs)
-                ci = 1.96 * std_vals / np.sqrt(n_seeds) if n_seeds > 1 else std_vals
-
-                if align == "end":
-                    x = steps_ref - burst_end_s
-                else:
-                    x = steps_ref
-
-                ax.plot(x, mean_vals, color=c, lw=2.5, label=sched)
-                ax.fill_between(x, mean_vals - ci, mean_vals + ci, color=c, alpha=0.2)
-
-            total = P + T_max + U_ov
-            if align == "end":
-                ax.axvline(0, color="gray", ls="--", alpha=0.6, lw=2)
-                if P > 0:
-                    ax.text(-burst_end_max + P * 0.5, 0.05, "PRE", ha="center", fontsize=10,
-                           color="gray", fontweight="bold")
-                ax.text(-T_max * 0.3, 0.05, "SPECIAL", ha="center", fontsize=12,
-                       color="gray", fontweight="bold")
-                ax.text(U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=12,
-                       color="gray", fontweight="bold")
-                ax.set_xlim(-burst_end_max, U_ov)
-                ax.set_xlabel("Steps from Burst End", fontsize=13)
-            else:
-                if P > 0:
-                    ax.axvline(P, color="gray", ls="--", alpha=0.6, lw=2)
-                    ax.text(P * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=10,
-                           color="gray", fontweight="bold")
-                ax.text(P + T_max * 0.5, 0.05, "SPECIAL", ha="center", fontsize=12,
-                       color="gray", fontweight="bold")
-                ax.text(burst_end_max + U_ov * 0.5, 0.05, "ALL-BUT-SPECIAL", ha="center", fontsize=11,
-                       color="gray", fontweight="bold")
-                ax.set_xlim(0, total)
-                ax.set_xlabel("Steps from Burst Start" if align == "start" else "Step", fontsize=13)
-
+            _overlay_plot(ax, sched_data, k, sched_Ts, P, T_max, U_ov, burst_end_max, align)
             ax.set_ylim(-0.05, 1.05)
             ax.set_ylabel("Accuracy", fontsize=13)
-            handles, labels = ax.get_legend_handles_labels()
-            ax.legend(dict(zip(labels, handles)).values(),
-                      dict(zip(labels, handles)).keys(), fontsize=10, loc="best", framealpha=0.9)
-            ax.grid(True, alpha=0.3)
-
             fig.tight_layout()
             suffix = f"_{align}" if align != "absolute" else ""
             fig.savefig(plots_dir / f"overlay_all_{k}{suffix}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
 
+        fig, ax = plt.subplots(figsize=(11.7, 8.3))
+        fig.suptitle(f"All Schedules - Training Loss\n(mean +/- 95% CI across seeds)",
+                     fontsize=16, fontweight="bold")
+        _overlay_plot(ax, sched_data, "loss", sched_Ts, P, T_max, U_ov, burst_end_max, align)
+        ax.set_ylabel("Cross-Entropy Loss", fontsize=13)
+        fig.tight_layout()
+        suffix = f"_{align}" if align != "absolute" else ""
+        fig.savefig(plots_dir / f"overlay_all_loss{suffix}.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
 
-class ReportPDF(FPDF):
-    _header_title: str = "Bijection Burst  |  Free Generation"
 
-    def header(self):
-        if self.page_no() > 1:
-            self.set_font("Helvetica", "I", 7)
-            self.set_text_color(130, 130, 130)
-            self.cell(0, 4, self._header_title, align="L")
-            self.cell(0, 4, f"Page {self.page_no()}/{{nb}}", align="R")
-            self.ln(6)
-
-    def stitle(self, t):
-        self.set_font("Helvetica", "B", 16); self.set_text_color(0, 80, 140)
-        self.cell(0, 9, t, new_x="LMARGIN", new_y="NEXT"); self.ln(3)
-
-    def sub(self, t):
-        self.set_font("Helvetica", "B", 11); self.set_text_color(40, 40, 40)
-        self.cell(0, 6, t, new_x="LMARGIN", new_y="NEXT"); self.ln(1)
-
-    def body(self, t):
-        self.set_font("Helvetica", "", 9); self.set_text_color(30, 30, 30)
-        self.multi_cell(0, 4.5, t); self.ln(2)
-
-    def bul(self, t):
-        self.set_font("Helvetica", "", 9); self.set_text_color(30, 30, 30)
-        self.cell(4, 4.5, "-"); self.multi_cell(W - 24, 4.5, t); self.ln(1)
-
-    def chart(self, path, w=220):
-        if Path(path).exists():
-            if self.get_y() > H - 55:
-                self.add_page()
-            self.image(str(path), x=(W - w) / 2, w=w); self.ln(3)
+def _img_tag(path, width="100%") -> str:
+    """Return an <img> tag with base64-encoded PNG, or empty string if file missing."""
+    import base64
+    p = Path(path)
+    if not p.exists():
+        return ""
+    data = base64.b64encode(p.read_bytes()).decode()
+    return f'<img src="data:image/png;base64,{data}" style="width:{width};max-width:1200px;display:block;margin:12px auto;">'
 
 
 def make_report(run_dir, results, cfg, per_run_fnames):
@@ -580,186 +555,199 @@ def make_report(run_dir, results, cfg, per_run_fnames):
     reversion_steps = bcfg['reversion_steps']
     batch_size = bcfg['batch_size']
     p_target = bcfg['p_target']
-
-    pdf = ReportPDF(orientation="L", format="A4")
-    pdf._header_title = f"Depth-{depth} Bijection Burst (pos {burst_pos})  |  Free Generation"
-    pdf.alias_nb_pages()
-    pdf.set_auto_page_break(auto=True, margin=12)
-
-    pdf.add_page(); pdf.ln(25)
-    pdf.set_font("Helvetica", "B", 26); pdf.set_text_color(0, 80, 140)
-    pdf.multi_cell(0, 11, f"Depth-{depth} Bijection Composition\nBurst & Forgetting Experiment", align="C")
-    pdf.ln(6)
-    pdf.set_font("Helvetica", "", 12); pdf.set_text_color(80, 80, 80)
-    pdf.cell(0, 7, f"Burst at position {burst_pos}  |  Free Generation (model produces its own outputs)",
-             align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
-    pdf.set_font("Courier", "", 8); pdf.set_text_color(120, 120, 120)
     pre_burst_steps = bcfg.get("pre_burst_steps", 0)
-    pdf.cell(0, 5,
-             f"{n_layer}-layer Transformer ({n_embd}-dim, {n_head} heads)  |  "
-             f"{pre_burst_steps} pre-burst + {total_steps} special + {reversion_steps} all-but-special  |  batch {batch_size}  |  {len(results)} runs",
-             align="C", new_x="LMARGIN", new_y="NEXT")
-
-    pdf.add_page()
-    pdf.stitle("What This Experiment Does")
-
-    pdf.sub("The Task")
-    pdf.body(
-        f"The model learns to apply chains of {depth} functions to a sequence of numbers. "
-        "Each function is a bijection -- a lookup table that remaps each digit "
-        f"(0-9) to a different digit. Every sequence has the same format: {depth} "
-        "function slots followed by the input, then the result after each function.")
-
-    pdf.sub("Complex Tasks")
-    pdf.body(
-        f"Complex (compositional) tasks: all {depth} slots have real functions. "
-        "The model must learn to compose multiple bijections together to produce "
-        "the correct output sequence.")
-
-    pdf.sub("Training Data (Other Classes = all-but-special)")
-    n_a_comps = n_a ** depth
-    pdf.body(
-        f"{n_a} bijection functions. The model trains on all {n_a}^{depth} = {n_a_comps} "
-        f"depth-{depth} chains (100% used for training).")
-
-    pdf.sub("Special Data (Special Class = the new thing to learn)")
-    n_burst = n_a ** (depth - 1)
-    pdf.body(
-        f"One brand-new function (b*) placed at position {burst_pos}. "
-        f"All {n_burst} possible combinations for the other positions are used during the burst.")
-
-    pdf.sub("The Experiment")
-    pdf.body(
-        f"Pre-burst ({pre_burst_steps} steps): All-but-special classes only (shared across all schedules). "
-        f"Special ({total_steps} steps): Other classes + Special class mixed per schedule. "
-        f"All schedules see the same total special class data. "
-        f"All-but-special ({reversion_steps} steps): Special class removed, other classes only. "
-        f"We measure how quickly the special class is forgotten.")
-
-    pdf.sub("Metrics")
-    pdf.bul("Other Classes: compositional accuracy on known functions")
-    pdf.bul("Special Class: accuracy on b* chains (acquisition + retention)")
-    pdf.bul("Peak Special: b* accuracy at end of training")
     thresholds = TrainConfig().reversion_thresholds
-    for t in thresholds:
-        pct = int(t * 100)
-        pdf.bul(f"{reversion_life_label(t)}: reversion steps until Special Class drops to {pct}% of peak (capped at {reversion_steps})")
-    pdf.bul("Reversion AUC: area under Special Class curve during reversion (lower = faster forgetting)")
-
-    burst_len = max(int(p_target * total_steps), 1)
-    p_pct = int(p_target * 100)
-
-    pdf.sub("The Schedules")
-    pdf.bul(f"burst_100: 100% Special Class block at the end ({burst_len} steps)")
-    for pct, frac in [(98, 0.98), (95, 0.95), (90, 0.90), (85, 0.85),
-                      (75, 0.75), (50, 0.50), (25, 0.25)]:
-        win = min(int(burst_len / frac), total_steps)
-        pdf.bul(f"burst_{pct}: {pct}% Special Class at the end ({win} steps)")
-    pdf.bul(f"burst_10: ~{p_pct}% Special Class randomly throughout (uniform control)")
-
-    pdf.add_page()
-    pdf.stitle("Learning Rate Schedule")
-    pdf.chart(plots_dir / "lr_schedule.png", w=240)
+    first_key = reversion_life_key(thresholds[0])
+    first_label_short = reversion_life_label(thresholds[0])
     warmup_iters = bcfg['warmup_iters']
     lr_max = bcfg['lr']
     lr_pe = bcfg.get('lr_pretrain_end_frac', 0.3)
     lr_be = bcfg.get('lr_burst_end_frac', 0.1)
     lr_re = bcfg.get('lr_reversion_end_frac', 0.01)
-    pdf.body(
-        f"Three-phase cosine schedule. Linear warmup for {warmup_iters} steps to {lr_max:.0e}, "
-        f"then cosine decay to {lr_max*lr_pe:.0e} over pretrain ({pre_burst_steps} steps), "
-        f"to {lr_max*lr_be:.0e} over burst, and to {lr_max*lr_re:.0e} over reversion "
-        f"({reversion_steps} steps). Burst phase length varies per schedule.")
+    burst_len = max(int(p_target * total_steps), 1)
+    n_a_comps = n_a ** depth
+    n_burst = n_a ** (depth - 1)
 
-    pdf.add_page()
-    pdf.stitle("Summary: Forgetting Speed by Schedule")
-    pdf.chart(plots_dir / "summary_bars.png", w=260)
-    pdf.body(
-        "Left: Peak Special Class accuracy. Center: Quarter-life (lower = faster forgetting). "
-        "Right: Reversion AUC (secondary). Schedules that deliver special class near the end "
-        "achieve high acquisition. Mixed schedules retain the special class longer because "
-        "other classes are present alongside the special class during the burst window.")
+    def _section(title, body=""):
+        h = f'<div class="section"><h2>{title}</h2>'
+        if body:
+            h += f'<p>{body}</p>'
+        return h
 
-    pdf.add_page()
-    pdf.stitle("AUC Detail: Individual Seeds + Mean ± CI")
-    pdf.chart(plots_dir / "auc_detail.png", w=260)
-    pdf.body(
-        "Left: each dot is one seed for a given schedule. "
-        "Right: mean reversion AUC with 95% CI error bars. "
-        "Lower AUC = faster forgetting of special class during the reversion phase.")
+    def _close():
+        return "</div>"
 
-    pdf.add_page()
-    pdf.stitle("Pairwise Reversion AUC Difference (%)")
-    pdf.chart(plots_dir / "auc_diff_pct.png", w=200)
-    pdf.body(
-        "Each cell shows (row_AUC - col_AUC) / |col_AUC| × 100. "
-        "Positive (red) means the row schedule has higher AUC (slower forgetting). "
-        "Negative (blue) means faster forgetting relative to the column schedule.")
+    def _chart(path, caption=""):
+        tag = _img_tag(path)
+        if not tag:
+            return ""
+        cap = f'<p class="caption">{caption}</p>' if caption else ""
+        return f'<div class="chart">{tag}{cap}</div>'
 
-    first_key = reversion_life_key(thresholds[0])
-    first_label_short = reversion_life_label(thresholds[0])
-    pdf.add_page()
-    pdf.stitle("Ranking: Fastest Forgetting First")
-    rows = sorted(results, key=lambda r: r.get(first_key, reversion_steps))
-    pdf.set_font("Courier", "", 7.5); pdf.set_text_color(40, 40, 40)
-    pdf.cell(0, 4,
-             f"  {'Rank':<5}{'Schedule':<16}{'Peak Special':>12}{first_label_short:>10}{'Rev AUC':>9}",
-             new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 4, "  " + "-" * 50, new_x="LMARGIN", new_y="NEXT")
-    for i, r in enumerate(rows):
-        lv = r.get(first_key, reversion_steps)
-        lv_str = f"{lv:.0f}" if lv < reversion_steps else f">{reversion_steps}"
-        peak = r["peak_burst"]
-        auc = r["reversion_auc"]
-        pdf.cell(0, 4,
-                 f"  {i+1:<5}{r['schedule']:<16}{peak:>10.3f}"
-                 f"{lv_str:>10}{auc:>9.0f}",
-                 new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+    def _ranking_table():
+        rows_sorted = sorted(results, key=lambda r: r.get(first_key, reversion_steps))
+        rows_html = ""
+        for i, r in enumerate(rows_sorted):
+            lv = r.get(first_key, reversion_steps)
+            lv_str = f"{lv:.0f}" if lv < reversion_steps else f">{reversion_steps}"
+            rows_html += (f"<tr><td>{i+1}</td><td>{r['schedule']}</td>"
+                          f"<td>{r['peak_burst']:.3f}</td><td>{lv_str}</td>"
+                          f"<td>{r['reversion_auc']:.0f}</td></tr>")
+        return (f"<table><thead><tr><th>Rank</th><th>Schedule</th>"
+                f"<th>Peak Special</th><th>{first_label_short}</th><th>Rev AUC</th></tr></thead>"
+                f"<tbody>{rows_html}</tbody></table>")
 
-    pdf.add_page()
-    pdf.stitle("Accuracy Overlay - All Schedules")
-    pdf.body(
-        "Each page shows one accuracy metric with all schedules overlaid. "
-        "Lines show mean accuracy across seeds, with shaded regions showing "
-        "95% confidence intervals. Vertical dashed line marks "
-        "the start of the reversion phase.")
+    parts = ["""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Analysis Report</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; background: #f0f2f5; color: #222; }
+  .header { background: linear-gradient(135deg,#005a9e,#0078d4); color:white; padding:32px 40px; }
+  .header h1 { margin:0; font-size:2em; }
+  .header p { margin:8px 0 0; opacity:0.85; }
+  .toc { background:white; margin:20px 40px; padding:20px 24px; border-radius:8px;
+         box-shadow:0 2px 8px rgba(0,0,0,0.08); }
+  .toc h3 { margin:0 0 10px; color:#005a9e; }
+  .toc a { display:inline-block; margin:3px 8px 3px 0; color:#0078d4; text-decoration:none; font-size:0.9em; }
+  .toc a:hover { text-decoration:underline; }
+  .section { background:white; margin:20px 40px; padding:24px 28px; border-radius:8px;
+             box-shadow:0 2px 8px rgba(0,0,0,0.08); }
+  .section h2 { color:#005a9e; margin-top:0; border-bottom:2px solid #e0e8f0; padding-bottom:8px; }
+  .section p { line-height:1.6; color:#333; }
+  .section ul { line-height:1.8; color:#333; }
+  .chart { margin:16px 0; text-align:center; }
+  .caption { font-size:0.85em; color:#666; margin-top:4px; font-style:italic; }
+  table { border-collapse:collapse; width:100%; margin:12px 0; }
+  th { background:#005a9e; color:white; padding:8px 12px; text-align:left; }
+  td { padding:6px 12px; border-bottom:1px solid #e0e0e0; }
+  tr:nth-child(even) td { background:#f8f9fa; }
+  code { background:#f4f4f4; padding:2px 6px; border-radius:3px; font-size:0.9em; }
+</style>
+</head>
+<body>
+"""]
 
+    parts.append(f"""<div class="header">
+  <h1>Depth-{depth} Bijection Composition — Burst &amp; Forgetting Experiment</h1>
+  <p>Burst at position {burst_pos} &nbsp;|&nbsp; Free Generation &nbsp;|&nbsp;
+     {n_layer}-layer Transformer ({n_embd}-dim, {n_head} heads) &nbsp;|&nbsp;
+     {pre_burst_steps} pre-burst + {total_steps} special + {reversion_steps} all-but-special &nbsp;|&nbsp;
+     batch {batch_size} &nbsp;|&nbsp; {len(results)} runs</p>
+</div>
+""")
+
+    toc_items = [
+        ("setup", "Experimental Setup"),
+        ("lr", "Learning Rate Schedule"),
+        ("summary", "Summary: Forgetting Speed"),
+        ("auc_detail", "AUC Detail"),
+        ("auc_diff", "Pairwise AUC Difference"),
+        ("ranking", "Ranking"),
+        ("acc_overlay", "Accuracy Overlays"),
+        ("loss_overlay", "Loss Overlays"),
+        ("per_sched", "Per-Schedule Overlays"),
+        ("per_run", "Per-Run Details"),
+    ]
+    toc_html = '<div class="toc"><h3>Contents</h3>'
+    for anchor, label in toc_items:
+        toc_html += f'<a href="#{anchor}">{label}</a>'
+    toc_html += "</div>"
+    parts.append(toc_html)
+
+    parts.append(f'<div class="section" id="setup"><h2>Experimental Setup</h2>')
+    parts.append(f"""<p><strong>The Task:</strong> The model learns to apply chains of {depth} functions to a
+sequence of numbers. Each function is a bijection — a lookup table that remaps each digit (0–9) to a
+different digit. Every sequence has the same format: {depth} function slots followed by the input,
+then the result after each function.</p>
+<p><strong>Training Data (Other Classes):</strong> {n_a} bijection functions.
+The model trains on all {n_a}<sup>{depth}</sup> = {n_a_comps} depth-{depth} chains.</p>
+<p><strong>Special Data:</strong> One brand-new function (b*) placed at position {burst_pos}.
+All {n_burst} possible combinations for the other positions are used during the burst.</p>
+<p><strong>Protocol:</strong>
+Pre-burst ({pre_burst_steps} steps): all-but-special only (shared checkpoint).
+Special ({total_steps} steps): other + special mixed per schedule.
+All-but-special ({reversion_steps} steps): special removed, other only.</p>
+<p><strong>Metrics:</strong></p><ul>
+<li>Other Classes: compositional accuracy on known functions</li>
+<li>Special Class: accuracy on b* chains (acquisition + retention)</li>
+<li>Peak Special: b* accuracy at end of burst phase</li>""")
+    for t in thresholds:
+        pct = int(t * 100)
+        parts.append(f"<li>{reversion_life_label(t)}: reversion steps until Special Class drops to {pct}% of peak</li>")
+    parts.append("""<li>Reversion AUC: area under Special Class curve during reversion (lower = faster forgetting)</li>
+</ul></div>""")
+
+    parts.append(f'<div class="section" id="lr"><h2>Learning Rate Schedule</h2>')
+    parts.append(f"""<p>Three-phase cosine schedule. Linear warmup for {warmup_iters} steps to {lr_max:.0e},
+then cosine decay to {lr_max*lr_pe:.0e} over pretrain ({pre_burst_steps} steps),
+to {lr_max*lr_be:.0e} over burst, and to {lr_max*lr_re:.0e} over reversion ({reversion_steps} steps).
+Burst phase length varies per schedule.</p>""")
+    parts.append(_chart(plots_dir / "lr_schedule.png"))
+    parts.append("</div>")
+
+    parts.append(f'<div class="section" id="summary"><h2>Summary: Forgetting Speed by Schedule</h2>')
+    parts.append("<p>Left: Peak Special Class accuracy. Center: Quarter-life (lower = faster forgetting). "
+                 "Right: Reversion AUC. Mixed schedules retain the special class longer.</p>")
+    parts.append(_chart(plots_dir / "summary_bars.png"))
+    parts.append("</div>")
+
+    parts.append(f'<div class="section" id="auc_detail"><h2>AUC Detail: Individual Seeds + Mean ± CI</h2>')
+    parts.append("<p>Left: each dot is one seed. Right: mean reversion AUC with 95% CI. "
+                 "Lower AUC = faster forgetting.</p>")
+    parts.append(_chart(plots_dir / "auc_detail.png"))
+    parts.append("</div>")
+
+    parts.append(f'<div class="section" id="auc_diff"><h2>Pairwise Reversion AUC Difference (%)</h2>')
+    parts.append("<p>Each cell: (row_AUC − col_AUC) / |col_AUC| × 100. "
+                 "Red = row schedule has higher AUC (slower forgetting). Blue = faster forgetting.</p>")
+    parts.append(_chart(plots_dir / "auc_diff_pct.png"))
+    parts.append("</div>")
+
+    parts.append(f'<div class="section" id="ranking"><h2>Ranking: Fastest Forgetting First</h2>')
+    parts.append(_ranking_table())
+    parts.append("</div>")
+
+    parts.append(f'<div class="section" id="acc_overlay"><h2>Accuracy Overlays — All Schedules</h2>')
+    parts.append("<p>Lines show mean accuracy across seeds with 95% CI ribbons. "
+                 "Vertical dashed line marks the start of the reversion phase.</p>")
     for k in EVAL_KEYS:
-        overlay_all_path = plots_dir / f"overlay_all_{k}.png"
-        if overlay_all_path.exists():
-            pdf.add_page()
-            pdf.sub(f"{CURVE_STYLE[k]['label']}")
-            pdf.chart(overlay_all_path, w=270)
+        for suffix, label in [("", "Absolute"), ("_aligned_start", "Burst-Start Aligned"),
+                               ("_aligned_end", "Burst-End Aligned")]:
+            p = plots_dir / f"overlay_all_{k}{suffix}.png"
+            parts.append(_chart(p, f"{CURVE_STYLE[k]['label']} — {label}"))
+    parts.append("</div>")
 
-    pdf.add_page()
-    pdf.stitle("Accuracy Overlay - Per Schedule")
-    pdf.body(
-        "Each chart shows all metrics for one schedule. "
-        "Lines show mean accuracy across seeds, with shaded regions showing "
-        "95% confidence intervals. Vertical dashed line marks "
-        "the start of the reversion phase.")
+    parts.append(f'<div class="section" id="loss_overlay"><h2>Training Loss Overlays — All Schedules</h2>')
+    parts.append("<p>Training loss across all schedules with 95% CI ribbons.</p>")
+    for suffix, label in [("", "Absolute"), ("_aligned_start", "Burst-Start Aligned"),
+                           ("_aligned_end", "Burst-End Aligned")]:
+        p = plots_dir / f"overlay_all_loss{suffix}.png"
+        parts.append(_chart(p, f"Training Loss — {label}"))
+    parts.append("</div>")
 
+    parts.append(f'<div class="section" id="per_sched"><h2>Per-Schedule Accuracy Overlays</h2>')
     for sched in ordered_schedules(set(r["schedule"] for r in results)):
         idx = sched_sort_key(sched)
-        overlay_path = plots_dir / f"{idx:02d}_overlay_{sched}.png"
-        if overlay_path.exists():
-            pdf.sub(f"Schedule: {sched}")
-            pdf.chart(overlay_path, w=240)
+        for suffix in ["", "_aligned_start", "_aligned_end"]:
+            overlay_path = plots_dir / f"{idx:02d}_overlay_{sched}{suffix}.png"
+            parts.append(_chart(overlay_path, f"Schedule: {sched}"))
+    parts.append("</div>")
 
-    pdf.add_page()
-    pdf.stitle("Per-Run Details")
-    pdf.body(
-        "Each plot: (top) schedule bar with Other/Special percentages, "
-        "(middle) accuracy curves with metrics, (bottom) training loss.")
+    parts.append(f'<div class="section" id="per_run"><h2>Per-Run Details</h2>')
+    parts.append("<p>Each plot: schedule bar with Other/Special percentages, "
+                 "accuracy curves with metrics, training loss.</p>")
     for fname in sorted(per_run_fnames):
-        pdf.chart(plots_dir / fname, w=240)
+        parts.append(_chart(plots_dir / fname))
+    parts.append("</div>")
+
+    parts.append("</body></html>")
 
     results_dir = run_dir / "results"
-    out_pdf = (results_dir / "analysis_report.pdf") if results_dir.exists() else (run_dir / "analysis_report.pdf")
-    pdf.output(str(out_pdf))
-    print(f"  Saved {out_pdf}")
+    out_html = (results_dir / "analysis_report.html") if results_dir.exists() else (run_dir / "analysis_report.html")
+    out_html.write_text("".join(parts), encoding="utf-8")
+    print(f"  Saved {out_html}")
 
 
 def plot_task_distributions(run_dir):
