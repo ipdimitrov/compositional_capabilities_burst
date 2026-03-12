@@ -117,6 +117,27 @@ def eval_free_gen(net, docs_BL, prompt_len: int):
     return correct_t.item() / max(total, 1)
 
 
+@torch.no_grad()
+def eval_loss(net, docs_BL):
+    if docs_BL.shape[0] == 0:
+        return float("nan")
+    net.eval()
+    loader = torch.utils.data.DataLoader(
+        BurstDataset(docs_BL), batch_size=256, shuffle=False,
+        pin_memory=(DEVICE == "cuda"))
+    total_loss = 0.0
+    n_batches = 0
+    for dat, tgt in loader:
+        dat, tgt = dat.to(DEVICE, non_blocking=True), tgt.to(DEVICE, non_blocking=True)
+        inp, target = dat[:, :-1], dat[:, 1:]
+        logits = net(inp)
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1))
+        total_loss += loss.item()
+        n_batches += 1
+    net.train()
+    return total_loss / max(n_batches, 1)
+
+
 def checkpoint_steps(P: int, T: int, U: int) -> dict[int, str]:
     """Return {global_step: phase} for all steps that need a checkpoint.
 
@@ -195,7 +216,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
     lr_be = cfg.get("lr_burst_end_frac", 0.1)
     lr_re = cfg.get("lr_reversion_end_frac", 0.01)
 
-    log = {"step": [], "loss": [], "phase": []}
+    log = {"step": [], "loss": [], "loss_other": [], "loss_burst": [], "phase": []}
     for k in EVAL_KEYS:
         log[k] = []
 
@@ -213,6 +234,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
         log["phase"].append(phase)
         for k in EVAL_KEYS:
             log[k].append(eval_free_gen(net, eval_docs[k.removeprefix("acc_")], prompt_len))
+        log["loss_other"].append(eval_loss(net, eval_docs["other"]))
+        log["loss_burst"].append(eval_loss(net, eval_docs["burst"]))
         net.train()
 
     def do_train_step(batch_np, global_step):

@@ -21,7 +21,7 @@ import torch
 
 CUDA_CONTEXT_MB = 650
 MODEL_PLUS_ACTS_MB = 200
-GRADSIM_WORKER_MB = 600
+GRADSIM_WORKER_MB = 2500
 
 GPU_REGISTRY: dict[str, dict] = {
     "H100":          {"vram_gb": 80,  "tflops_bf16": 990},
