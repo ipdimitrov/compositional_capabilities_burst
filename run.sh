@@ -65,5 +65,4 @@ run_experiment 3 3 scaled_batch
 # # ── depth=5 ─────────────────────────────────────────────────────────────
 # run_experiment 5 2 current
 
-echo "=== unified analysis ==="
-"${PYTHON}" burst/unified_analysis.py "${RUN_DIRS[@]}"
+echo "=== all runs complete ==="

@@ -50,6 +50,5 @@ run_experiment 5 5
 run_experiment 4 3
 run_experiment 4 4
 
-echo "=== unified analysis ==="
-"${PYTHON}" burst/unified_analysis.py "${RUN_DIRS[@]}"
+echo "=== all runs complete ==="
 
