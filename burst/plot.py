@@ -354,7 +354,7 @@ def _build_sched_data(results):
     for r in results:
         sched = r["schedule"]
         steps = np.array(r["log"]["step"])
-        for k in list(EVAL_KEYS) + ["loss"]:
+        for k in list(EVAL_KEYS) + ["loss", "loss_other", "loss_burst"]:
             vals = np.array(r["log"].get(k, [float("nan")] * len(steps)))
             sched_data[sched][k].append((steps, vals))
     return sched_data
@@ -522,15 +522,36 @@ def plot_overlay_all_schedules(results, plots_dir, sched_data=None):
             fig.savefig(plots_dir / f"overlay_all_{k}{suffix}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-        fig, ax = plt.subplots(figsize=(11.7, 8.3))
-        fig.suptitle(f"All Schedules - Training Loss\n(mean +/- 95% CI across seeds)",
-                     fontsize=16, fontweight="bold")
-        _overlay_plot(ax, sched_data, "loss", sched_Ts, P, T_max, U_ov, burst_end_max, align)
-        ax.set_ylabel("Cross-Entropy Loss", fontsize=13)
-        fig.tight_layout()
-        suffix = f"_{align}" if align != "absolute" else ""
-        fig.savefig(plots_dir / f"overlay_all_loss{suffix}.png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        loss_keys = [
+            ("loss_other", "Other Class Eval Loss"),
+            ("loss_burst", "Special Class Eval Loss"),
+        ]
+        has_per_class_loss = any(
+            not all(np.isnan(v) for _, vals in sched_data[s].get("loss_other", [])
+                    for v in vals)
+            for s in sched_data
+        )
+        if not has_per_class_loss:
+            loss_keys = [("loss", "Training Loss")]
+
+        for loss_key, loss_label in loss_keys:
+            fig, ax = plt.subplots(figsize=(11.7, 8.3))
+            fig.suptitle(f"All Schedules - {loss_label}\n(mean +/- 95% CI across seeds)",
+                         fontsize=16, fontweight="bold")
+            _overlay_plot(ax, sched_data, loss_key, sched_Ts, P, T_max, U_ov, burst_end_max, align)
+            ax.set_ylabel("Cross-Entropy Loss", fontsize=13)
+            fig.tight_layout()
+            suffix = f"_{align}" if align != "absolute" else ""
+            fig.savefig(plots_dir / f"overlay_all_{loss_key}{suffix}.png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+
+def _fname_has_low_idx(fname: str, max_idx: int = 8) -> bool:
+    """Return True if filename starts with a numeric index <= max_idx (e.g. '00_', '08_')."""
+    parts = fname.split("_", 1)
+    if parts[0].isdigit():
+        return int(parts[0]) <= max_idx
+    return False
 
 
 def _img_tag(path, width="100%") -> str:
@@ -544,7 +565,7 @@ def _img_tag(path, width="100%") -> str:
 
 
 def make_report(run_dir, results, cfg, per_run_fnames):
-    plots_dir = run_dir / "plots"
+    _, _, plots_dir = _resolve_dirs(run_dir)
     rc = parse_run_config(cfg)
     bcfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
 
@@ -646,7 +667,7 @@ def make_report(run_dir, results, cfg, per_run_fnames):
         ("auc_diff", "Pairwise AUC Difference"),
         ("ranking", "Ranking"),
         ("acc_overlay", "Accuracy Overlays"),
-        ("loss_overlay", "Loss Overlays"),
+        ("loss_overlay", "Loss Overlays (per class)"),
         ("per_sched", "Per-Schedule Overlays"),
         ("per_run", "Per-Run Details"),
     ]
@@ -713,24 +734,33 @@ Burst phase length varies per schedule.</p>""")
     parts.append("<p>Lines show mean accuracy across seeds with 95% CI ribbons. "
                  "Vertical dashed line marks the start of the reversion phase.</p>")
     for k in EVAL_KEYS:
-        for suffix, label in [("", "Absolute"), ("_aligned_start", "Burst-Start Aligned"),
-                               ("_aligned_end", "Burst-End Aligned")]:
+        for suffix, label in [("", "Absolute"), ("_start", "Burst-Start Aligned"),
+                               ("_end", "Burst-End Aligned")]:
             p = plots_dir / f"overlay_all_{k}{suffix}.png"
             parts.append(_chart(p, f"{CURVE_STYLE[k]['label']} — {label}"))
     parts.append("</div>")
 
-    parts.append(f'<div class="section" id="loss_overlay"><h2>Training Loss Overlays — All Schedules</h2>')
-    parts.append("<p>Training loss across all schedules with 95% CI ribbons.</p>")
-    for suffix, label in [("", "Absolute"), ("_aligned_start", "Burst-Start Aligned"),
-                           ("_aligned_end", "Burst-End Aligned")]:
-        p = plots_dir / f"overlay_all_loss{suffix}.png"
-        parts.append(_chart(p, f"Training Loss — {label}"))
+    has_per_class_loss = (plots_dir / "overlay_all_loss_other.png").exists()
+    loss_keys_labels = (
+        [("loss_other", "Other Class Eval Loss"), ("loss_burst", "Special Class Eval Loss")]
+        if has_per_class_loss
+        else [("loss", "Training Loss")]
+    )
+    parts.append(f'<div class="section" id="loss_overlay"><h2>Loss Overlays — All Schedules</h2>')
+    parts.append("<p>Eval loss per class across all schedules with 95% CI ribbons.</p>")
+    for loss_key, loss_label in loss_keys_labels:
+        for suffix, align_label in [("", "Absolute"), ("_start", "Burst-Start Aligned"),
+                                    ("_end", "Burst-End Aligned")]:
+            p = plots_dir / f"overlay_all_{loss_key}{suffix}.png"
+            parts.append(_chart(p, f"{loss_label} — {align_label}"))
     parts.append("</div>")
 
     parts.append(f'<div class="section" id="per_sched"><h2>Per-Schedule Accuracy Overlays</h2>')
     for sched in ordered_schedules(set(r["schedule"] for r in results)):
         idx = sched_sort_key(sched)
-        for suffix in ["", "_aligned_start", "_aligned_end"]:
+        if idx <= 8:
+            continue
+        for suffix in ["", "_start", "_end"]:
             overlay_path = plots_dir / f"{idx:02d}_overlay_{sched}{suffix}.png"
             parts.append(_chart(overlay_path, f"Schedule: {sched}"))
     parts.append("</div>")
@@ -738,7 +768,7 @@ Burst phase length varies per schedule.</p>""")
     parts.append(f'<div class="section" id="per_run"><h2>Per-Run Details</h2>')
     parts.append("<p>Each plot: schedule bar with Other/Special percentages, "
                  "accuracy curves with metrics, training loss.</p>")
-    for fname in sorted(per_run_fnames):
+    for fname in sorted(f for f in per_run_fnames if not _fname_has_low_idx(f)):
         parts.append(_chart(plots_dir / fname))
     parts.append("</div>")
 
