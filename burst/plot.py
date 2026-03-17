@@ -1151,7 +1151,8 @@ def main():
     plot_overlay_per_schedule(results, plots_dir, sched_data=sched_data)
 
     print("Overlay all schedules...")
-    plot_overlay_all_schedules(results, plots_dir, sched_data=sched_data)
+    if results:
+        plot_overlay_all_schedules(results, plots_dir, sched_data=sched_data)
 
     print("LR schedule...")
     plot_lr_schedule(cfg["base_cfg"], plots_dir, schedules=cfg.get("schedules"),

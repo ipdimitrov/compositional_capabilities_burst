@@ -241,7 +241,7 @@ def run_pretrain(
     Returns a pretrain log dict with step/loss/phase/acc_other/acc_burst lists
     so charts can show the pretraining trajectory.
     """
-    from burst._worker import eval_free_gen
+    from burst._worker import eval_free_gen, eval_loss
     from burst.config import EVAL_KEYS, PHASE_PRE_BURST
 
     set_seed(seed)
@@ -273,7 +273,7 @@ def run_pretrain(
     bg_ids = list(bg_pool.keys())
     bs = cfg["batch_size"]
 
-    log: dict[str, list] = {"step": [], "loss": [], "phase": []}
+    log: dict[str, list] = {"step": [], "loss": [], "loss_other": [], "loss_burst": [], "phase": []}
     for k in EVAL_KEYS:
         log[k] = []
 
@@ -314,6 +314,8 @@ def run_pretrain(
             for ek in EVAL_KEYS:
                 pool_key = ek.removeprefix("acc_")
                 log[ek].append(eval_free_gen(net, eval_docs[pool_key], prompt_len))
+            log["loss_other"].append(eval_loss(net, eval_docs["other"]))
+            log["loss_burst"].append(eval_loss(net, eval_docs["burst"]))
             net.train()
 
         if (s + 1) % 100 == 0 or s == pretrain_steps - 1:
