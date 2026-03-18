@@ -199,7 +199,7 @@ class TrainConfig:
 @dataclass
 class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
-    n_seeds: int = 5
+    n_seeds: int = 10
     n_workers: int = 0
     depth: int = 3
     burst_pos: int = 3

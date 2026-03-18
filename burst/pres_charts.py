@@ -23,27 +23,30 @@ def load_grad_sim_data(run_dir) -> list[dict]:
 
     Falls back to extracting from all_results.pkl if the folder doesn't exist.
     """
-    gs_dir = Path(run_dir) / "grad_cosine_sim"
+    rd = Path(run_dir)
     records = []
-    if gs_dir.is_dir():
-        for fp in sorted(gs_dir.glob("*.json")):
-            with open(fp) as f:
-                records.append(json.load(f))
-    if records:
-        return records
+    for gs_dir in [rd / "results" / "grad_cosine_sim", rd / "grad_cosine_sim"]:
+        if gs_dir.is_dir():
+            for fp in sorted(gs_dir.glob("*.json")):
+                with open(fp) as f:
+                    records.append(json.load(f))
+            if records:
+                return records
 
-    pkl = Path(run_dir) / "all_results.pkl"
-    if pkl.exists():
-        with open(pkl, "rb") as f:
-            results = pickle.load(f)
-        for r in results:
-            if "grad_sim_log" in r and r["grad_sim_log"]["step"]:
-                records.append({
-                    "schedule": r["schedule"], "seed": r["seed"],
-                    "label": r.get("label", ""),
-                    "grad_sim_log": r["grad_sim_log"],
-                    "pairwise_snapshots": r.get("pairwise_snapshots", []),
-                })
+    for pkl in [rd / "logs" / "all_results.pkl", rd / "all_results.pkl"]:
+        if pkl.exists():
+            with open(pkl, "rb") as f:
+                results = pickle.load(f)
+            for r in results:
+                if "grad_sim_log" in r and r["grad_sim_log"]["step"]:
+                    records.append({
+                        "schedule": r["schedule"], "seed": r["seed"],
+                        "label": r.get("label", ""),
+                        "grad_sim_log": r["grad_sim_log"],
+                        "pairwise_snapshots": r.get("pairwise_snapshots", []),
+                    })
+            if records:
+                return records
     return records
 
 
@@ -1136,7 +1139,10 @@ def pairwise_grad_cosine_evolution_per_schedule(pdir, cfg, gs_records):
 
 def _load_probe_data(run_dir):
     """Load probe results if available. Returns (results, meta) or (None, None)."""
-    probe_dir = Path(run_dir) / "probes"
+    rd = Path(run_dir)
+    probe_dir = rd / "probes"
+    if not probe_dir.exists():
+        probe_dir = rd / "results" / "probes"
     all_path = probe_dir / "all_probes.pkl"
     if not all_path.exists():
         return None, None
@@ -1704,13 +1710,16 @@ def grad_cosine_layer_end_burst_bars(pdir, cfg, gs_records):
 
 def load_adl_data(run_dir) -> list[dict]:
     """Load ADL records from the adl/ folder."""
-    adl_dir = Path(run_dir) / "adl"
-    records = []
-    if adl_dir.is_dir():
-        for fp in sorted(adl_dir.glob("*.json")):
-            with open(fp) as f:
-                records.append(json.load(f))
-    return records
+    rd = Path(run_dir)
+    for adl_dir in [rd / "results" / "adl", rd / "adl"]:
+        if adl_dir.is_dir():
+            records = []
+            for fp in sorted(adl_dir.glob("*.json")):
+                with open(fp) as f:
+                    records.append(json.load(f))
+            if records:
+                return records
+    return []
 
 
 def _group_adl(records):
@@ -1952,68 +1961,73 @@ def generate_all(run_dir, results, cfg):
     ns = len(set(r["seed"] for r in results))
     gr = _group(results)
 
-    burst_key = "acc_burst"
-    other_key = "acc_other"
-    auc_metric = "reversion_auc"
-    peak_metric = "peak_burst"
+    has_training_data = any(r.get("log", {}).get("step") for r in results)
 
-    print("  Schedule bars...")
-    cp["schedule_bars"] = schedule_bars(pdir, results, cfg)
-    for al, al_suffix in [("absolute", ""), ("start", "_aligned_start"), ("end", "_aligned_end")]:
-        print(f"  Special class overlay ({al})...")
-        cp[f"overlay_burst{al_suffix}"] = overlay(pdir, results, cfg, burst_key,
-                                  "Special Class Accuracy (free generation)",
-                                  f"Special Class Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
-                                  f"overlay_burst{al_suffix}.png", groups=gr, align=al)
-        print(f"  Other classes overlay ({al})...")
-        cp[f"overlay_other{al_suffix}"] = overlay(pdir, results, cfg, other_key,
-                                  "Other Classes Accuracy (free generation)",
-                                  f"Other Classes Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
-                                  f"overlay_other{al_suffix}.png", loc="lower right", groups=gr, align=al)
-        print(f"  Training loss overlay ({al})...")
-        cp[f"overlay_loss{al_suffix}"] = overlay(pdir, results, cfg, "loss",
-                                  "Training Loss",
-                                  f"Training Loss\n(mean +/- 95% CI, n={ns} seeds)",
-                                  f"overlay_loss{al_suffix}.png", loc="upper right", groups=gr, align=al)
-    print("  Reversion AUC bars...")
-    cp["auc_bars"] = bar_chart(pdir, results, cfg, auc_metric,
-                               "Reversion AUC (higher = slower forgetting)",
-                               "Reversion AUC by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-                               "auc_bars.png", groups=gr)
-    thresholds = TrainConfig().reversion_thresholds
-    cp["life_bars"] = {}
-    for t in thresholds:
-        key = reversion_life_key(t)
-        label = reversion_life_label(t)
-        pct = int(t * 100)
-        print(f"  {label} bars...")
-        chart = bar_chart(
-            pdir, results, cfg, key,
-            f"{label} (reversion steps to {pct}% of peak)",
-            f"{label} by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-            f"life_{pct}_bars.png", groups=gr,
-        )
-        if chart is not None:
-            cp["life_bars"][t] = chart
-    print("  Peak burst bars...")
-    cp["peak_bars"] = bar_chart(pdir, results, cfg, peak_metric,
-                                "Peak Special Class Accuracy at End of Training",
-                                "Peak Special Class Accuracy by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-                                "peak_b_bars.png", fmt_dec=3, groups=gr)
-    print("  AUC diff heatmap...")
-    cp["auc_diff"] = auc_diff(pdir, results, cfg, groups=gr)
-    print("  LR schedule...")
-    cp["lr"] = lr_schedule(pdir, cfg)
-    print("  Reversion zoom...")
-    cp["reversion_zoom"] = reversion_zoom(pdir, results, cfg, groups=gr)
-    print("  Summary table...")
-    cp["summary_table"] = summary_table(pdir, results, cfg, groups=gr)
-    print("  Per-schedule overlays...")
-    cp["per_sched"] = per_sched(pdir, results, cfg, groups=gr, align="absolute")
-    print("  Per-schedule overlays (aligned start)...")
-    cp["per_sched_start"] = per_sched(pdir, results, cfg, groups=gr, align="start")
-    print("  Per-schedule overlays (aligned end)...")
-    cp["per_sched_end"] = per_sched(pdir, results, cfg, groups=gr, align="end")
+    if has_training_data:
+        burst_key = "acc_burst"
+        other_key = "acc_other"
+        auc_metric = "reversion_auc"
+        peak_metric = "peak_burst"
+
+        print("  Schedule bars...")
+        cp["schedule_bars"] = schedule_bars(pdir, results, cfg)
+        for al, al_suffix in [("absolute", ""), ("start", "_aligned_start"), ("end", "_aligned_end")]:
+            print(f"  Special class overlay ({al})...")
+            cp[f"overlay_burst{al_suffix}"] = overlay(pdir, results, cfg, burst_key,
+                                      "Special Class Accuracy (free generation)",
+                                      f"Special Class Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
+                                      f"overlay_burst{al_suffix}.png", groups=gr, align=al)
+            print(f"  Other classes overlay ({al})...")
+            cp[f"overlay_other{al_suffix}"] = overlay(pdir, results, cfg, other_key,
+                                      "Other Classes Accuracy (free generation)",
+                                      f"Other Classes Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
+                                      f"overlay_other{al_suffix}.png", loc="lower right", groups=gr, align=al)
+            print(f"  Training loss overlay ({al})...")
+            cp[f"overlay_loss{al_suffix}"] = overlay(pdir, results, cfg, "loss",
+                                      "Training Loss",
+                                      f"Training Loss\n(mean +/- 95% CI, n={ns} seeds)",
+                                      f"overlay_loss{al_suffix}.png", loc="upper right", groups=gr, align=al)
+        print("  Reversion AUC bars...")
+        cp["auc_bars"] = bar_chart(pdir, results, cfg, auc_metric,
+                                   "Reversion AUC (higher = slower forgetting)",
+                                   "Reversion AUC by Schedule\n(mean +/- 95% CI, individual seeds shown)",
+                                   "auc_bars.png", groups=gr)
+        thresholds = TrainConfig().reversion_thresholds
+        cp["life_bars"] = {}
+        for t in thresholds:
+            key = reversion_life_key(t)
+            label = reversion_life_label(t)
+            pct = int(t * 100)
+            print(f"  {label} bars...")
+            chart = bar_chart(
+                pdir, results, cfg, key,
+                f"{label} (reversion steps to {pct}% of peak)",
+                f"{label} by Schedule\n(mean +/- 95% CI, individual seeds shown)",
+                f"life_{pct}_bars.png", groups=gr,
+            )
+            if chart is not None:
+                cp["life_bars"][t] = chart
+        print("  Peak burst bars...")
+        cp["peak_bars"] = bar_chart(pdir, results, cfg, peak_metric,
+                                    "Peak Special Class Accuracy at End of Training",
+                                    "Peak Special Class Accuracy by Schedule\n(mean +/- 95% CI, individual seeds shown)",
+                                    "peak_b_bars.png", fmt_dec=3, groups=gr)
+        print("  AUC diff heatmap...")
+        cp["auc_diff"] = auc_diff(pdir, results, cfg, groups=gr)
+        print("  LR schedule...")
+        cp["lr"] = lr_schedule(pdir, cfg)
+        print("  Reversion zoom...")
+        cp["reversion_zoom"] = reversion_zoom(pdir, results, cfg, groups=gr)
+        print("  Summary table...")
+        cp["summary_table"] = summary_table(pdir, results, cfg, groups=gr)
+        print("  Per-schedule overlays...")
+        cp["per_sched"] = per_sched(pdir, results, cfg, groups=gr, align="absolute")
+        print("  Per-schedule overlays (aligned start)...")
+        cp["per_sched_start"] = per_sched(pdir, results, cfg, groups=gr, align="start")
+        print("  Per-schedule overlays (aligned end)...")
+        cp["per_sched_end"] = per_sched(pdir, results, cfg, groups=gr, align="end")
+    else:
+        print("  (skipping training-data charts — no all_results.pkl)")
 
     gs_records = load_grad_sim_data(run_dir)
     gs_dir = pdir / "grad_cosine_sim"

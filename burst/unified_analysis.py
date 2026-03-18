@@ -182,13 +182,15 @@ def _ckpt_files(ckpt_dir: Path) -> dict[int, Path]:
 
 
 def _get_key_steps(files: dict[int, Path], r: dict):
+    """Find pre-burst, peak-burst, and end-of-reversion checkpoint steps.
+
+    Checkpoint files are numbered relative to burst start (P=0 in
+    checkpoint_steps), so burst occupies [0, T) and reversion [T, T+U).
+    """
     available = sorted(files.keys())
-    P = r.get("pre_burst_steps", 0)
     T = r["config"]["total_steps"]
-    burst_end_step = r.get("burst_end_step", P + T)
-    burst_last_step = burst_end_step - 1
-    pre_step = available[0] if P == 0 else min(available, key=lambda x: abs(x - max(0, P - 1)))
-    peak_step = min(available, key=lambda x: abs(x - burst_last_step))
+    pre_step = available[0]
+    peak_step = min(available, key=lambda x: abs(x - (T - 1)))
     rev_step = max(available)
     return pre_step, peak_step, rev_step
 
@@ -962,8 +964,7 @@ def compute_trajectory_dim(
                 continue
 
             T = r["config"]["total_steps"]
-            burst_end = r.get("burst_end_step", r.get("pre_burst_steps", 0) + T)
-            rev_steps_all = sorted(s for s in files if s >= burst_end)
+            rev_steps_all = sorted(s for s in files if s >= T)
             if len(rev_steps_all) < 3:
                 continue
 
