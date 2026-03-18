@@ -88,17 +88,9 @@ post_process() {
 
     wait "${pid_plot}" || { echo "FAIL: plot.py"; fail=1; }
 
-    if [ "${fail}" -eq 0 ]; then
-        echo "Building presentation HTML..."
-        "${PYTHON}" burst/pres_pdf.py "${run_dir}"
-    else
-        echo "WARNING: some post-processing steps failed, skipping PDF"
-    fi
-
-    echo "  Running combined analysis dashboard (unified + basin + plots)..."
-    "${PYTHON}" burst/run_analysis.py "${run_dir}" \
-        --n-seeds 3 \
-        || echo "WARNING: run_analysis.py failed (non-critical)"
+    echo "  Building combined report (HTML + TXT + unified/basin/extended)..."
+    "${PYTHON}" burst/pres_pdf.py "${run_dir}" --full --n-seeds 3 \
+        || echo "WARNING: pres_pdf.py --full failed (non-critical)"
 
     echo "  Organizing files for download..."
     "${PYTHON}" scripts/organize_run.py "${run_dir}" \

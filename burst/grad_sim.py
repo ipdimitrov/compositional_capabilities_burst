@@ -459,7 +459,7 @@ def compute_pairwise_grad_sim(net, task_docs: dict,
     from burst.config import CLASS_BURST
     net.train()
 
-    burst_pos_idx = 1 + (depth - burst_pos)
+    burst_pos_idx = burst_pos
 
     # Functions at burst_pos have bijection indices in this range
     bp_fn_indices = list(range((burst_pos - 1) * n_a + 1, burst_pos * n_a + 1))
