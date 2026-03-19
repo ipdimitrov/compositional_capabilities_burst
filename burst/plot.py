@@ -1127,12 +1127,15 @@ def main():
     results, cfg = load_results(run_dir)
     _, logs_dir, plots_dir = _resolve_dirs(run_dir)
 
-    print("Per-run plots...")
+    minimal = os.environ.get("BURST_MINIMAL_PLOTS", "1") == "1"
+
     per_run_fnames = []
-    for r in results:
-        fname = plot_per_run(r, plots_dir, run_cfg=cfg)
-        per_run_fnames.append(fname)
-        print(f"  {fname}")
+    if not minimal:
+        print("Per-run plots...")
+        for r in results:
+            fname = plot_per_run(r, plots_dir, run_cfg=cfg)
+            per_run_fnames.append(fname)
+            print(f"  {fname}")
 
     print("Summary bars...")
     plot_summary_bars(results, plots_dir, cfg)
@@ -1147,8 +1150,9 @@ def main():
 
     sched_data = _build_sched_data(results)
 
-    print("Overlay per schedule...")
-    plot_overlay_per_schedule(results, plots_dir, sched_data=sched_data)
+    if not minimal:
+        print("Overlay per schedule...")
+        plot_overlay_per_schedule(results, plots_dir, sched_data=sched_data)
 
     print("Overlay all schedules...")
     if results:
@@ -1158,11 +1162,13 @@ def main():
     plot_lr_schedule(cfg["base_cfg"], plots_dir, schedules=cfg.get("schedules"),
                      burst_mode=cfg.get("burst_mode", MODE_CURRENT))
 
-    print("Task distributions...")
-    plot_task_distributions(run_dir)
+    if not minimal:
+        print("Task distributions...")
+        plot_task_distributions(run_dir)
 
-    print("PDF report...")
-    make_report(run_dir, results, cfg, per_run_fnames)
+        print("PDF report...")
+        make_report(run_dir, results, cfg, per_run_fnames)
+
     print("\nDone.")
 
 

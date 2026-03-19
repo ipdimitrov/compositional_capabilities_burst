@@ -29,6 +29,9 @@ if __name__ == "__main__":
         jobs = pickle.load(f)
 
     for job in jobs:
-        run(job, args.data_path, args.run_dir, args.progress_dir)
+        try:
+            run(job, args.data_path, args.run_dir, args.progress_dir)
+        except Exception as e:
+            print(f"WORKER FAIL {job.get('label', '?')}: {e}", file=sys.stderr, flush=True)
         if DEVICE == "cuda":
             torch.cuda.empty_cache()

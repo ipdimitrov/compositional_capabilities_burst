@@ -376,7 +376,7 @@ def compute_relearning_efficiency(
         if all_accs:
             steps_common = [a[0] for a in all_accs[0]]
             mean_accs = [float(np.mean([run[i][1] for run in all_accs])) for i in range(len(steps_common))]
-            _trapz = getattr(np, "trapezoid", np.trapz)
+            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
             auc = float(_trapz(mean_accs, steps_common)) / max(steps_common[-1], 1) if len(steps_common) > 1 else 0.0
         else:
             steps_common, mean_accs, auc = [], [], float("nan")
@@ -560,7 +560,7 @@ def compute_pruning_robustness(
         if all_acc_curves:
             mean_curve = [float(np.mean([c[i] for c in all_acc_curves])) for i in range(n_prune_levels)]
             # Area under pruning curve (higher = more robust = deeper)
-            _trapz = getattr(np, "trapezoid", np.trapz)
+            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
             robustness_auc = float(_trapz(mean_curve, sparsities))
         else:
             mean_curve = [float("nan")] * n_prune_levels
