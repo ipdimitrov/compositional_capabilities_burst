@@ -238,6 +238,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
         log["loss_burst"].append(eval_loss(net, eval_docs["burst"]))
         net.train()
 
+    max_micro_bs = 512
+
     def do_train_step(batch_np, global_step):
         dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
@@ -246,16 +248,23 @@ def run(job, shared_data_path, run_dir, progress_dir):
             lr_max, lr_pe, lr_be, lr_re,
         )
         optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            logits = net(inp)
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
-        scaler.scale(loss).backward()
+        n = inp.size(0)
+        n_accum = (n + max_micro_bs - 1) // max_micro_bs
+        total_loss = 0.0
+        for i in range(n_accum):
+            s, e = i * max_micro_bs, min((i + 1) * max_micro_bs, n)
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+                logits = net(inp[s:e])
+                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt[s:e].reshape(-1))
+                loss = loss / n_accum
+            scaler.scale(loss).backward()
+            total_loss += loss.item()
         if cfg["grad_clip"] > 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(net.parameters(), cfg["grad_clip"])
         scaler.step(optimizer)
         scaler.update()
-        return loss.item()
+        return total_loss
 
     net.train()
 
@@ -341,7 +350,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     peak_burst = max(burst_accs) if burst_accs else 0
     reversion_end_burst = reversion_accs[-1] if reversion_accs else peak_burst
-    _trapz = getattr(np, "trapezoid", np.trapz)
+    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
     reversion_auc = float(_trapz(reversion_accs, reversion_steps_rel)) if len(reversion_accs) > 1 else 0.0
 
     thresholds = TrainConfig().reversion_thresholds

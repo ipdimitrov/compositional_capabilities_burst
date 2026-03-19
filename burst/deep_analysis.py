@@ -339,7 +339,8 @@ def ema_interpolation_probe(
     # Compute "cliff sharpness": alpha at which accuracy first exceeds 0.5
     cliff_alpha = next((a for a, acc in zip(alphas, accs) if acc > 0.5), 1.0)
     # Area under the curve (higher = more gradual = deeper)
-    auc = float(np.trapz(accs, alphas))
+    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    auc = float(_trapz(accs, alphas))
 
     return {"alphas": alphas, "accs": accs, "cliff_alpha": cliff_alpha, "auc": auc}
 

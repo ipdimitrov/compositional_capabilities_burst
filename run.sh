@@ -27,10 +27,13 @@ run_experiment() {
     local mode="${3:-current}"
 
     echo "=== depth=${depth} burst_pos=${pos} mode=${mode} ==="
-    local run_dir
-    run_dir=$("${PYTHON}" burst/experiment.py \
+    local run_dir _tmplog
+    _tmplog=$(mktemp)
+    "${PYTHON}" burst/experiment.py \
         --depth "${depth}" --burst-pos "${pos}" --burst-mode "${mode}" \
-        | tee /dev/stderr | grep "^Output:" | head -1 | awk '{print $2}')
+        2>&1 | tee "${_tmplog}"
+    run_dir=$(grep "^Output:" "${_tmplog}" | head -1 | awk '{print $2}')
+    rm -f "${_tmplog}"
 
     if [ -z "${run_dir}" ]; then
         echo "WARNING: could not detect run_dir, falling back to latest on disk"

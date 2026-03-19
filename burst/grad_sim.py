@@ -45,13 +45,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 GRAD_METRICS: dict[str, bool] = {
     "cosine_global":    True,   # burst-vs-other cosine similarity (aggregate)
     "cosine_per_layer": True,   # per-layer burst-vs-other cosine heatmap
-    "pairwise":         True,   # pairwise task-group cosine sim matrix
+    "pairwise":         False,  # pairwise task-group cosine sim matrix (disabled for speed)
     "grad_norm_ratio":  True,   # per-layer ||g_burst|| / ||g_other||
     "grad_rank":        True,   # effective rank of per-layer gradient matrix
-    "grad_snr":         True,   # per-layer gradient signal-to-noise ratio
+    "grad_snr":         False,  # per-layer gradient signal-to-noise ratio (disabled for speed)
     "conflict_rate":    True,   # per-layer fraction of params with sign conflict
-    "token_pos_grad":   True,   # per-token-position embedding gradient norm
-    "grad_attribution": True,   # fraction of gradient from intermediate vs final outputs
+    "token_pos_grad":   False,  # per-token-position embedding gradient norm (disabled for speed)
+    "grad_attribution": False,  # fraction of gradient from intermediate vs final outputs (disabled for speed)
     "grad_projection":  True,   # OGD-style projection: interference magnitude, useful learning, ratio
 }
 
@@ -121,7 +121,7 @@ def _grad_vecs_per_layer(net, docs_np: np.ndarray, n_samples: int,
     inp, tgt = dat[:, :-1], dat[:, 1:]
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
         logits = net(inp)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+    loss = F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), tgt.reshape(-1))
     loss.backward()
 
     param_map = dict(net.named_parameters())
@@ -143,7 +143,7 @@ def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int) -> torch.Tensor
     inp, tgt = dat[:, :-1], dat[:, 1:]
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
         logits = net(inp)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+    loss = F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), tgt.reshape(-1))
     loss.backward()
     return _flat_grad(net).float()
 
@@ -286,6 +286,11 @@ def _grad_projection_metrics(
     norm_o = g_o.norm()
     norm_b = g_b.norm()
 
+    burst_l1 = float(g_b.abs().sum().item())
+    burst_linf = float(g_b.abs().max().item())
+    other_l1 = float(g_o.abs().sum().item())
+    other_linf = float(g_o.abs().max().item())
+
     if norm_o < 1e-12 or norm_b < 1e-12:
         return {
             "interference_magnitude": float("nan"),
@@ -293,9 +298,12 @@ def _grad_projection_metrics(
             "interference_ratio": float("nan"),
             "burst_norm": float(norm_b.item()),
             "other_norm": float(norm_o.item()),
+            "burst_l1": burst_l1,
+            "burst_linf": burst_linf,
+            "other_l1": other_l1,
+            "other_linf": other_linf,
         }
 
-    # Scalar projection coefficient: (g_burst · g_other) / ||g_other||^2
     dot = (g_b * g_o).sum()
     proj_coeff = dot / (norm_o ** 2)
 
@@ -312,6 +320,10 @@ def _grad_projection_metrics(
         "interference_ratio": float(interference_ratio),
         "burst_norm": float(norm_b.item()),
         "other_norm": float(norm_o.item()),
+        "burst_l1": burst_l1,
+        "burst_linf": burst_linf,
+        "other_l1": other_l1,
+        "other_linf": other_linf,
     }
 
 
@@ -336,7 +348,7 @@ def _token_pos_grad_norms(net, docs_np: np.ndarray, n_samples: int) -> list[floa
     net.zero_grad(set_to_none=True)
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
         logits = net(inp)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+    loss = F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), tgt.reshape(-1))
     loss.backward()
     handle.remove()
 

@@ -454,12 +454,7 @@ def main():
                       "batch_size": j["cfg"]["batch_size"]} for j in jobs],
         }, f, indent=2, cls=NpEncoder)
 
-    if burst_mode == MODE_SCALED_BATCH:
-        max_bs = max(j["cfg"]["batch_size"] for j in jobs)
-        safe_workers = gpu_cfg.train_workers_for_batch_size(max_bs, base_cfg["batch_size"])
-        n_procs = min(len(jobs), safe_workers)
-    else:
-        n_procs = min(len(jobs), exp.n_workers)
+    n_procs = min(len(jobs), exp.n_workers)
     jobs_per_proc = max(1, (len(jobs) + n_procs - 1) // n_procs)
     print(f"  {gpu_cfg.summary()}", flush=True)
     print(f"  Layout: {n_procs} processes x ~{jobs_per_proc} jobs/proc", flush=True)

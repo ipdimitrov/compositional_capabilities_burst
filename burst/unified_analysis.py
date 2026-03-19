@@ -2068,7 +2068,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         )
         _add(f"relearning_delta_{rn}", f"Relearning Δ ({rn})", fig_delta)
 
-        _trapz = getattr(np, "trapezoid", np.trapz)
+        _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
         auc_vals = {}
         for sched in schedules:
             ps = rl[sched]["per_seed"]

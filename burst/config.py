@@ -41,9 +41,8 @@ CLASS_BURST = "burst"
 
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
-# burst_10 removed: use 25–100% only (sampling-based, variable-length burst)
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 98, 95, 90, 80, 50, 40, 25, 20]
+BURST_FRACTIONS = [100, 98, 95, 90, 80, 50, 40, 25, 20, 10, 0]
 
 UNIFORM_PCT = 25
 
@@ -108,7 +107,7 @@ DATA_SEED = 999
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
-BURST_BASE_STEPS = 150
+BURST_BASE_STEPS = 200
 
 MODE_CURRENT = "current"
 MODE_CONSTANT_STEPS = "constant_steps"
@@ -125,8 +124,12 @@ def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) 
     """
     if schedule == "burst_100":
         return base_steps
+    if schedule == "burst_0":
+        return base_steps
     if schedule in MIXED_FRACTIONS:
         frac = MIXED_FRACTIONS[schedule]
+        if frac <= 0:
+            return base_steps
         return max(base_steps, int(round(base_steps / frac)))
     return base_steps
 
@@ -149,6 +152,8 @@ def batch_size_for_mode(
     if mode != MODE_SCALED_BATCH:
         return base_batch_size
     frac = MIXED_FRACTIONS.get(schedule, 1.0)
+    if frac <= 0:
+        return base_batch_size
     return max(base_batch_size, int(round(base_batch_size / frac)))
 
 
