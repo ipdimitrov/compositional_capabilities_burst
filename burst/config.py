@@ -42,7 +42,7 @@ CLASS_BURST = "burst"
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 98, 95, 90, 80, 50, 40, 25, 20, 10, 0]
+BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10]
 
 UNIFORM_PCT = 25
 
@@ -107,7 +107,7 @@ DATA_SEED = 999
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
-BURST_BASE_STEPS = 200
+BURST_BASE_STEPS = 800
 
 MODE_CURRENT = "current"
 MODE_CONSTANT_STEPS = "constant_steps"

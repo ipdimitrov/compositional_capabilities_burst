@@ -46,8 +46,8 @@ run_experiment() {
 
 # ── depth=3 pos=3 (priority: run first) ──────────────────────────────────
 run_experiment 3 3 constant_steps
-run_experiment 3 3 scaled_batch
-run_experiment 3 3 current
+# run_experiment 3 3 scaled_batch
+# run_experiment 3 3 current
 
 # # ── depth=3 pos=2 (overnight) ────────────────────────────────────────────
 # run_experiment 3 2 current
