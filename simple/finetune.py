@@ -8,7 +8,7 @@ import numpy as np
 from pathlib import Path
 from tqdm.auto import tqdm
 
-from burst.simple.model import (
+from simple.model import (
     load_model, save_model, make_optimizer,
     train_step, eval_accuracy, eval_loss, cosine_lr,
     MODEL_DEFAULTS,

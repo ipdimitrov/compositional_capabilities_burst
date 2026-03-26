@@ -9,27 +9,29 @@ dependencies = [
     "numba==0.57.0",
     "omegaconf==2.3.0",
     "numpy==1.24.4",
-    "fpdf2==2.8.3",
     "tqdm==4.67.3",
     "matplotlib==3.10.8",
     "ipykernel==7.2.0",
     "ipython==8.14.0",
     "jupyter==1.0.0",
-    "plotly>=6.5.2",
-    "kaleido>=1.2.0",
-    "pandas>=2.3.2",
-    "openpyxl>=3.1.5",
+    "ipywidgets>=8.1.8",
 ]
 
 [tool.uv]
+environments = ["sys_platform == 'linux'"]
 index = [
-    { name = "pytorch-cu126", url = "https://download.pytorch.org/whl/cu126", explicit = true },
+    { name = "pytorch-nightly-cu128", url = "https://download.pytorch.org/whl/nightly/cu128", explicit = true },
+    { name = "pytorch-nightly", url = "https://download.pytorch.org/whl/nightly", explicit = true },
+]
+override-dependencies = [
+    "triton; sys_platform == 'linux'",   # strip the git hash pin, accept any version
 ]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchvision = { index = "pytorch-cu126" }
-torchaudio = { index = "pytorch-cu126" }
+torch = { index = "pytorch-nightly-cu128" }
+torchvision = { index = "pytorch-nightly-cu128" }
+torchaudio = { index = "pytorch-nightly-cu128" }
+triton = { index = "pytorch-nightly" }
 
 [dependency-groups]
 dev = [
