@@ -4,6 +4,7 @@ Loads a finetuned checkpoint and trains on background data only.  Tracks how
 quickly the model forgets the burst capability.
 """
 import numpy as np
+import torch
 from pathlib import Path
 from tqdm.auto import tqdm
 
@@ -12,6 +13,7 @@ from simple.model import (
     train_step, eval_accuracy, eval_loss, cosine_lr,
     MODEL_DEFAULTS,
 )
+from simple.interp import state_dict_cpu, weight_drift_l2
 
 
 def forget(
@@ -19,6 +21,7 @@ def forget(
     finetune_ckpt: str | Path,
     out_dir: str | Path,
     *,
+    pretrain_ckpt: str | Path | None = None,
     steps: int = 500,
     lr: float = MODEL_DEFAULTS["lr"],
     lr_start_frac: float = 0.15,
@@ -66,13 +69,20 @@ def forget(
     eval_burst = data["eval_burst"]
 
     np.random.seed(seed)
-    import torch; torch.manual_seed(seed)
+    torch.manual_seed(seed)
 
     net = load_model(finetune_ckpt, vocab_size, context_size,
                      n_layer=n_layer, n_embd=n_embd, n_head=n_head)
     optimizer = make_optimizer(net, lr=lr * lr_start_frac,
                                weight_decay=weight_decay, beta1=beta1, beta2=beta2)
     reset_optimizer(optimizer)  # fresh momentum for reversion phase
+
+    # reference state dicts for weight drift tracking
+    sd_ft = state_dict_cpu(net)
+    sd_pt = None
+    if pretrain_ckpt is not None:
+        from simple.interp import load_sd
+        sd_pt = load_sd(pretrain_ckpt)
 
     # measure peak burst accuracy at start of reversion
     peak_burst = eval_accuracy(net, eval_burst, prompt_len)
@@ -82,7 +92,8 @@ def forget(
     lr_end = lr * lr_end_frac
 
     log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
-           "loss_other": [], "loss_burst": [], "lr": []}
+           "loss_other": [], "loss_burst": [], "lr": [],
+           "weight_drift_from_ft": [], "weight_drift_from_pt": []}
 
     net.train()
     pbar = tqdm(range(steps), desc=f"Forget {tag}", disable=quiet)
@@ -113,7 +124,17 @@ def forget(
             log["loss_other"].append(lo)
             log["loss_burst"].append(lb)
             log["lr"].append(cur_lr)
-            pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}")
+
+            # interp metrics
+            sd_now = state_dict_cpu(net)
+            drift_ft = weight_drift_l2(sd_ft, sd_now)["total"]
+            log["weight_drift_from_ft"].append(drift_ft)
+            if sd_pt is not None:
+                drift_pt = weight_drift_l2(sd_pt, sd_now)["total"]
+                log["weight_drift_from_pt"].append(drift_pt)
+
+            pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
+                             drift=f"{drift_ft:.3f}")
             net.train()
 
     # -- metrics --
@@ -142,12 +163,14 @@ def forget(
     dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > 1e-6 else 0.0
 
     # save
-    save_model(net, out_dir / f"{tag}_reverted_ckpt.pt")
+    ckpt_path = out_dir / f"{tag}_reverted_ckpt.pt"
+    save_model(net, ckpt_path)
     np.savez(out_dir / f"{tag}_forget_log.npz",
              **{k: np.array(v) for k, v in log.items()})
 
     return {
         "log": log,
+        "ckpt_path": str(ckpt_path),
         "tag": tag,
         "peak_burst": peak_burst,
         "reversion_auc": reversion_auc,
@@ -156,3 +179,8 @@ def forget(
         "dropoff_pct": dropoff_pct,
         "end_burst_acc": end_burst,
     }
+
+
+def _forget_worker(kwargs):
+    """Pickle-able entry point for multiprocessing."""
+    return forget(**kwargs)
