@@ -6,6 +6,7 @@ burst_frac values to sweep concentrations.
 """
 import numpy as np
 import torch
+import torch.nn.functional as F
 from pathlib import Path
 from tqdm.auto import tqdm
 
@@ -14,7 +15,10 @@ from simple.model import (
     train_step, eval_accuracy, eval_loss, cosine_lr,
     MODEL_DEFAULTS,
 )
-from simple.interp import state_dict_cpu, weight_drift_l2, gradient_cosine
+from simple.interp import (
+    state_dict_cpu, weight_drift_l2,
+    _get_grad_vector, gradient_cosine_per_layer, grad_norm_entropy,
+)
 
 
 def _sample_batch(target_pool, bg_pool, n_target, batch_size):
@@ -102,7 +106,10 @@ def finetune(
 
     log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
            "loss_other": [], "loss_burst": [], "lr": [],
-           "weight_drift": [], "grad_cosine_burst_bg": []}
+           "weight_drift": [],
+           "grad_norm_burst": [], "grad_norm_bg": [], "grad_norm_train": [],
+           "grad_cosine_burst_bg": [], "grad_cosine_per_layer": [],
+           "grad_norm_entropy_burst": [], "grad_norm_entropy_bg": []}
 
     lr_start = lr * lr_start_frac
     lr_end = lr * lr_end_frac
@@ -135,11 +142,35 @@ def finetune(
             drift = weight_drift_l2(sd_ref, sd_now)["total"]
             log["weight_drift"].append(drift)
 
-            # gradient cosine: burst vs background
+            # gradient norms & cosine: burst vs background
             burst_batch = _sample_batch(target_pool, bg_pool, batch_size, batch_size)
             bg_batch = _sample_batch(target_pool, bg_pool, 0, batch_size)
-            gc = gradient_cosine(net, burst_batch, bg_batch)
+            net.train()
+            g_burst = _get_grad_vector(net, burst_batch)
+            g_bg = _get_grad_vector(net, bg_batch)
+            gn_burst = g_burst.norm().item()
+            gn_bg = g_bg.norm().item()
+            gc = F.cosine_similarity(
+                g_burst.unsqueeze(0), g_bg.unsqueeze(0)).item()
+            net.zero_grad()
+            log["grad_norm_burst"].append(gn_burst)
+            log["grad_norm_bg"].append(gn_bg)
             log["grad_cosine_burst_bg"].append(gc)
+
+            # per-layer gradient cosine
+            gc_layers = gradient_cosine_per_layer(net, burst_batch, bg_batch)
+            log["grad_cosine_per_layer"].append(gc_layers)
+
+            # gradient norm entropy
+            ent_burst, _ = grad_norm_entropy(net, burst_batch)
+            ent_bg, _ = grad_norm_entropy(net, bg_batch)
+            log["grad_norm_entropy_burst"].append(ent_burst)
+            log["grad_norm_entropy_bg"].append(ent_bg)
+
+            # training batch gradient norm
+            g_train = _get_grad_vector(net, batch)
+            log["grad_norm_train"].append(g_train.norm().item())
+            net.zero_grad()
 
             pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
                              acc_o=f"{ao:.3f}", drift=f"{drift:.3f}")

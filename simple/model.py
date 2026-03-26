@@ -55,7 +55,7 @@ def make_optimizer(net, lr=1e-3, weight_decay=1e-3, beta1=0.9, beta2=0.9):
     decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() >= 2]
     no_decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() < 2]
     groups = [
-        {"params": decay, "weight_decay": weight_decay},
+        {"params": decay, "weight_decay": 0.0}, #weight_decay},
         {"params": no_decay, "weight_decay": 0.0},
     ]
     return torch.optim.AdamW(groups, lr=lr, betas=(beta1, beta2),

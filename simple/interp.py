@@ -1,13 +1,13 @@
 """Interpretability metrics for burst experiment analysis.
 
-Provides weight-space, representation, gradient, and sharpness metrics
+Provides weight-space, representation (CKA), and gradient metrics
 to understand why higher burst concentration leads to faster forgetting.
 """
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from simple.model import load_model, eval_loss, DEVICE
+from simple.model import load_model, DEVICE
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -34,6 +34,21 @@ def _layer_group(name):
         idx = parts[2]
         rest = ".".join(parts[3:])
         return f"layer_{idx}.{rest}"
+    if "transformer.wte" in name:
+        return "embed_tok"
+    if "transformer.wpe" in name:
+        return "embed_pos"
+    if "transformer.ln_f" in name:
+        return "ln_final"
+    if "LM_head" in name:
+        return "lm_head"
+    return name
+
+
+def _block_group(name):
+    """Coarser grouping: just the block index or embed/head."""
+    if "transformer.h." in name:
+        return f"block_{name.split('.')[2]}"
     if "transformer.wte" in name:
         return "embed_tok"
     if "transformer.wpe" in name:
@@ -75,11 +90,7 @@ def weight_cosine_per_layer(sd_ref, sd_now):
 
 
 def weight_delta_svd(sd_ref, sd_now, top_k=10):
-    """SVD analysis of weight deltas for 2D weight matrices.
-
-    Returns per-layer dict with: singular_values, effective_rank,
-    top_k_var_frac, spectral_norm.
-    """
+    """SVD analysis of weight deltas for 2D weight matrices."""
     results = {}
     for k in sd_ref:
         if k not in sd_now or sd_ref[k].dim() != 2:
@@ -87,10 +98,8 @@ def weight_delta_svd(sd_ref, sd_now, top_k=10):
         delta = sd_now[k].float() - sd_ref[k].float()
         S = torch.linalg.svdvals(delta)
         s = S.numpy()
-        # effective rank (entropy-based)
         s_norm = s / (s.sum() + 1e-10)
         eff_rank = float(np.exp(-np.sum(s_norm * np.log(s_norm + 1e-10))))
-        # fraction of variance in top-k
         var_total = float((s ** 2).sum())
         var_topk = float((s[:top_k] ** 2).sum())
         results[_layer_group(k)] = {
@@ -104,13 +113,10 @@ def weight_delta_svd(sd_ref, sd_now, top_k=10):
     return results
 
 
-# ── representation metrics ────────────────────────────────────────────────
+# ── representation metrics (CKA) ─────────────────────────────────────────
 
 def extract_hidden_states(net, data_np, prompt_len, batch_size=256):
-    """Capture per-layer hidden states at the last prompt position.
-
-    Returns dict {layer_idx: (N, D) numpy array}.
-    """
+    """Capture per-layer hidden states at the last prompt position."""
     raw = _raw(net)
     net.eval()
 
@@ -149,10 +155,7 @@ def linear_cka(X, Y):
 
 
 def cka_between_models(net1, net2, data_np, prompt_len):
-    """Layer-by-layer CKA matrix between two models.
-
-    Returns (n_layers, n_layers) numpy array.
-    """
+    """Layer-by-layer CKA matrix between two models."""
     acts1 = extract_hidden_states(net1, data_np, prompt_len)
     acts2 = extract_hidden_states(net2, data_np, prompt_len)
     n = len(acts1)
@@ -170,247 +173,10 @@ def cka_diagonal(net1, net2, data_np, prompt_len):
     return {i: linear_cka(acts1[i], acts2[i]) for i in acts1}
 
 
-# ── deep representation analysis ──────────────────────────────────────────
-
-def burst_bg_separation(net, eval_burst, eval_other, prompt_len):
-    """Per-layer separation between burst and background representations.
-
-    Returns per-layer dict with:
-      - centroid_cosine: cosine between burst and bg centroids
-      - centroid_l2: L2 distance between centroids
-      - fisher: Fisher criterion (inter-class / intra-class variance)
-      - burst_spread: mean pairwise distance within burst class
-      - bg_spread: mean pairwise distance within bg class
-    """
-    acts_burst = extract_hidden_states(net, eval_burst, prompt_len)
-    acts_bg = extract_hidden_states(net, eval_other, prompt_len)
-
-    results = {}
-    for layer in acts_burst:
-        B = acts_burst[layer]   # (N_burst, D)
-        G = acts_bg[layer]      # (N_bg, D)
-
-        # centroids
-        mu_b = B.mean(0)
-        mu_g = G.mean(0)
-
-        # centroid distance
-        centroid_l2 = float(np.linalg.norm(mu_b - mu_g))
-        cos = float(np.dot(mu_b, mu_g) /
-                     (np.linalg.norm(mu_b) * np.linalg.norm(mu_g) + 1e-10))
-
-        # intra-class spread (trace of within-class scatter)
-        var_b = float(np.mean(np.sum((B - mu_b) ** 2, axis=1)))
-        var_g = float(np.mean(np.sum((G - mu_g) ** 2, axis=1)))
-
-        # Fisher criterion: inter / (intra + eps)
-        inter = centroid_l2 ** 2
-        intra = var_b + var_g
-        fisher = float(inter / (intra + 1e-10))
-
-        results[layer] = {
-            "centroid_cosine": cos,
-            "centroid_l2": centroid_l2,
-            "fisher": fisher,
-            "burst_spread": float(var_b ** 0.5),
-            "bg_spread": float(var_g ** 0.5),
-        }
-    return results
-
-
-def representation_drift(net_ref, net_new, data_np, prompt_len):
-    """Per-layer centroid drift between two models on the same data.
-
-    Returns per-layer dict with centroid_l2 and centroid_cosine.
-    """
-    acts_ref = extract_hidden_states(net_ref, data_np, prompt_len)
-    acts_new = extract_hidden_states(net_new, data_np, prompt_len)
-    results = {}
-    for layer in acts_ref:
-        mu_ref = acts_ref[layer].mean(0)
-        mu_new = acts_new[layer].mean(0)
-        l2 = float(np.linalg.norm(mu_new - mu_ref))
-        cos = float(np.dot(mu_ref, mu_new) /
-                     (np.linalg.norm(mu_ref) * np.linalg.norm(mu_new) + 1e-10))
-        results[layer] = {"centroid_l2": l2, "centroid_cosine": cos}
-    return results
-
-
-def representation_pca(nets_and_labels, eval_burst, eval_other, prompt_len,
-                        layer_idx=-1):
-    """PCA projection of burst/bg representations from multiple models.
-
-    Args:
-        nets_and_labels: list of (net, label_str) pairs
-        eval_burst, eval_other: eval data arrays
-        prompt_len: prompt length
-        layer_idx: which layer to use (-1 = last)
-
-    Returns dict with:
-        burst_coords: list of (N, 2) arrays (one per model)
-        bg_coords: list of (N, 2) arrays
-        labels: list of label strings
-        explained_var: (2,) array of explained variance ratios
-    """
-    from sklearn.decomposition import PCA
-
-    all_acts = []
-    burst_slices = []
-    bg_slices = []
-    labels = []
-
-    offset = 0
-    for net, label in nets_and_labels:
-        acts_b = extract_hidden_states(net, eval_burst, prompt_len)
-        acts_g = extract_hidden_states(net, eval_other, prompt_len)
-
-        # resolve layer index
-        n_layers = len(acts_b)
-        li = layer_idx if layer_idx >= 0 else n_layers + layer_idx
-
-        Ab = acts_b[li]
-        Ag = acts_g[li]
-        all_acts.append(Ab)
-        all_acts.append(Ag)
-        burst_slices.append((offset, offset + Ab.shape[0]))
-        offset += Ab.shape[0]
-        bg_slices.append((offset, offset + Ag.shape[0]))
-        offset += Ag.shape[0]
-        labels.append(label)
-
-    combined = np.concatenate(all_acts, axis=0)
-    pca = PCA(n_components=2)
-    coords = pca.fit_transform(combined)
-
-    burst_coords = [coords[s:e] for s, e in burst_slices]
-    bg_coords = [coords[s:e] for s, e in bg_slices]
-
-    return {
-        "burst_coords": burst_coords,
-        "bg_coords": bg_coords,
-        "labels": labels,
-        "explained_var": pca.explained_variance_ratio_,
-    }
-
-
-def probing_accuracy(net, eval_burst, eval_other, prompt_len):
-    """Linear probing: per-layer accuracy of predicting burst vs background.
-
-    Fits a logistic regression at each layer using a 50/50 train/test split.
-    Higher accuracy = more linearly separable = burst info more explicit.
-    """
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.model_selection import cross_val_score
-
-    acts_b = extract_hidden_states(net, eval_burst, prompt_len)
-    acts_g = extract_hidden_states(net, eval_other, prompt_len)
-
-    results = {}
-    for layer in acts_b:
-        X = np.concatenate([acts_b[layer], acts_g[layer]], axis=0)
-        y = np.concatenate([np.ones(acts_b[layer].shape[0]),
-                            np.zeros(acts_g[layer].shape[0])])
-        clf = LogisticRegression(max_iter=500, solver="lbfgs")
-        scores = cross_val_score(clf, X, y, cv=3, scoring="accuracy")
-        results[layer] = float(scores.mean())
-    return results
-
-
-# ── full representation analysis ──────────────────────────────────────────
-
-def analyze_representations(data, pt, ft_results, fg_results):
-    """Deep representation analysis across all phases and burst fractions.
-
-    Returns dict keyed by tag, each containing per-layer separation,
-    drift, probing, and PCA data.
-    """
-    prompt_len = data["prompt_len"]
-    eval_burst = data["eval_burst"]
-    eval_other = data["eval_other"]
-    model_cfg = pt["model_cfg"]
-
-    net_pt = load_model(pt["ckpt_path"], compile_model=False, **model_cfg)
-
-    # pretrained baseline separation & probing
-    sep_pt = burst_bg_separation(net_pt, eval_burst, eval_other, prompt_len)
-    probe_pt = probing_accuracy(net_pt, eval_burst, eval_other, prompt_len)
-
-    results = {"_pretrained": {"separation": sep_pt, "probing": probe_pt}}
-
-    pca_nets = [
-        (net_pt, "pretrained"),
-    ]
-
-    for ft, fg in zip(ft_results, fg_results):
-        tag = ft["tag"]
-        net_ft = load_model(ft["ckpt_path"], compile_model=False, **model_cfg)
-
-        # separation at finetuned checkpoint
-        sep_ft = burst_bg_separation(net_ft, eval_burst, eval_other, prompt_len)
-
-        # probing at finetuned checkpoint
-        probe_ft = probing_accuracy(net_ft, eval_burst, eval_other, prompt_len)
-
-        # representation drift: pretrained -> finetuned (on burst and bg data)
-        drift_burst = representation_drift(net_pt, net_ft, eval_burst, prompt_len)
-        drift_bg = representation_drift(net_pt, net_ft, eval_other, prompt_len)
-
-        pca_nets.append((net_ft, f"ft_{tag}"))
-
-        fg_ckpt = fg.get("ckpt_path")
-        sep_fg = probe_fg = drift_fg_burst = drift_fg_bg = None
-        if fg_ckpt:
-            net_fg = load_model(fg_ckpt, compile_model=False, **model_cfg)
-            sep_fg = burst_bg_separation(
-                net_fg, eval_burst, eval_other, prompt_len)
-            probe_fg = probing_accuracy(
-                net_fg, eval_burst, eval_other, prompt_len)
-            drift_fg_burst = representation_drift(
-                net_ft, net_fg, eval_burst, prompt_len)
-            drift_fg_bg = representation_drift(
-                net_ft, net_fg, eval_other, prompt_len)
-            pca_nets.append((net_fg, f"fg_{tag}"))
-
-        results[tag] = {
-            "burst_frac": ft["burst_frac"],
-            # separation (Fisher criterion etc.) at each phase
-            "separation_pt": sep_pt,
-            "separation_ft": sep_ft,
-            "separation_fg": sep_fg,
-            # probing accuracy at each phase
-            "probing_pt": probe_pt,
-            "probing_ft": probe_ft,
-            "probing_fg": probe_fg,
-            # representation centroid drift
-            "drift_pt_ft_burst": drift_burst,
-            "drift_pt_ft_bg": drift_bg,
-            "drift_ft_fg_burst": drift_fg_burst,
-            "drift_ft_fg_bg": drift_fg_bg,
-        }
-
-    # PCA across all models (last layer)
-    n_layers = len(sep_pt)
-    pca_last = representation_pca(
-        pca_nets, eval_burst, eval_other, prompt_len, layer_idx=-1)
-    pca_mid = representation_pca(
-        pca_nets, eval_burst, eval_other, prompt_len,
-        layer_idx=n_layers // 2)
-    results["_pca_last_layer"] = pca_last
-    results["_pca_mid_layer"] = pca_mid
-
-    # cleanup
-    del net_pt
-    for net, _ in pca_nets[1:]:
-        del net
-    torch.cuda.empty_cache()
-
-    return results
-
-
 # ── gradient metrics ──────────────────────────────────────────────────────
 
 def _get_grad_vector(net, batch_np):
-    """Compute gradient vector for a batch (returns flat tensor on CPU)."""
+    """Compute gradient vector for a batch (returns flat tensor)."""
     dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
     net.zero_grad()
@@ -425,6 +191,29 @@ def _get_grad_vector(net, batch_np):
     return torch.cat(grads)
 
 
+def _get_grad_per_layer(net, batch_np):
+    """Compute per-layer gradient dict {block_group: flat tensor}."""
+    dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
+    inp, tgt = dat[:, :-1], dat[:, 1:]
+    net.zero_grad()
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        logits = net(inp)
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+    loss.backward()
+
+    raw = _raw(net)
+    layer_grads = {}
+    for name, p in raw.named_parameters():
+        if p.grad is None:
+            continue
+        key = _block_group(name)
+        if key not in layer_grads:
+            layer_grads[key] = []
+        layer_grads[key].append(p.grad.detach().flatten())
+
+    return {k: torch.cat(vs) for k, vs in layer_grads.items()}
+
+
 def gradient_cosine(net, batch1_np, batch2_np):
     """Cosine similarity between gradients computed on two batches."""
     net.train()
@@ -433,6 +222,26 @@ def gradient_cosine(net, batch1_np, batch2_np):
     cos = F.cosine_similarity(g1.unsqueeze(0), g2.unsqueeze(0)).item()
     net.zero_grad()
     return cos
+
+
+def gradient_cosine_per_layer(net, batch1_np, batch2_np):
+    """Per-block cosine similarity between gradients on two batches.
+
+    Returns dict {block_name: float} with cosine similarity per block.
+    Block names are coarse (block_0, block_1, ..., embed_tok, lm_head).
+    """
+    net.train()
+    g1 = _get_grad_per_layer(net, batch1_np)
+    g2 = _get_grad_per_layer(net, batch2_np)
+    net.zero_grad()
+
+    result = {}
+    for key in g1:
+        if key in g2:
+            cos = F.cosine_similarity(
+                g1[key].unsqueeze(0), g2[key].unsqueeze(0)).item()
+            result[key] = cos
+    return result
 
 
 def gradient_norm(net):
@@ -454,35 +263,25 @@ def gradient_norm_per_layer(net):
     return norms
 
 
-# ── sharpness ─────────────────────────────────────────────────────────────
+def grad_norm_entropy(net, batch_np):
+    """Entropy of the per-block gradient norm distribution.
 
-@torch.no_grad()
-def perturbation_sharpness(net, eval_data_np, epsilon=0.01, n_samples=5):
-    """Measure loss sensitivity to random weight perturbations.
-
-    Returns dict with base_loss, perturbed_mean, sharpness (delta).
+    High entropy = gradient spread evenly across blocks.
+    Low entropy = gradient concentrated in few blocks.
+    Returns (entropy_float, per_block_norms_dict).
     """
-    net.eval()
-    base_loss = eval_loss(net, eval_data_np)
-
-    raw = _raw(net)
-    orig_sd = {k: v.clone() for k, v in raw.state_dict().items()}
-
-    losses = []
-    for _ in range(n_samples):
-        for v in raw.state_dict().values():
-            noise = torch.randn_like(v) * epsilon * (v.abs().mean() + 1e-8)
-            v.add_(noise)
-        losses.append(eval_loss(net, eval_data_np))
-        raw.load_state_dict(orig_sd)
-
     net.train()
-    return {
-        "base_loss": base_loss,
-        "perturbed_mean": float(np.mean(losses)),
-        "perturbed_std": float(np.std(losses)),
-        "sharpness": float(np.mean(losses) - base_loss),
-    }
+    g = _get_grad_per_layer(net, batch_np)
+    net.zero_grad()
+
+    norms = {k: v.norm().item() for k, v in g.items()}
+    vals = np.array(list(norms.values()))
+    total = vals.sum()
+    if total < 1e-10:
+        return 0.0, norms
+    p = vals / total
+    ent = float(-np.sum(p * np.log(p + 1e-10)))
+    return ent, norms
 
 
 # ── post-hoc analysis (call after all phases complete) ────────────────────
@@ -490,25 +289,14 @@ def perturbation_sharpness(net, eval_data_np, epsilon=0.01, n_samples=5):
 def analyze(data, pt, ft_results, fg_results):
     """Run full post-hoc interpretability analysis.
 
-    Args:
-        data: dict from make_data()
-        pt: pretrain result dict
-        ft_results: list of finetune result dicts
-        fg_results: list of forget result dicts
-
-    Returns:
-        dict with all analysis results, keyed by tag.
+    Returns dict with all analysis results, keyed by tag.
     """
-    vocab_size = data["vocab_size"]
-    context_size = data["context_size"]
+    model_cfg = pt["model_cfg"]
     prompt_len = data["prompt_len"]
     eval_burst = data["eval_burst"]
     eval_other = data["eval_other"]
-    model_cfg = pt["model_cfg"]
 
     sd_pt = load_sd(pt["ckpt_path"])
-
-    # load pretrained model (no compile for hooks)
     net_pt = load_model(pt["ckpt_path"], compile_model=False, **model_cfg)
 
     results = {}
@@ -516,12 +304,12 @@ def analyze(data, pt, ft_results, fg_results):
         tag = ft["tag"]
         sd_ft = load_sd(ft["ckpt_path"])
 
-        # -- weight-space: pretrained -> finetuned --
+        # weight-space: pretrained -> finetuned
         drift_pt_ft = weight_drift_l2(sd_pt, sd_ft)
         cosine_pt_ft = weight_cosine_per_layer(sd_pt, sd_ft)
         svd_pt_ft = weight_delta_svd(sd_pt, sd_ft)
 
-        # -- weight-space: finetuned -> forgotten --
+        # weight-space: finetuned -> forgotten
         fg_ckpt = fg.get("ckpt_path")
         if fg_ckpt:
             sd_fg = load_sd(fg_ckpt)
@@ -532,45 +320,34 @@ def analyze(data, pt, ft_results, fg_results):
         else:
             drift_ft_fg = drift_pt_fg = cosine_ft_fg = svd_ft_fg = None
 
-        # -- CKA: pretrained vs finetuned --
+        # CKA: pretrained vs finetuned
         net_ft = load_model(ft["ckpt_path"], compile_model=False, **model_cfg)
         cka_pt_ft_burst = cka_between_models(net_pt, net_ft, eval_burst, prompt_len)
         cka_pt_ft_other = cka_diagonal(net_pt, net_ft, eval_other, prompt_len)
 
-        # -- CKA: finetuned vs forgotten --
+        # CKA: finetuned vs forgotten
         cka_ft_fg_burst = None
         if fg_ckpt:
             net_fg = load_model(fg_ckpt, compile_model=False, **model_cfg)
             cka_ft_fg_burst = cka_between_models(net_ft, net_fg, eval_burst, prompt_len)
             del net_fg
 
-        # -- sharpness at finetune endpoint --
-        sharp_burst = perturbation_sharpness(net_ft, eval_burst)
-        sharp_other = perturbation_sharpness(net_ft, eval_other)
-
         del net_ft
 
         results[tag] = {
             "burst_frac": ft["burst_frac"],
-            # weight-space: pt -> ft
             "drift_pt_ft": drift_pt_ft,
             "cosine_pt_ft": cosine_pt_ft,
             "svd_pt_ft": svd_pt_ft,
-            # weight-space: ft -> fg
             "drift_ft_fg": drift_ft_fg,
             "drift_pt_fg": drift_pt_fg,
             "cosine_ft_fg": cosine_ft_fg,
             "svd_ft_fg": svd_ft_fg,
-            # CKA
             "cka_pt_ft_burst": cka_pt_ft_burst,
             "cka_pt_ft_other": cka_pt_ft_other,
             "cka_ft_fg_burst": cka_ft_fg_burst,
-            # sharpness
-            "sharpness_burst": sharp_burst,
-            "sharpness_other": sharp_other,
         }
 
     del net_pt
     torch.cuda.empty_cache()
-
     return results

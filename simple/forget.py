@@ -13,7 +13,10 @@ from simple.model import (
     train_step, eval_accuracy, eval_loss, cosine_lr,
     MODEL_DEFAULTS,
 )
-from simple.interp import state_dict_cpu, weight_drift_l2
+from simple.interp import (
+    state_dict_cpu, weight_drift_l2,
+    _get_grad_vector, gradient_cosine_per_layer, grad_norm_entropy,
+)
 
 
 def forget(
@@ -93,7 +96,10 @@ def forget(
 
     log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
            "loss_other": [], "loss_burst": [], "lr": [],
-           "weight_drift_from_ft": [], "weight_drift_from_pt": []}
+           "weight_drift_from_ft": [], "weight_drift_from_pt": [],
+           "grad_norm": [], "grad_cosine_burst_bg": [],
+           "grad_cosine_per_layer": [],
+           "grad_norm_entropy": []}
 
     net.train()
     pbar = tqdm(range(steps), desc=f"Forget {tag}", disable=quiet)
@@ -132,6 +138,27 @@ def forget(
             if sd_pt is not None:
                 drift_pt = weight_drift_l2(sd_pt, sd_now)["total"]
                 log["weight_drift_from_pt"].append(drift_pt)
+
+            # gradient norm + cosine(burst vs bg)
+            net.train()
+            g_bg = _get_grad_vector(net, batch)
+            log["grad_norm"].append(g_bg.norm().item())
+            # sample a burst batch from eval data for cosine
+            idx = np.random.randint(len(eval_burst), size=min(batch_size, len(eval_burst)))
+            burst_batch = eval_burst[idx]
+            g_burst = _get_grad_vector(net, burst_batch)
+            import torch.nn.functional as _F
+            gc = _F.cosine_similarity(
+                g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
+            log["grad_cosine_burst_bg"].append(gc)
+
+            # per-layer gradient cosine
+            gc_layers = gradient_cosine_per_layer(net, burst_batch, batch)
+            log["grad_cosine_per_layer"].append(gc_layers)
+
+            ent, _ = grad_norm_entropy(net, batch)
+            log["grad_norm_entropy"].append(ent)
+            net.zero_grad()
 
             pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
                              drift=f"{drift_ft:.3f}")
