@@ -5,6 +5,7 @@ the resulting checkpoint + log.  Can be called multiple times with different
 burst_frac values to sweep concentrations.
 """
 import numpy as np
+import torch
 from pathlib import Path
 from tqdm.auto import tqdm
 
@@ -13,6 +14,7 @@ from simple.model import (
     train_step, eval_accuracy, eval_loss, cosine_lr,
     MODEL_DEFAULTS,
 )
+from simple.interp import state_dict_cpu, weight_drift_l2, gradient_cosine
 
 
 def _sample_batch(target_pool, bg_pool, n_target, batch_size):
@@ -88,15 +90,19 @@ def finetune(
     eval_burst = data["eval_burst"]
 
     np.random.seed(seed)
-    import torch; torch.manual_seed(seed)
+    torch.manual_seed(seed)
 
     net = load_model(pretrain_ckpt, vocab_size, context_size,
                      n_layer=n_layer, n_embd=n_embd, n_head=n_head)
     optimizer = make_optimizer(net, lr=lr * lr_start_frac,
                                weight_decay=weight_decay, beta1=beta1, beta2=beta2)
 
+    # reference state dict for weight drift tracking
+    sd_ref = state_dict_cpu(net)
+
     log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
-           "loss_other": [], "loss_burst": [], "lr": []}
+           "loss_other": [], "loss_burst": [], "lr": [],
+           "weight_drift": [], "grad_cosine_burst_bg": []}
 
     lr_start = lr * lr_start_frac
     lr_end = lr * lr_end_frac
@@ -123,8 +129,20 @@ def finetune(
             log["loss_other"].append(lo)
             log["loss_burst"].append(lb)
             log["lr"].append(cur_lr)
+
+            # interp metrics
+            sd_now = state_dict_cpu(net)
+            drift = weight_drift_l2(sd_ref, sd_now)["total"]
+            log["weight_drift"].append(drift)
+
+            # gradient cosine: burst vs background
+            burst_batch = _sample_batch(target_pool, bg_pool, batch_size, batch_size)
+            bg_batch = _sample_batch(target_pool, bg_pool, 0, batch_size)
+            gc = gradient_cosine(net, burst_batch, bg_batch)
+            log["grad_cosine_burst_bg"].append(gc)
+
             pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
-                             acc_o=f"{ao:.3f}")
+                             acc_o=f"{ao:.3f}", drift=f"{drift:.3f}")
             net.train()
 
     ckpt_path = out_dir / f"{tag}_ckpt.pt"
@@ -137,7 +155,13 @@ def finetune(
     return {
         "log": log,
         "ckpt_path": str(ckpt_path),
+        "pretrain_ckpt": str(pretrain_ckpt),
         "burst_frac": burst_frac,
         "tag": tag,
         "peak_burst": peak_burst,
     }
+
+
+def _finetune_worker(kwargs):
+    """Pickle-able entry point for multiprocessing."""
+    return finetune(**kwargs)
