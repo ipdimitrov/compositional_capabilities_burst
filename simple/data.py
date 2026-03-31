@@ -135,7 +135,7 @@ def make_data(
     burst_tasks = []
     for combo in remaining:
         fns = list(combo)
-        fns.insert(depth - burst_pos, b_star)
+        fns.insert(burst_pos - 1, b_star)
         burst_tasks.append(("burst",) + tuple(fns))
 
     # -- pools --
