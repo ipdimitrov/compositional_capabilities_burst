@@ -11,6 +11,18 @@ from matplotlib.gridspec import GridSpec
 from pathlib import Path
 
 
+# ── smoothing helper ──────────────────────────────────────────────────────
+
+def _smooth(vals, alpha=0.3):
+    """Exponential moving average smoothing."""
+    out = []
+    s = vals[0]
+    for v in vals:
+        s = alpha * v + (1 - alpha) * s
+        out.append(s)
+    return out
+
+
 # ── colour helpers ────────────────────────────────────────────────────────
 
 def _frac_color(frac: float) -> str:
@@ -334,7 +346,7 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
     for r in ft_list:
         log = r["log"]
         if "grad_norm_burst" not in log: continue
-        ax.plot(log["step"], log["grad_norm_burst"], color=_frac_color(r["burst_frac"]),
+        ax.plot(log["step"], _smooth(log["grad_norm_burst"]), color=_frac_color(r["burst_frac"]),
                 label=r["tag"], linewidth=1.5)
     ax.set_xlabel("Step"); ax.set_ylabel("Gradient Norm")
     ax.set_title("Burst-Only Gradient Norm"); ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
@@ -345,11 +357,11 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
         if "grad_norm_bg" not in ft_log: continue
-        ax.plot(ft_log["step"], ft_log["grad_norm_bg"], color=color,
+        ax.plot(ft_log["step"], _smooth(ft_log["grad_norm_bg"]), color=color,
                 linewidth=1.5, label=ft["tag"])
         if fg is not None and "grad_norm" in fg["log"] and fg["log"]["grad_norm"]:
             fg_steps = _offset_fg_steps(ft_log, fg["log"])
-            ax.plot(fg_steps, fg["log"]["grad_norm"], color=color, linewidth=1.5)
+            ax.plot(fg_steps, _smooth(fg["log"]["grad_norm"]), color=color, linewidth=1.5)
     pairs = _pair_ft_fg(ft_results, fg_results)
     if pairs and pairs[0][0]["log"]["step"]:
         _phase_boundary(ax, pairs[0][0]["log"])
@@ -362,7 +374,7 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
         log = r["log"]
         if "grad_norm_burst" not in log or "grad_norm_bg" not in log: continue
         ratio = [b / (g + 1e-10) for b, g in zip(log["grad_norm_burst"], log["grad_norm_bg"])]
-        ax.plot(log["step"], ratio, color=_frac_color(r["burst_frac"]),
+        ax.plot(log["step"], _smooth(ratio), color=_frac_color(r["burst_frac"]),
                 label=r["tag"], linewidth=1.5)
     ax.axhline(1.0, color="black", linewidth=0.5, linestyle=":")
     ax.set_xlabel("Step"); ax.set_ylabel("Burst / Background Ratio")
@@ -374,11 +386,11 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
         if "grad_norm_train" not in ft_log: continue
-        ax.plot(ft_log["step"], ft_log["grad_norm_train"], color=color,
+        ax.plot(ft_log["step"], _smooth(ft_log["grad_norm_train"]), color=color,
                 linewidth=1.5, label=ft["tag"])
         if fg is not None and "grad_norm" in fg["log"] and fg["log"]["grad_norm"]:
             fg_steps = _offset_fg_steps(ft_log, fg["log"])
-            ax.plot(fg_steps, fg["log"]["grad_norm"], color=color, linewidth=1.5)
+            ax.plot(fg_steps, _smooth(fg["log"]["grad_norm"]), color=color, linewidth=1.5)
     if pairs and pairs[0][0]["log"]["step"]:
         _phase_boundary(ax, pairs[0][0]["log"])
     ax.set_xlabel("Step (finetune | forget)"); ax.set_ylabel("Gradient Norm")
@@ -397,13 +409,13 @@ def plot_grad_cosine(ft_results, fg_results, figsize=(12, 5)):
         ft_log = ft["log"]
         if "grad_cosine_burst_bg" not in ft_log:
             continue
-        ax.plot(ft_log["step"], ft_log["grad_cosine_burst_bg"],
+        ax.plot(ft_log["step"], _smooth(ft_log["grad_cosine_burst_bg"]),
                 color=color, linewidth=2, label=ft["tag"])
         if fg is not None:
             fg_log = fg["log"]
             if "grad_cosine_burst_bg" in fg_log and fg_log["grad_cosine_burst_bg"]:
                 fg_steps = _offset_fg_steps(ft_log, fg_log)
-                ax.plot(fg_steps, fg_log["grad_cosine_burst_bg"],
+                ax.plot(fg_steps, _smooth(fg_log["grad_cosine_burst_bg"]),
                         color=color, linewidth=2)
 
     pairs = _pair_ft_fg(ft_results, fg_results)
@@ -415,6 +427,60 @@ def plot_grad_cosine(ft_results, fg_results, figsize=(12, 5)):
     ax.set_ylabel("Cosine Similarity")
     ax.set_title("Gradient Alignment: Burst vs Background")
     ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def plot_grad_alignment_norm(ft_results, fg_results, figsize=(14, 5)):
+    """Left: cosine(burst,bg) * ||grad_bg||.  Right: cosine(burst,bg) * ||grad_burst||.
+
+    Continuous finetune → forget axis.
+    """
+    fig, (ax_bg, ax_burst) = plt.subplots(1, 2, figsize=figsize)
+    drawn_boundary = False
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+        if "grad_cosine_burst_bg" not in ft_log:
+            continue
+        cos_ft = ft_log["grad_cosine_burst_bg"]
+
+        # finetune phase
+        if "grad_norm_bg" in ft_log:
+            prod_bg = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_bg"])]
+            ax_bg.plot(ft_log["step"], _smooth(prod_bg),
+                       color=color, linewidth=2, label=ft["tag"])
+        if "grad_norm_burst" in ft_log:
+            prod_burst = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_burst"])]
+            ax_burst.plot(ft_log["step"], _smooth(prod_burst),
+                          color=color, linewidth=2, label=ft["tag"])
+
+        # forget phase
+        if fg is not None:
+            fg_log = fg["log"]
+            fg_steps = _offset_fg_steps(ft_log, fg_log)
+            cos_fg = fg_log.get("grad_cosine_burst_bg", [])
+            if cos_fg and "grad_norm" in fg_log:
+                prod_bg_fg = [c * n for c, n in zip(cos_fg, fg_log["grad_norm"])]
+                ax_bg.plot(fg_steps, _smooth(prod_bg_fg),
+                           color=color, linewidth=2)
+            if cos_fg and "grad_norm_burst" in fg_log and fg_log["grad_norm_burst"]:
+                prod_burst_fg = [c * n for c, n in zip(cos_fg, fg_log["grad_norm_burst"])]
+                ax_burst.plot(fg_steps, _smooth(prod_burst_fg),
+                              color=color, linewidth=2)
+
+        if not drawn_boundary and ft_log["step"]:
+            _phase_boundary(ax_bg, ft_log)
+            _phase_boundary(ax_burst, ft_log)
+            drawn_boundary = True
+
+    for ax, title in [(ax_bg, "Alignment × BG Grad Norm"),
+                      (ax_burst, "Alignment × Burst Grad Norm")]:
+        ax.axhline(0, color="black", linewidth=0.5, linestyle=":")
+        ax.set_xlabel("Step (finetune | forget)")
+        ax.set_ylabel("cos(burst,bg) × ||grad||")
+        ax.set_title(title)
+        ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
     fig.tight_layout()
     return fig
 
@@ -446,18 +512,18 @@ def plot_grad_norm_entropy(ft_results, fg_results, figsize=(14, 5)):
 
         # burst entropy (finetune only — no burst training during forget)
         if "grad_norm_entropy_burst" in ft_log and ft_log["grad_norm_entropy_burst"]:
-            ax_burst.plot(ft_log["step"], ft_log["grad_norm_entropy_burst"],
+            ax_burst.plot(ft_log["step"], _smooth(ft_log["grad_norm_entropy_burst"]),
                           color=color, linewidth=2, label=ft["tag"])
 
         # bg entropy: continuous finetune → forget
         if "grad_norm_entropy_bg" in ft_log and ft_log["grad_norm_entropy_bg"]:
-            ax_bg.plot(ft_log["step"], ft_log["grad_norm_entropy_bg"],
+            ax_bg.plot(ft_log["step"], _smooth(ft_log["grad_norm_entropy_bg"]),
                        color=color, linewidth=2, label=ft["tag"])
         if fg is not None:
             fg_log = fg["log"]
             if "grad_norm_entropy" in fg_log and fg_log["grad_norm_entropy"]:
                 fg_steps = _offset_fg_steps(ft_log, fg_log)
-                ax_bg.plot(fg_steps, fg_log["grad_norm_entropy"],
+                ax_bg.plot(fg_steps, _smooth(fg_log["grad_norm_entropy"]),
                            color=color, linewidth=2)
 
         if not drawn_boundary and ft_log["step"]:
@@ -676,6 +742,61 @@ def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
     return fig
 
 
+# ── function distribution diagnostic ─────────────────────────────────────
+
+def plot_function_distribution(data, figsize=None):
+    """Show which functions appear in each slot for pretraining vs finetuning.
+
+    Each subplot is one slot (depth position).  Bars show how many tasks use
+    each function index in that slot, colored by phase (pretrain / finetune).
+    """
+    from collections import Counter
+
+    bg_pool = data["bg_pool"]
+    target_pool = data["target_pool"]
+    depth = data["task_info"]["depth"]
+
+    if figsize is None:
+        figsize = (5 * depth, 4)
+
+    fig, axes = plt.subplots(1, depth, figsize=figsize, sharey=True)
+    if depth == 1:
+        axes = [axes]
+
+    # task keys are tuples: (label, f_slot1, f_slot2, ..., f_slotD)
+    bg_tasks = list(bg_pool.keys())
+    ft_tasks = list(target_pool.keys())
+
+    for slot_idx in range(depth):
+        ax = axes[slot_idx]
+        bg_fns = [t[1 + slot_idx] for t in bg_tasks]
+        ft_fns = [t[1 + slot_idx] for t in ft_tasks]
+
+        bg_counts = Counter(bg_fns)
+        ft_counts = Counter(ft_fns)
+        all_fns = sorted(set(bg_fns) | set(ft_fns))
+
+        x = np.arange(len(all_fns))
+        w = 0.35
+        ax.bar(x - w / 2, [bg_counts.get(f, 0) for f in all_fns],
+               w, label="Pretrain (bg)", color="#2196F3", alpha=0.8)
+        ax.bar(x + w / 2, [ft_counts.get(f, 0) for f in all_fns],
+               w, label="Finetune (burst)", color="#E91E63", alpha=0.8)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"F{f}" for f in all_fns], fontsize=8)
+        ax.set_xlabel("Function")
+        ax.set_title(f"Slot {slot_idx + 1}")
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3, axis="y")
+
+    axes[0].set_ylabel("# Tasks using this function")
+    fig.suptitle("Function Distribution per Slot: Pretrain vs Finetune",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
 # ── save full report ──────────────────────────────────────────────────────
 
 def save_report(pt, ft_results, fg_results, out_dir, analysis=None, prefix="report"):
@@ -690,6 +811,8 @@ def save_report(pt, ft_results, fg_results, out_dir, analysis=None, prefix="repo
             fig.savefig(out_dir / f"{prefix}_{name}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
 
+    if "bg_pool" in pt.get("_data", {}):
+        _save(plot_function_distribution(pt["_data"]), "00_function_distribution")
     _save(plot_full_trajectory(pt, ft_list, fg_list), "01_trajectory")
 
     if len(ft_list) > 1:
