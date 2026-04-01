@@ -280,6 +280,50 @@ def plot_peak_vs_frac(finetune_results, ax=None):
     return ax
 
 
+def plot_bg_loss_vs_forgetting(finetune_results, forget_results, figsize=(14, 5)):
+    """End-of-FT background loss/acc vs forgetting severity."""
+    ft_list = finetune_results if isinstance(finetune_results, list) else [finetune_results]
+    fg_list = forget_results if isinstance(forget_results, list) else [forget_results]
+    fg_by_tag = {r["tag"]: r for r in fg_list}
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+
+    end_bg_loss, end_bg_acc, drop_pcts, fracs, colors = [], [], [], [], []
+    for ft in ft_list:
+        fg = fg_by_tag.get(ft["tag"])
+        if fg is None:
+            continue
+        log = ft["log"]
+        end_bg_loss.append(log["loss_other"][-1])
+        end_bg_acc.append(log["acc_other"][-1])
+        drop_pcts.append(fg["dropoff_pct"])
+        fracs.append(ft["burst_frac"])
+        colors.append(_frac_color(ft["burst_frac"]))
+
+    # Left: end-of-FT bg loss vs drop%
+    ax1.scatter(end_bg_loss, drop_pcts, c=colors, s=80, zorder=3)
+    for i, ft in enumerate([f for f in ft_list if fg_by_tag.get(f["tag"])]):
+        ax1.annotate(ft["tag"], (end_bg_loss[i], drop_pcts[i]),
+                     fontsize=7, textcoords="offset points", xytext=(5, 5))
+    ax1.set_xlabel("BG Loss at End of Finetune")
+    ax1.set_ylabel("Accuracy Drop During Forget (%)")
+    ax1.set_title("BG Loss at End of FT → Forgetting")
+    ax1.grid(True, alpha=0.3)
+
+    # Right: end-of-FT bg accuracy vs drop%
+    ax2.scatter(end_bg_acc, drop_pcts, c=colors, s=80, zorder=3)
+    for i, ft in enumerate([f for f in ft_list if fg_by_tag.get(f["tag"])]):
+        ax2.annotate(ft["tag"], (end_bg_acc[i], drop_pcts[i]),
+                     fontsize=7, textcoords="offset points", xytext=(5, 5))
+    ax2.set_xlabel("BG Accuracy at End of Finetune")
+    ax2.set_ylabel("Accuracy Drop During Forget (%)")
+    ax2.set_title("BG Accuracy at End of FT → Forgetting")
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
 def plot_retention_vs_frac(forget_results, ax=None):
     if isinstance(forget_results, dict):
         forget_results = [forget_results]
@@ -302,32 +346,49 @@ def plot_retention_vs_frac(forget_results, ax=None):
 # INTERPRETABILITY PLOTS  — finetune + forget on a single continuous axis
 # ══════════════════════════════════════════════════════════════════════════
 
-def plot_weight_drift(ft_results, fg_results, figsize=(12, 5)):
-    """Weight L2 drift from pretrained: finetune then forget, single axis."""
-    fig, ax = plt.subplots(figsize=figsize)
+def plot_weight_drift(ft_results, fg_results, figsize=(14, 5)):
+    """Weight drift: left = from pretrained, right = from finetuned (forget only)."""
+    fig, (ax_pt, ax_ft) = plt.subplots(1, 2, figsize=figsize)
+
+    # Left: drift from pretrained (continuous FT → forget)
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
         if "weight_drift" not in ft_log:
             continue
-        ax.plot(ft_log["step"], ft_log["weight_drift"],
-                color=color, linewidth=2, label=ft["tag"])
+        ax_pt.plot(ft_log["step"], ft_log["weight_drift"],
+                   color=color, linewidth=2, label=ft["tag"])
         if fg is not None:
             fg_log = fg["log"]
             if "weight_drift_from_pt" in fg_log and fg_log["weight_drift_from_pt"]:
                 fg_steps = _offset_fg_steps(ft_log, fg_log)
-                ax.plot(fg_steps, fg_log["weight_drift_from_pt"],
-                        color=color, linewidth=2, linestyle="-")
+                ax_pt.plot(fg_steps, fg_log["weight_drift_from_pt"],
+                           color=color, linewidth=2)
 
-    # draw one boundary line (same for all fracs)
     pairs = _pair_ft_fg(ft_results, fg_results)
     if pairs and pairs[0][0]["log"]["step"]:
-        _phase_boundary(ax, pairs[0][0]["log"])
+        _phase_boundary(ax_pt, pairs[0][0]["log"])
 
-    ax.set_xlabel("Step (finetune | forget)")
-    ax.set_ylabel("L2 Distance from Pretrained")
-    ax.set_title("Weight Drift: Finetune → Forget")
-    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+    ax_pt.set_xlabel("Step (finetune | forget)")
+    ax_pt.set_ylabel("L2 Distance from Pretrained")
+    ax_pt.set_title("Drift from Pretrained")
+    ax_pt.legend(fontsize=7); ax_pt.grid(True, alpha=0.3)
+
+    # Right: drift from finetuned (forget phase only)
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        if fg is None:
+            continue
+        color = _frac_color(ft["burst_frac"])
+        fg_log = fg["log"]
+        if "weight_drift_from_ft" in fg_log and fg_log["weight_drift_from_ft"]:
+            ax_ft.plot(fg_log["step"], fg_log["weight_drift_from_ft"],
+                       color=color, linewidth=2, label=ft["tag"])
+
+    ax_ft.set_xlabel("Forget Step")
+    ax_ft.set_ylabel("L2 Distance from Finetuned")
+    ax_ft.set_title("Drift from Finetuned (forget phase)")
+    ax_ft.legend(fontsize=7); ax_ft.grid(True, alpha=0.3)
+
     fig.tight_layout()
     return fig
 
@@ -625,13 +686,15 @@ def plot_per_layer_drift(analysis, phase="pt_ft", figsize=(12, 5)):
     return fig
 
 
-def plot_svd_analysis(analysis, figsize=(14, 5)):
-    """Effective rank and spectral norm of weight deltas."""
+def plot_svd_analysis(analysis, phase="pt_ft", figsize=(14, 5)):
+    """Effective rank and spectral norm of weight deltas for a given phase."""
     tags = sorted(analysis.keys(), key=lambda t: analysis[t]["burst_frac"], reverse=True)
     if not tags: return None
+    svd_key = f"svd_{phase}"
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    layers = None
     for tag in tags:
-        svd = analysis[tag].get("svd_pt_ft")
+        svd = analysis[tag].get(svd_key)
         if svd is None: continue
         color = _frac_color(analysis[tag]["burst_frac"])
         layers = sorted(svd.keys())
@@ -639,11 +702,13 @@ def plot_svd_analysis(analysis, figsize=(14, 5)):
                  color=color, label=tag, marker="o", markersize=4, linewidth=1.5)
         ax2.plot(range(len(layers)), [svd[l]["spectral_norm"] for l in layers],
                  color=color, label=tag, marker="s", markersize=4, linewidth=1.5)
+    if layers is None: return None
+    phase_label = "Pretrain → Finetune" if phase == "pt_ft" else "Finetune → Forget"
     ax1.set_xticks(range(len(layers))); ax1.set_xticklabels(layers, rotation=90, fontsize=6)
-    ax1.set_ylabel("Effective Rank"); ax1.set_title("Weight Delta Effective Rank per Layer")
+    ax1.set_ylabel("Effective Rank"); ax1.set_title(f"Effective Rank ({phase_label})")
     ax1.legend(fontsize=7); ax1.grid(True, alpha=0.3)
     ax2.set_xticks(range(len(layers))); ax2.set_xticklabels(layers, rotation=90, fontsize=6)
-    ax2.set_ylabel("Spectral Norm"); ax2.set_title("Weight Delta Spectral Norm per Layer")
+    ax2.set_ylabel("Spectral Norm"); ax2.set_title(f"Spectral Norm ({phase_label})")
     ax2.legend(fontsize=7); ax2.grid(True, alpha=0.3)
     fig.tight_layout()
     return fig
@@ -831,7 +896,8 @@ def save_report(pt, ft_results, fg_results, out_dir, analysis=None, prefix="repo
     if analysis is not None:
         _save(plot_per_layer_drift(analysis, "pt_ft"), "08_layer_drift_finetune")
         _save(plot_per_layer_drift(analysis, "ft_fg"), "09_layer_drift_forget")
-        _save(plot_svd_analysis(analysis), "10_svd_analysis")
+        _save(plot_svd_analysis(analysis, "pt_ft"), "10_svd_finetune")
+        _save(plot_svd_analysis(analysis, "ft_fg"), "10_svd_forget")
         _save(plot_cka_matrices(analysis), "11_cka_matrices")
         _save(plot_summary_dashboard(ft_list, fg_list, analysis), "12_summary_dashboard")
 
