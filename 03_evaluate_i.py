@@ -1,28 +1,26 @@
 """
 Evaluate on out-of-order functions
 """
-import numpy as np
-import os
+
 import glob
+import os
+
+import numpy as np
 import torch
 
-from synthetic.init import set_seed, read_config
-from synthetic.generator import SyntheticEval
-
-from net.nanogpt import nanoGPT
 from net.lstm import AutoLstm
+from net.nanogpt import nanoGPT
+from synthetic.generator import SyntheticEval
+from synthetic.init import read_config, set_seed
 
 
 def load_net(fname, lstm):
     ckpt = torch.load(fname)
-    net_cfg = ckpt['config']
-    
-    if not lstm:
-        net = nanoGPT(net_cfg.net)
-    else:
-        net = AutoLstm(net_cfg.net)
+    net_cfg = ckpt["config"]
 
-    net.load_state_dict(ckpt['net'])
+    net = nanoGPT(net_cfg.net) if not lstm else AutoLstm(net_cfg.net)
+
+    net.load_state_dict(ckpt["net"])
     return net, net_cfg
 
 
@@ -37,12 +35,10 @@ def fetch_dirs(cfg):
 
     reduced_alldirs = []
     for it, cdir in all_dirs:
-
         if it >= cfg.xlim[0] and it <= cfg.xlim[1]:
             reduced_alldirs.append((it, cdir))
 
-    elems = np.round(
-        np.linspace(0, len(reduced_alldirs) - 1,cfg.nckpts)).astype(int)
+    elems = np.round(np.linspace(0, len(reduced_alldirs) - 1, cfg.nckpts)).astype(int)
     reduced_alldirs = [reduced_alldirs[e] for e in elems]
 
     return reduced_alldirs
@@ -55,9 +51,7 @@ def main(cfg):
 
     _, net_cfg = load_net(sorted_dirs[0][1], cfg.lstm)
 
-    evaluator = SyntheticEval(net_cfg, cfg.nsamples,
-                              cfg.nbatch, cfg.direct_eval,
-                              cfg.permute)
+    evaluator = SyntheticEval(net_cfg, cfg.nsamples, cfg.nbatch, cfg.direct_eval, cfg.permute)
 
     accs = []
     for ck in sorted_dirs:

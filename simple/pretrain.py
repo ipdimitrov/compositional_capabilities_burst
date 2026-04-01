@@ -3,15 +3,21 @@
 Trains a model from scratch until loss plateaus (convergence),
 then saves a checkpoint that finetune() can load.
 """
+
+from pathlib import Path
+
 import numpy as np
 import torch
-from pathlib import Path
 from tqdm.auto import tqdm
 
 from simple.model import (
-    make_model, save_model, make_optimizer,
-    train_step, eval_accuracy, eval_loss, cosine_lr,
     MODEL_DEFAULTS,
+    eval_accuracy,
+    eval_loss,
+    make_model,
+    make_optimizer,
+    save_model,
+    train_step,
 )
 
 
@@ -61,18 +67,29 @@ def pretrain(
     context_size = data["context_size"]
 
     bg_ids = list(bg_pool.keys())
-    model_cfg = dict(vocab_size=vocab_size, context_size=context_size,
-                     n_layer=n_layer, n_embd=n_embd, n_head=n_head)
+    model_cfg = {
+        "vocab_size": vocab_size,
+        "context_size": context_size,
+        "n_layer": n_layer,
+        "n_embd": n_embd,
+        "n_head": n_head,
+    }
 
     np.random.seed(seed)
     torch.manual_seed(seed)
 
     net = make_model(**model_cfg)
-    optimizer = make_optimizer(net, lr=lr, weight_decay=weight_decay,
-                               beta1=beta1, beta2=beta2)
+    optimizer = make_optimizer(net, lr=lr, weight_decay=weight_decay, beta1=beta1, beta2=beta2)
 
-    log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
-           "loss_other": [], "loss_burst": [], "lr": []}
+    log = {
+        "step": [],
+        "loss": [],
+        "acc_other": [],
+        "acc_burst": [],
+        "loss_other": [],
+        "loss_burst": [],
+        "lr": [],
+    }
 
     best_loss = float("inf")
     wait = 0
@@ -94,8 +111,7 @@ def pretrain(
 
         # constant lr after warmup
         cur_lr = lr * min(1.0, (s + 1) / warmup) if warmup > 0 else lr
-        loss_val = train_step(net, optimizer, batch, lr=cur_lr,
-                              grad_clip=grad_clip)
+        loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)
 
         if s % eval_every == 0:
             ao = eval_accuracy(net, eval_other, prompt_len)
@@ -120,8 +136,7 @@ def pretrain(
                 wait += 1
             if wait >= patience:
                 if not quiet:
-                    print(f"\nConverged at step {s} (eval loss plateaued for "
-                          f"{patience} checks)")
+                    print(f"\nConverged at step {s} (eval loss plateaued for {patience} checks)")
                 break
 
         s += 1
@@ -130,15 +145,16 @@ def pretrain(
 
     if not quiet:
         peak = max(log["acc_other"]) if log["acc_other"] else 0
-        print(f"Pretrain done: peak acc_other={peak:.4f}, "
-              f"final loss_other={log['loss_other'][-1]:.4f}")
+        print(
+            f"Pretrain done: peak acc_other={peak:.4f}, "
+            f"final loss_other={log['loss_other'][-1]:.4f}"
+        )
 
     ckpt_path = out_dir / "pretrain_ckpt.pt"
     save_model(net, ckpt_path)
 
     # save log as npz for easy loading
-    np.savez(out_dir / "pretrain_log.npz",
-             **{k: np.array(v) for k, v in log.items()})
+    np.savez(out_dir / "pretrain_log.npz", **{k: np.array(v) for k, v in log.items()})
 
     return {
         "log": log,

@@ -1,8 +1,8 @@
-import torch
-import yaml
-import numpy as np
 import random
 
+import numpy as np
+import torch
+import yaml
 from omegaconf import OmegaConf
 
 
@@ -25,7 +25,7 @@ def read_config(fname):
     """
     Read config from yaml file and print it
     """
-    with open(fname, "r") as stream:
+    with open(fname) as stream:
         cfg = yaml.safe_load(stream)
     print(cfg)
     return OmegaConf.create(cfg)

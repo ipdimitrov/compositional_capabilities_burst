@@ -3,14 +3,15 @@
 Provides weight-space, representation (CKA), and gradient metrics
 to understand why higher burst concentration leads to faster forgetting.
 """
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from simple.model import load_model, DEVICE
-
+from simple.model import DEVICE, load_model
 
 # ── helpers ───────────────────────────────────────────────────────────────
+
 
 def _raw(net):
     """Unwrap torch.compile wrapper if present."""
@@ -62,6 +63,7 @@ def _block_group(name):
 
 # ── weight-space metrics ──────────────────────────────────────────────────
 
+
 def weight_drift_l2(sd_ref, sd_now):
     """Total and per-layer L2 distance between two state dicts."""
     per_layer = {}
@@ -72,8 +74,8 @@ def weight_drift_l2(sd_ref, sd_now):
         delta = sd_now[k].float() - sd_ref[k].float()
         l2 = delta.norm().item()
         per_layer[_layer_group(k)] = l2
-        total_sq += l2 ** 2
-    return {"total": total_sq ** 0.5, "per_layer": per_layer}
+        total_sq += l2**2
+    return {"total": total_sq**0.5, "per_layer": per_layer}
 
 
 def weight_cosine_per_layer(sd_ref, sd_now):
@@ -100,7 +102,7 @@ def weight_delta_svd(sd_ref, sd_now, top_k=10):
         s = S.numpy()
         s_norm = s / (s.sum() + 1e-10)
         eff_rank = float(np.exp(-np.sum(s_norm * np.log(s_norm + 1e-10))))
-        var_total = float((s ** 2).sum())
+        var_total = float((s**2).sum())
         var_topk = float((s[:top_k] ** 2).sum())
         results[_layer_group(k)] = {
             "singular_values": s,
@@ -115,6 +117,7 @@ def weight_delta_svd(sd_ref, sd_now, top_k=10):
 
 # ── representation metrics (CKA) ─────────────────────────────────────────
 
+
 def extract_hidden_states(net, data_np, prompt_len, batch_size=256):
     """Capture per-layer hidden states at the last prompt position."""
     raw = _raw(net)
@@ -123,18 +126,21 @@ def extract_hidden_states(net, data_np, prompt_len, batch_size=256):
     layer_acts = {}
     hooks = []
     for i, block in enumerate(raw.transformer.h):
+
         def _make_hook(idx):
             def hook_fn(module, inp, out):
                 if idx not in layer_acts:
                     layer_acts[idx] = []
                 layer_acts[idx].append(out[:, prompt_len - 1, :].detach().cpu())
+
             return hook_fn
+
         hooks.append(block.register_forward_hook(_make_hook(i)))
 
     dat = torch.as_tensor(data_np, dtype=torch.long, device=DEVICE)
     with torch.no_grad():
         for i in range(0, dat.shape[0], batch_size):
-            raw(dat[i:i + batch_size, :-1])
+            raw(dat[i : i + batch_size, :-1])
 
     for h in hooks:
         h.remove()
@@ -175,6 +181,7 @@ def cka_diagonal(net1, net2, data_np, prompt_len):
 
 # ── gradient metrics ──────────────────────────────────────────────────────
 
+
 def _get_grad_vector(net, batch_np):
     """Compute gradient vector for a batch (returns flat tensor)."""
     dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
@@ -184,10 +191,7 @@ def _get_grad_vector(net, batch_np):
         logits = net(inp)
         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
     loss.backward()
-    grads = []
-    for p in net.parameters():
-        if p.grad is not None:
-            grads.append(p.grad.detach().flatten())
+    grads = [p.grad.detach().flatten() for p in net.parameters() if p.grad is not None]
     return torch.cat(grads)
 
 
@@ -238,8 +242,7 @@ def gradient_cosine_per_layer(net, batch1_np, batch2_np):
     result = {}
     for key in g1:
         if key in g2:
-            cos = F.cosine_similarity(
-                g1[key].unsqueeze(0), g2[key].unsqueeze(0)).item()
+            cos = F.cosine_similarity(g1[key].unsqueeze(0), g2[key].unsqueeze(0)).item()
             result[key] = cos
     return result
 
@@ -250,7 +253,7 @@ def gradient_norm(net):
     for p in net.parameters():
         if p.grad is not None:
             total += p.grad.detach().norm().item() ** 2
-    return total ** 0.5
+    return total**0.5
 
 
 def gradient_norm_per_layer(net):
@@ -286,6 +289,7 @@ def grad_norm_entropy(net, batch_np):
 
 # ── post-hoc analysis (call after all phases complete) ────────────────────
 
+
 def analyze(data, pt, ft_results, fg_results):
     """Run full post-hoc interpretability analysis.
 
@@ -300,7 +304,7 @@ def analyze(data, pt, ft_results, fg_results):
     net_pt = load_model(pt["ckpt_path"], compile_model=False, **model_cfg)
 
     results = {}
-    for ft, fg in zip(ft_results, fg_results):
+    for ft, fg in zip(ft_results, fg_results, strict=False):
         tag = ft["tag"]
         sd_ft = load_sd(ft["ckpt_path"])
 

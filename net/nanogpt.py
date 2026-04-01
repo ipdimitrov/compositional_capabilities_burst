@@ -6,10 +6,11 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 2) huggingface/transformers PyTorch implementation:
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
+
 import math
 
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.nn import functional as F
 
 
@@ -18,13 +19,14 @@ class LayerNorm(nn.Module):
     LayerNorm but with an optional bias.
     PyTorch doesn't support simply bias=False
     """
+
     def __init__(self, ndim, bias):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(ndim))
         self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
 
-    def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+    def forward(self, x):
+        return F.layer_norm(x, self.weight.shape, self.weight, self.bias, 1e-5)
 
 
 class CausalSelfAttention(nn.Module):
@@ -77,9 +79,13 @@ class CausalSelfAttention(nn.Module):
 
         is_causal = kv_cache is None
         y = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=None,
+            q,
+            k,
+            v,
+            attn_mask=None,
             dropout_p=self.dropout if self.training else 0,
-            is_causal=is_causal)
+            is_causal=is_causal,
+        )
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
@@ -92,23 +98,23 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
         x = self.gelu(x)
         x = self.c_proj(x)
-        x = self.dropout(x)
-        return x
+        return self.dropout(x)
 
 
 class Block(nn.Module):
     """
     One self-attention block
     """
+
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
@@ -144,13 +150,15 @@ class nanoGPT(nn.Module):
         super().__init__()
         self.config = config
 
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.context_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
-        ))
+        self.transformer = nn.ModuleDict(
+            {
+                "wte": nn.Embedding(config.vocab_size, config.n_embd),
+                "wpe": nn.Embedding(config.context_size, config.n_embd),
+                "drop": nn.Dropout(config.dropout),
+                "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                "ln_f": LayerNorm(config.n_embd, bias=config.bias),
+            }
+        )
         self.LM_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # Weight typing
         self.transformer.wte.weight = self.LM_head.weight
@@ -159,9 +167,8 @@ class nanoGPT(nn.Module):
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections
         for pn, p in self.named_parameters():
-            if pn.endswith('c_proj.weight'):
-                torch.nn.init.normal_(
-                    p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+            if pn.endswith("c_proj.weight"):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
 
     def get_num_params(self, non_embedding=True):
         """
@@ -185,7 +192,7 @@ class nanoGPT(nn.Module):
 
     def forward(self, idx):
         device = idx.device
-        b, t = idx.size()
+        _b, t = idx.size()
 
         tok_emb = self.transformer.wte(idx)
         pos = torch.arange(0, t, dtype=torch.long, device=device)
@@ -195,8 +202,7 @@ class nanoGPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        logits = self.LM_head(x)
-        return logits
+        return self.LM_head(x)
 
     @torch.no_grad()
     def generate(self, prompt_BT: torch.Tensor, n_new: int) -> torch.Tensor:
@@ -237,7 +243,7 @@ class nanoGPT(nn.Module):
             x = self.transformer.drop(tok_emb + pos_emb)
 
             new_kv_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
-            for block, kv in zip(self.transformer.h, kv_caches):
+            for block, kv in zip(self.transformer.h, kv_caches, strict=False):
                 x, new_kv = block(x, kv_cache=kv)
                 new_kv_caches.append(new_kv)
             kv_caches = new_kv_caches

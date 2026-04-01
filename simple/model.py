@@ -1,6 +1,7 @@
 """Model utilities shared across phases: creation, saving, loading, training step, eval."""
+
 import math
-import numpy as np
+
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
@@ -10,22 +11,36 @@ from net.nanogpt import nanoGPT
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ── defaults ─────────────────────────────────────────────────────────────
-MODEL_DEFAULTS = dict(
-    n_layer=6, n_embd=120, n_head=4,
-    lr=1e-3, weight_decay=1e-3, beta1=0.9, beta2=0.9,
-    grad_clip=1.0, warmup_iters=50, batch_size=128,
-    eval_every=25,
-)
+MODEL_DEFAULTS = {
+    "n_layer": 6,
+    "n_embd": 120,
+    "n_head": 4,
+    "lr": 1e-3,
+    "weight_decay": 1e-3,
+    "beta1": 0.9,
+    "beta2": 0.9,
+    "grad_clip": 1.0,
+    "warmup_iters": 50,
+    "batch_size": 128,
+    "eval_every": 25,
+}
 
 
-def make_model(vocab_size, context_size, *, n_layer=6, n_embd=120, n_head=4,
-               compile_model=True):
+def make_model(vocab_size, context_size, *, n_layer=6, n_embd=120, n_head=4, compile_model=True):
     """Create a fresh nanoGPT."""
-    cfg = OmegaConf.create(dict(
-        compile=False, vocab_size=vocab_size, context_size=context_size,
-        n_layer=n_layer, n_head=n_head, n_embd=n_embd,
-        dropout=0.0, bias=False, mlp=True,
-    ))
+    cfg = OmegaConf.create(
+        {
+            "compile": False,
+            "vocab_size": vocab_size,
+            "context_size": context_size,
+            "n_layer": n_layer,
+            "n_head": n_head,
+            "n_embd": n_embd,
+            "dropout": 0.0,
+            "bias": False,
+            "mlp": True,
+        }
+    )
     net = nanoGPT(cfg).to(DEVICE)
     if compile_model and DEVICE == "cuda":
         net = torch.compile(net)
@@ -37,14 +52,25 @@ def save_model(net, path):
     torch.save(raw.state_dict(), path)
 
 
-def load_model(path, vocab_size, context_size, *, n_layer=6, n_embd=120,
-               n_head=4, compile_model=True):
+def load_model(
+    path, vocab_size, context_size, *, n_layer=6, n_embd=120, n_head=4, compile_model=True
+):
     """Load a model from a checkpoint."""
-    net = nanoGPT(OmegaConf.create(dict(
-        compile=False, vocab_size=vocab_size, context_size=context_size,
-        n_layer=n_layer, n_head=n_head, n_embd=n_embd,
-        dropout=0.0, bias=False, mlp=True,
-    ))).to(DEVICE)
+    net = nanoGPT(
+        OmegaConf.create(
+            {
+                "compile": False,
+                "vocab_size": vocab_size,
+                "context_size": context_size,
+                "n_layer": n_layer,
+                "n_head": n_head,
+                "n_embd": n_embd,
+                "dropout": 0.0,
+                "bias": False,
+                "mlp": True,
+            }
+        )
+    ).to(DEVICE)
     net.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
     if compile_model and DEVICE == "cuda":
         net = torch.compile(net)
@@ -55,11 +81,10 @@ def make_optimizer(net, lr=1e-3, weight_decay=1e-3, beta1=0.9, beta2=0.9):
     decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() >= 2]
     no_decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() < 2]
     groups = [
-        {"params": decay, "weight_decay": 0.0}, #weight_decay},
+        {"params": decay, "weight_decay": 0.0},  # weight_decay},
         {"params": no_decay, "weight_decay": 0.0},
     ]
-    return torch.optim.AdamW(groups, lr=lr, betas=(beta1, beta2),
-                             fused=(DEVICE == "cuda"))
+    return torch.optim.AdamW(groups, lr=lr, betas=(beta1, beta2), fused=(DEVICE == "cuda"))
 
 
 def reset_optimizer(optimizer):
@@ -77,6 +102,7 @@ def reset_optimizer(optimizer):
 
 # ── LR schedule ──────────────────────────────────────────────────────────
 
+
 def cosine_lr(step, total_steps, lr_max, lr_min, warmup=0):
     """Single-phase cosine with optional warmup."""
     if step <= warmup:
@@ -91,6 +117,7 @@ def set_lr(optimizer, lr):
 
 
 # ── training step ────────────────────────────────────────────────────────
+
 
 def train_step(net, optimizer, batch_np, lr=None, grad_clip=1.0):
     """One forward+backward step. Returns loss float."""
@@ -111,6 +138,7 @@ def train_step(net, optimizer, batch_np, lr=None, grad_clip=1.0):
 
 # ── evaluation ───────────────────────────────────────────────────────────
 
+
 @torch.no_grad()
 def eval_accuracy(net, docs_BL, prompt_len):
     """Free-generation accuracy on last 6 tokens."""
@@ -123,11 +151,11 @@ def eval_accuracy(net, docs_BL, prompt_len):
     correct, total = 0, 0
     bs = 256
     for i in range(0, dat.shape[0], bs):
-        chunk = dat[i:i + bs]
+        chunk = dat[i : i + bs]
         tgt = chunk[:, 1:]
         full = net.generate(chunk[:, :prompt_len], n_new)
         gen = full[:, prompt_len:]
-        ref = tgt[:, prompt_len - 1:]
+        ref = tgt[:, prompt_len - 1 :]
         ml = min(gen.shape[1], ref.shape[1])
         last6 = max(0, ml - 6)
         correct += (gen[:, last6:ml] == ref[:, last6:ml]).float().sum().item()

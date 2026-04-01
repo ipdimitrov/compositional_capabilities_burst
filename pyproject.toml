@@ -1,21 +1,21 @@
 [project]
 name = "compositional-capabilities"
 version = "0.1.0"
-requires-python = "==3.10.*"
+requires-python = "==3.12.*"
 dependencies = [
-    "torch",
-    "torchvision",
-    "torchaudio",
-    "numba==0.57.0",
+    "torch==2.12.0.dev20260325+cu128",
+    "torchvision==0.26.0.dev20260325+cu128",
+    "torchaudio==2.11.0.dev20260325+cu128",
     "omegaconf==2.3.0",
-    "numpy==1.24.4",
+    "numpy==1.26.4",
     "tqdm==4.67.3",
     "matplotlib==3.10.8",
     "ipykernel==7.2.0",
-    "ipython==8.14.0",
-    "jupyter==1.0.0",
-    "ipywidgets>=8.1.8",
-    "scikit-learn>=1.7.2",
+    "ipython==9.12.0",
+    "jupyter==1.1.1",
+    "ipywidgets==8.1.8",
+    "scikit-learn==1.7.2",
+    "einops>=0.8.2",
 ]
 
 [tool.uv]
@@ -36,5 +36,38 @@ triton = { index = "pytorch-nightly" }
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.2",
+    "pytest==9.0.2",
+    "ruff==0.15.8",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "ANN",     # type-annotation — we use Shazeer typing, not mypy
+    "D",       # docstrings — research code, not a library
+    "T201",    # print() — used everywhere in research scripts
+    "COM812",  # trailing-comma — conflicts with ruff formatter
+    "ISC001",  # implicit-string-concat — conflicts with ruff formatter
+    "S101",    # assert — encouraged by project style guide
+    "FBT",     # boolean-trap — too strict for ML code
+    "INP001",  # implicit-namespace-package — scripts don't need __init__
+    "N806",    # non-lowercase variable — Shazeer typing (e.g. W_NF)
+    "N803",    # non-lowercase argument — Shazeer typing
+    "N812",    # lowercase-imported-as-non-lowercase — `import as F` is PyTorch convention
+    "NPY002",  # numpy-legacy-random — changing seeding would break reproducibility
+    "PLR2004", # magic-value-comparison — ML code uses numeric constants pervasively
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "PLR"]
+"burst/dev/*" = ["ALL"]
+"_fix*.py" = ["ALL"]
+"notebooks/*" = ["ALL"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

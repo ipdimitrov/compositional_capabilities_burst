@@ -3,19 +3,30 @@
 Loads a finetuned checkpoint and trains on background data only.  Tracks how
 quickly the model forgets the burst capability.
 """
+
+from pathlib import Path
+
 import numpy as np
 import torch
-from pathlib import Path
 from tqdm.auto import tqdm
 
-from simple.model import (
-    load_model, save_model, make_optimizer, reset_optimizer,
-    train_step, eval_accuracy, eval_loss, cosine_lr,
-    MODEL_DEFAULTS,
-)
 from simple.interp import (
-    state_dict_cpu, weight_drift_l2,
-    _get_grad_vector, gradient_cosine_per_layer, grad_norm_entropy,
+    _get_grad_vector,
+    grad_norm_entropy,
+    gradient_cosine_per_layer,
+    state_dict_cpu,
+    weight_drift_l2,
+)
+from simple.model import (
+    MODEL_DEFAULTS,
+    cosine_lr,
+    eval_accuracy,
+    eval_loss,
+    load_model,
+    make_optimizer,
+    reset_optimizer,
+    save_model,
+    train_step,
 )
 
 
@@ -74,10 +85,12 @@ def forget(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    net = load_model(finetune_ckpt, vocab_size, context_size,
-                     n_layer=n_layer, n_embd=n_embd, n_head=n_head)
-    optimizer = make_optimizer(net, lr=lr * lr_start_frac,
-                               weight_decay=weight_decay, beta1=beta1, beta2=beta2)
+    net = load_model(
+        finetune_ckpt, vocab_size, context_size, n_layer=n_layer, n_embd=n_embd, n_head=n_head
+    )
+    optimizer = make_optimizer(
+        net, lr=lr * lr_start_frac, weight_decay=weight_decay, beta1=beta1, beta2=beta2
+    )
     reset_optimizer(optimizer)  # fresh momentum for reversion phase
 
     # reference state dicts for weight drift tracking
@@ -85,6 +98,7 @@ def forget(
     sd_pt = None
     if pretrain_ckpt is not None:
         from simple.interp import load_sd
+
         sd_pt = load_sd(pretrain_ckpt)
 
     # measure peak burst accuracy at start of reversion
@@ -94,12 +108,22 @@ def forget(
     lr_start = lr * lr_start_frac
     lr_end = lr * lr_end_frac
 
-    log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
-           "loss_other": [], "loss_burst": [], "lr": [],
-           "weight_drift_from_ft": [], "weight_drift_from_pt": [],
-           "grad_norm": [], "grad_norm_burst": [], "grad_cosine_burst_bg": [],
-           "grad_cosine_per_layer": [],
-           "grad_norm_entropy": []}
+    log = {
+        "step": [],
+        "loss": [],
+        "acc_other": [],
+        "acc_burst": [],
+        "loss_other": [],
+        "loss_burst": [],
+        "lr": [],
+        "weight_drift_from_ft": [],
+        "weight_drift_from_pt": [],
+        "grad_norm": [],
+        "grad_norm_burst": [],
+        "grad_cosine_burst_bg": [],
+        "grad_cosine_per_layer": [],
+        "grad_norm_entropy": [],
+    }
 
     net.train()
     pbar = tqdm(range(steps), desc=f"Forget {tag}", disable=quiet)
@@ -115,8 +139,7 @@ def forget(
         batch = np.concatenate(parts)[np.random.permutation(batch_size)]
 
         cur_lr = cosine_lr(s + 1, steps, lr_start, lr_end)
-        loss_val = train_step(net, optimizer, batch, lr=cur_lr,
-                              grad_clip=grad_clip)
+        loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)
 
         if s % eval_every == 0 or s == steps - 1:
             ao = eval_accuracy(net, eval_other, prompt_len)
@@ -149,8 +172,8 @@ def forget(
             g_burst = _get_grad_vector(net, burst_batch)
             log["grad_norm_burst"].append(g_burst.norm().item())
             import torch.nn.functional as _F
-            gc = _F.cosine_similarity(
-                g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
+
+            gc = _F.cosine_similarity(g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
             log["grad_cosine_burst_bg"].append(gc)
 
             # per-layer gradient cosine
@@ -161,20 +184,19 @@ def forget(
             log["grad_norm_entropy"].append(ent)
             net.zero_grad()
 
-            pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
-                             drift=f"{drift_ft:.3f}")
+            pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}", drift=f"{drift_ft:.3f}")
             net.train()
 
     # -- metrics --
     accs = log["acc_burst"]
     steps_arr = log["step"]
-    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    _trapz = np.trapezoid
     reversion_auc = float(_trapz(accs, steps_arr)) if len(accs) > 1 else 0.0
 
     life_times = {}
     if peak_burst > 1e-6:
-        remaining = {t: True for t in thresholds}
-        for acc_val, step_val in zip(accs, steps_arr):
+        remaining = dict.fromkeys(thresholds, True)
+        for acc_val, step_val in zip(accs, steps_arr, strict=False):
             for t in list(remaining):
                 if acc_val <= peak_burst * t:
                     life_times[f"life_{int(t * 100)}"] = step_val
@@ -193,8 +215,7 @@ def forget(
     # save
     ckpt_path = out_dir / f"{tag}_reverted_ckpt.pt"
     save_model(net, ckpt_path)
-    np.savez(out_dir / f"{tag}_forget_log.npz",
-             **{k: np.array(v) for k, v in log.items()})
+    np.savez(out_dir / f"{tag}_forget_log.npz", **{k: np.array(v) for k, v in log.items()})
 
     return {
         "log": log,

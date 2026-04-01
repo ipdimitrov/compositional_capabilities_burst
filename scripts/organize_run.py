@@ -11,8 +11,9 @@ After running:
   data/logs/<run_name>/         (symlink to <run_dir>/logs/)
   data/_heavy/<run_name>/       (symlink to <run_dir>/_heavy/)
 """
-import sys
+
 import shutil
+import sys
 from pathlib import Path
 
 HEAVY_EXTENSIONS = {".pkl", ".pt"}
@@ -54,12 +55,11 @@ def organize(run_dir: Path):
                 print(f"  moved file {rel} -> _heavy/{rel}")
 
     light_size = sum(
-        f.stat().st_size for f in run_dir.rglob("*")
+        f.stat().st_size
+        for f in run_dir.rglob("*")
         if f.is_file() and not f.is_symlink() and "_heavy" not in f.parts
     )
-    heavy_size = sum(
-        f.stat().st_size for f in heavy_dir.rglob("*") if f.is_file()
-    )
+    heavy_size = sum(f.stat().st_size for f in heavy_dir.rglob("*") if f.is_file())
     print(f"\n  Download folder: {light_size / 1e6:.1f} MB")
     print(f"  Heavy (excluded): {heavy_size / 1e6:.1f} MB")
 

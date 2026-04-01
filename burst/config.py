@@ -20,8 +20,9 @@ Burst modes
                      inversely with concentration so special-per-step is constant
                      while total data per step grows for dilute schedules.
 """
-from dataclasses import dataclass, field
+
 import colorsys
+from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
 # Phase names (three-phase experiment)
@@ -50,6 +51,7 @@ UNIFORM_PCT = 25
 # Everything below is derived from BURST_FRACTIONS
 # ---------------------------------------------------------------------------
 
+
 def _sched_name(pct: int) -> str:
     return f"burst_{pct}"
 
@@ -58,13 +60,13 @@ def _build_gradient(n: int) -> list[str]:
     """Red (high %) -> Blue (low %) gradient via HSL interpolation."""
     if n == 1:
         return ["#D32F2F"]
-    hue_hi, hue_lo = 0.0, 0.58          # red -> blue in HSL
+    hue_hi, hue_lo = 0.0, 0.58  # red -> blue in HSL
     colors = []
     for i in range(n):
         t = i / (n - 1)
         h = hue_hi + t * (hue_lo - hue_hi)
         r, g, b = colorsys.hls_to_rgb(h, 0.42, 0.72)
-        colors.append(f"#{int(r*255):02X}{int(g*255):02X}{int(b*255):02X}")
+        colors.append(f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}")
     return colors
 
 
@@ -75,19 +77,11 @@ SCHEDULE_ORDER: list[str] = [_sched_name(p) for p in _sorted_pcts]
 
 UNIFORM_SCHEDULE: str = _sched_name(UNIFORM_PCT)
 
-MIXED_FRACTIONS: dict[str, float] = {
-    _sched_name(p): p / 100.0
-    for p in _sorted_pcts
-    if p != 100
-}
+MIXED_FRACTIONS: dict[str, float] = {_sched_name(p): p / 100.0 for p in _sorted_pcts if p != 100}
 
-SCHED_COLORS: dict[str, str] = {
-    _sched_name(p): c for p, c in zip(_sorted_pcts, _gradient)
-}
+SCHED_COLORS: dict[str, str] = {_sched_name(p): c for p, c in zip(_sorted_pcts, _gradient)}
 
-SCHED_DISPLAY: dict[str, str] = {
-    _sched_name(p): f"Burst {p}%" for p in _sorted_pcts
-}
+SCHED_DISPLAY: dict[str, str] = {_sched_name(p): f"Burst {p}%" for p in _sorted_pcts}
 
 EVAL_KEYS = ["acc_other", "acc_burst"]
 
@@ -114,6 +108,13 @@ MODE_CONSTANT_STEPS = "constant_steps"
 MODE_SCALED_BATCH = "scaled_batch"
 BURST_MODES = (MODE_CURRENT, MODE_CONSTANT_STEPS, MODE_SCALED_BATCH)
 
+# Canonical CLI / reproducibility defaults
+DEFAULT_REPRO_SEED = 1337
+DEFAULT_DETERMINISTIC = True
+REPRO_MANIFEST_FILENAME = "repro_manifest.json"
+CORE_CHARTS_DIRNAME = "core_charts"
+CORE_CLI_MODES = ("train", "gradients", "bundle", "charts", "pipeline")
+
 
 def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) -> int:
     """Burst phase length for a given schedule (original "current" mode).
@@ -130,7 +131,7 @@ def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) 
         frac = MIXED_FRACTIONS[schedule]
         if frac <= 0:
             return base_steps
-        return max(base_steps, int(round(base_steps / frac)))
+        return max(base_steps, round(base_steps / frac))
     return base_steps
 
 
@@ -154,7 +155,7 @@ def batch_size_for_mode(
     frac = MIXED_FRACTIONS.get(schedule, 1.0)
     if frac <= 0:
         return base_batch_size
-    return max(base_batch_size, int(round(base_batch_size / frac)))
+    return max(base_batch_size, round(base_batch_size / frac))
 
 
 MIXED_FRACTIONS["burst_100"] = 1.0
@@ -201,6 +202,7 @@ class TrainConfig:
 # Experiment-level config
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
@@ -218,7 +220,8 @@ class ExperimentConfig:
         if self.burst_mode not in BURST_MODES:
             raise ValueError(f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}")
         if self.n_workers == 0:
-            from burst.gpu import gpu_cfg
+            from burst.core.gpu import gpu_cfg
+
             self.n_workers = gpu_cfg.train_workers
 
     @property
@@ -243,7 +246,9 @@ def parse_run_config(cfg: dict) -> dict:
 
     burst_pos = cfg.get("burst_pos") or cfg.get("task_info", {}).get("burst_pos")
     if burst_pos is None:
-        raise KeyError("config missing 'burst_pos' (checked cfg.burst_pos and cfg.task_info.burst_pos)")
+        raise KeyError(
+            "config missing 'burst_pos' (checked cfg.burst_pos and cfg.task_info.burst_pos)"
+        )
 
     n_a = cfg.get("n_a") or cfg.get("task_info", {}).get("n_a")
     if n_a is None:

@@ -1,21 +1,23 @@
 """
 Evaluate on out-of-order functions
 """
-import os
-import torch
-import glob
 
-from synthetic.init import set_seed, read_config
-from synthetic.generator import SyntheticEvalCombinatorial
+import glob
+import os
+
+import torch
+
 from net.nanogpt import nanoGPT
+from synthetic.generator import SyntheticEvalCombinatorial
+from synthetic.init import read_config, set_seed
 
 
 def load_net(fname):
     ckpt = torch.load(fname)
-    net_cfg = ckpt['config']
-    
+    net_cfg = ckpt["config"]
+
     net = nanoGPT(net_cfg.net)
-    net.load_state_dict(ckpt['net'])
+    net.load_state_dict(ckpt["net"])
     return net, net_cfg
 
 

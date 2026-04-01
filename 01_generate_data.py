@@ -1,6 +1,6 @@
-from synthetic.init import set_seed, read_config
-from synthetic.generator import SyntheticData
 from synthetic.functions import CreateFunctions
+from synthetic.generator import SyntheticData
+from synthetic.init import read_config, set_seed
 
 
 def main(cfg):

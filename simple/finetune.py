@@ -4,20 +4,30 @@ Loads a pretrained checkpoint, trains with a given burst fraction, and saves
 the resulting checkpoint + log.  Can be called multiple times with different
 burst_frac values to sweep concentrations.
 """
+
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pathlib import Path
 from tqdm.auto import tqdm
 
-from simple.model import (
-    load_model, save_model, make_optimizer,
-    train_step, eval_accuracy, eval_loss, cosine_lr,
-    MODEL_DEFAULTS,
-)
 from simple.interp import (
-    state_dict_cpu, weight_drift_l2,
-    _get_grad_vector, gradient_cosine_per_layer, grad_norm_entropy,
+    _get_grad_vector,
+    grad_norm_entropy,
+    gradient_cosine_per_layer,
+    state_dict_cpu,
+    weight_drift_l2,
+)
+from simple.model import (
+    MODEL_DEFAULTS,
+    cosine_lr,
+    eval_accuracy,
+    eval_loss,
+    load_model,
+    make_optimizer,
+    save_model,
+    train_step,
 )
 
 
@@ -96,20 +106,33 @@ def finetune(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    net = load_model(pretrain_ckpt, vocab_size, context_size,
-                     n_layer=n_layer, n_embd=n_embd, n_head=n_head)
-    optimizer = make_optimizer(net, lr=lr * lr_start_frac,
-                               weight_decay=weight_decay, beta1=beta1, beta2=beta2)
+    net = load_model(
+        pretrain_ckpt, vocab_size, context_size, n_layer=n_layer, n_embd=n_embd, n_head=n_head
+    )
+    optimizer = make_optimizer(
+        net, lr=lr * lr_start_frac, weight_decay=weight_decay, beta1=beta1, beta2=beta2
+    )
 
     # reference state dict for weight drift tracking
     sd_ref = state_dict_cpu(net)
 
-    log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
-           "loss_other": [], "loss_burst": [], "lr": [],
-           "weight_drift": [],
-           "grad_norm_burst": [], "grad_norm_bg": [], "grad_norm_train": [],
-           "grad_cosine_burst_bg": [], "grad_cosine_per_layer": [],
-           "grad_norm_entropy_burst": [], "grad_norm_entropy_bg": []}
+    log = {
+        "step": [],
+        "loss": [],
+        "acc_other": [],
+        "acc_burst": [],
+        "loss_other": [],
+        "loss_burst": [],
+        "lr": [],
+        "weight_drift": [],
+        "grad_norm_burst": [],
+        "grad_norm_bg": [],
+        "grad_norm_train": [],
+        "grad_cosine_burst_bg": [],
+        "grad_cosine_per_layer": [],
+        "grad_norm_entropy_burst": [],
+        "grad_norm_entropy_bg": [],
+    }
 
     lr_start = lr * lr_start_frac
     lr_end = lr * lr_end_frac
@@ -117,12 +140,13 @@ def finetune(
     net.train()
     pbar = tqdm(range(steps), desc=f"Finetune {tag}", disable=quiet)
     for s in pbar:
-        n_target = int(np.random.binomial(batch_size, burst_frac)) if burst_frac < 1.0 else batch_size
+        n_target = (
+            int(np.random.binomial(batch_size, burst_frac)) if burst_frac < 1.0 else batch_size
+        )
         batch = _sample_batch(target_pool, bg_pool, n_target, batch_size)
 
         cur_lr = cosine_lr(s + 1, steps, lr_start, lr_end)
-        loss_val = train_step(net, optimizer, batch, lr=cur_lr,
-                              grad_clip=grad_clip)
+        loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)
 
         if s % eval_every == 0 or s == steps - 1:
             ao = eval_accuracy(net, eval_other, prompt_len)
@@ -150,8 +174,7 @@ def finetune(
             g_bg = _get_grad_vector(net, bg_batch)
             gn_burst = g_burst.norm().item()
             gn_bg = g_bg.norm().item()
-            gc = F.cosine_similarity(
-                g_burst.unsqueeze(0), g_bg.unsqueeze(0)).item()
+            gc = F.cosine_similarity(g_burst.unsqueeze(0), g_bg.unsqueeze(0)).item()
             net.zero_grad()
             log["grad_norm_burst"].append(gn_burst)
             log["grad_norm_bg"].append(gn_bg)
@@ -172,14 +195,14 @@ def finetune(
             log["grad_norm_train"].append(g_train.norm().item())
             net.zero_grad()
 
-            pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
-                             acc_o=f"{ao:.3f}", drift=f"{drift:.3f}")
+            pbar.set_postfix(
+                loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}", acc_o=f"{ao:.3f}", drift=f"{drift:.3f}"
+            )
             net.train()
 
     ckpt_path = out_dir / f"{tag}_ckpt.pt"
     save_model(net, ckpt_path)
-    np.savez(out_dir / f"{tag}_log.npz",
-             **{k: np.array(v) for k, v in log.items()})
+    np.savez(out_dir / f"{tag}_log.npz", **{k: np.array(v) for k, v in log.items()})
 
     peak_burst = max(log["acc_burst"]) if log["acc_burst"] else 0.0
 

@@ -1,0 +1,42 @@
+"""Batched worker: trains multiple jobs sequentially in ONE CUDA context.
+
+Launched as a subprocess by experiment.py. Instead of spawning one process
+per job (each with ~400 MB CUDA context overhead), this worker receives a
+list of jobs and trains them one after another, reusing the same context.
+
+For 1M-param models the CUDA context dominates memory; batching N jobs
+into one process saves ~(N-1)*400 MB of VRAM.
+"""
+
+import argparse
+import os
+import pickle
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+import torch
+
+from burst.core.train.worker import run
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--jobs-path", required=True)
+    parser.add_argument("--data-path", required=True)
+    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--progress-dir", required=True)
+    args = parser.parse_args()
+
+    with open(args.jobs_path, "rb") as f:
+        jobs = pickle.load(f)
+
+    for job in jobs:
+        try:
+            run(job, args.data_path, args.run_dir, args.progress_dir)
+        except Exception as e:
+            print(f"WORKER FAIL {job.get('label', '?')}: {e}", file=sys.stderr, flush=True)
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()

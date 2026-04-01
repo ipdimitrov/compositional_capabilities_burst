@@ -14,29 +14,44 @@ accuracy curves, A−B diffs, and diff-in-diffs.
 Usage:
     python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag>
     python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> --seed-override 107
-    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> --probe-steps 250 500 750 1000
+    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> \\
+        --probe-steps 250 500 750 1000
     python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> --n-workers 38
 """
-import sys, os, argparse, pickle, json
+
+import argparse
+import json
+import os
+import pickle
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import matplotlib as mpl
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from pathlib import Path
-from itertools import combinations
+from torch import nn
 
-from synthetic.init import set_seed
-from net.nanogpt import nanoGPT
-from burst.experiment import DepthNData, build_data
-from burst.train_utils import DEVICE, load_net, retrain_with_callbacks, build_probe_docs, N_PROBE_DOCS_PER_TASK
+mpl.use("Agg")
+from itertools import combinations
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+
 from burst.config import DATA_SEED, SCHED_COLORS, SCHEDULE_ORDER, parse_run_config
-from burst.parallel import run_job_pool
-from burst.gpu import gpu_cfg
+from burst.core.gpu import gpu_cfg
+from burst.core.parallel import run_job_pool
+from burst.core.train.experiment import DepthNData, build_data
+from burst.core.train_utils import (
+    DEVICE,
+    N_PROBE_DOCS_PER_TASK,
+    build_probe_docs,
+    load_net,
+    retrain_with_callbacks,
+)
+from net.nanogpt import nanoGPT
+from synthetic.init import set_seed
 
 """
 Dimension key:
@@ -252,7 +267,8 @@ def probe_from_checkpoints_at_steps(
         net = load_net(cfg, available_ckpts[step])
         net.eval()
         results_by_step[step] = probe_all_layers(
-            net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth)
+            net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth
+        )
         del net
         torch.cuda.empty_cache()
 
@@ -283,11 +299,13 @@ def retrain_and_probe_at_steps(
             net.eval()
             print(f"    Probing step {global_step} ({phase})...", flush=True)
             results_by_step[global_step] = probe_all_layers(
-                net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth)
+                net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth
+            )
             net.train()
 
     net = retrain_with_callbacks(
-        job, target_pool, bg_pool, on_step=on_step, max_step=max(probe_steps))
+        job, target_pool, bg_pool, on_step=on_step, max_step=max(probe_steps)
+    )
     del net
     torch.cuda.empty_cache()
     return results_by_step
@@ -313,8 +331,7 @@ def probe_all_layers(
     results = {m: {"Other": np.zeros(K), "Burst": np.zeros(K)} for m in PROBE_METHODS}
 
     for regime, docs in [("Other", other_docs_BL), ("Burst", burst_docs_BL)]:
-        layer_acts, targets_PM = collect_all_layer_acts_KBM_N(
-            net, docs, f3_pos, max_samples)
+        layer_acts, targets_PM = collect_all_layer_acts_KBM_N(net, docs, f3_pos, max_samples)
 
         ll_acc = logit_lens_accuracy_K(net, layer_acts, targets_PM)
         results["logit_lens"][regime] = ll_acc
@@ -323,10 +340,12 @@ def probe_all_layers(
         results["learned_probe"][regime] = lp_acc
 
         for k in range(K):
-            layer_name = "emb" if k == 0 else f"L{k-1}"
-            print(f"      {layer_name:4s}  {regime}  "
-                  f"logit_lens={ll_acc[k]:.3f}  learned_probe={lp_acc[k]:.3f}",
-                  flush=True)
+            layer_name = "emb" if k == 0 else f"L{k - 1}"
+            print(
+                f"      {layer_name:4s}  {regime}  "
+                f"logit_lens={ll_acc[k]:.3f}  learned_probe={lp_acc[k]:.3f}",
+                flush=True,
+            )
 
     return results
 
@@ -363,7 +382,7 @@ def compute_diff_in_diffs(diffs, methods):
 
 def plot_raw_curves(all_results, method, n_layers, output_dir):
     raw_scheds = set()
-    for k in all_results.keys():
+    for k in all_results:
         raw_scheds.add(k.rsplit("_s", 1)[0])
     schedules_seen = _ordered_schedules(raw_scheds)
 
@@ -389,8 +408,9 @@ def plot_raw_curves(all_results, method, n_layers, output_dir):
                 n_s = len(arr)
                 ci = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(arr, axis=0)
                 ax.plot(x, mean_c, "o-", color=SCHED_COLORS.get(sched, "gray"), lw=2)
-                ax.fill_between(x, mean_c - ci, mean_c + ci,
-                                color=SCHED_COLORS.get(sched, "gray"), alpha=0.2)
+                ax.fill_between(
+                    x, mean_c - ci, mean_c + ci, color=SCHED_COLORS.get(sched, "gray"), alpha=0.2
+                )
 
             ax.set_xticks(x)
             ax.set_xticklabels(layer_labels, fontsize=8)
@@ -423,16 +443,18 @@ def plot_ab_diffs(diffs, method, n_layers, output_dir, diffs_per_seed=None):
             n_s = len(arr)
             if n_s > 1:
                 ci = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s)
-                ax.fill_between(x, diffs[method][sched] - ci,
-                                diffs[method][sched] + ci, color=c, alpha=0.15)
+                ax.fill_between(
+                    x, diffs[method][sched] - ci, diffs[method][sched] + ci, color=c, alpha=0.15
+                )
 
     ax.axhline(0, color="gray", ls="--", alpha=0.5)
     ax.set_xticks(x)
     ax.set_xticklabels(layer_labels, fontsize=9)
     ax.set_xlabel("Layer", fontsize=11)
     ax.set_ylabel("Δ accuracy (Other − Burst)", fontsize=11)
-    ax.set_title(f"Other−Burst Next-Token Diff — {method}\n(mean +/- 95% CI)",
-                 fontsize=13, fontweight="bold")
+    ax.set_title(
+        f"Other−Burst Next-Token Diff — {method}\n(mean +/- 95% CI)", fontsize=13, fontweight="bold"
+    )
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.2)
     fig.tight_layout()
@@ -474,7 +496,7 @@ def plot_combined_curves(step_results, method, n_layers, output_dir):
 
     raw_scheds = set()
     for step_data in step_results.values():
-        for k in step_data.keys():
+        for k in step_data:
             raw_scheds.add(k.rsplit("_s", 1)[0])
     schedules_seen = _ordered_schedules(raw_scheds)
 
@@ -483,24 +505,30 @@ def plot_combined_curves(step_results, method, n_layers, output_dir):
 
     n_scheds = len(schedules_seen)
     fig, axes = plt.subplots(n_scheds, 2, figsize=(14, 3.5 * n_scheds), squeeze=False)
-    fig.suptitle(f"Next-Token Probe — {method} (all steps)",
-                 fontsize=14, fontweight="bold")
+    fig.suptitle(f"Next-Token Probe — {method} (all steps)", fontsize=14, fontweight="bold")
 
     for si, sched in enumerate(schedules_seen):
         for ri, regime in enumerate(["Other", "Burst"]):
             ax = axes[si, ri]
             for ci, step in enumerate(sorted_steps):
-                curves = [v[method][regime] for k, v in step_results[step].items()
-                          if k.startswith(sched + "_s") and method in v]
+                curves = [
+                    v[method][regime]
+                    for k, v in step_results[step].items()
+                    if k.startswith(sched + "_s") and method in v
+                ]
                 if curves:
                     arr = np.array(curves)
                     mean_c = np.mean(arr, axis=0)
                     n_s = len(arr)
-                    ci_band = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(arr, axis=0)
-                    ax.plot(x, mean_c, "o-", color=step_colors[ci], lw=2,
-                            label=f"step {step}")
-                    ax.fill_between(x, mean_c - ci_band, mean_c + ci_band,
-                                    color=step_colors[ci], alpha=0.15)
+                    ci_band = (
+                        1.96 * np.std(arr, axis=0) / np.sqrt(n_s)
+                        if n_s > 1
+                        else np.std(arr, axis=0)
+                    )
+                    ax.plot(x, mean_c, "o-", color=step_colors[ci], lw=2, label=f"step {step}")
+                    ax.fill_between(
+                        x, mean_c - ci_band, mean_c + ci_band, color=step_colors[ci], alpha=0.15
+                    )
             ax.set_xticks(x)
             ax.set_xticklabels(layer_labels, fontsize=8)
             ax.set_ylim(0, 1.05)
@@ -513,8 +541,7 @@ def plot_combined_curves(step_results, method, n_layers, output_dir):
     axes[-1, 0].set_xlabel("Layer")
     axes[-1, 1].set_xlabel("Layer")
     fig.tight_layout()
-    fig.savefig(output_dir / f"combined_curves_{method}.png",
-                dpi=150, bbox_inches="tight")
+    fig.savefig(output_dir / f"combined_curves_{method}.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -531,8 +558,9 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir, step_diffs_per
 
     n_scheds = len(scheds)
     fig, axes = plt.subplots(1, n_scheds, figsize=(5 * n_scheds, 5), squeeze=False)
-    fig.suptitle(f"Other−Burst Diff — {method} (all steps, mean +/- 95% CI)",
-                 fontsize=14, fontweight="bold")
+    fig.suptitle(
+        f"Other−Burst Diff — {method} (all steps, mean +/- 95% CI)", fontsize=14, fontweight="bold"
+    )
 
     step_colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(sorted_steps)))
 
@@ -553,14 +581,16 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir, step_diffs_per
                 mean_d = step_diffs[step][method][sched]
                 c = step_colors[ci]
                 ax.plot(x, mean_d, "o-", color=c, lw=2, label=f"step {step}")
-                if (step_diffs_per_seed and step in step_diffs_per_seed
-                        and sched in step_diffs_per_seed[step][method]):
+                if (
+                    step_diffs_per_seed
+                    and step in step_diffs_per_seed
+                    and sched in step_diffs_per_seed[step][method]
+                ):
                     arr = step_diffs_per_seed[step][method][sched]
                     n_s = len(arr)
                     if n_s > 1:
                         ci_band = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s)
-                        ax.fill_between(x, mean_d - ci_band, mean_d + ci_band,
-                                        color=c, alpha=0.12)
+                        ax.fill_between(x, mean_d - ci_band, mean_d + ci_band, color=c, alpha=0.12)
         ax.axhline(0, color="gray", ls="--", alpha=0.5)
         ax.set_xticks(x)
         ax.set_xticklabels(layer_labels, fontsize=8)
@@ -572,14 +602,14 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir, step_diffs_per
         ax.grid(True, alpha=0.2)
 
     fig.tight_layout()
-    fig.savefig(output_dir / f"combined_diff_{method}.png",
-                dpi=150, bbox_inches="tight")
+    fig.savefig(output_dir / f"combined_diff_{method}.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
 def _worker_main():
     """Subprocess entry: load pickled args, run single probe job, save results."""
     import warnings
+
     warnings.filterwarnings("ignore", message=".*backward hook.*")
 
     parser = argparse.ArgumentParser()
@@ -601,14 +631,29 @@ def _worker_main():
     ckpt_dir = job.get("ckpt_dir")
     if ckpt_dir and Path(ckpt_dir).exists():
         step_results = probe_from_checkpoints_at_steps(
-            job, Path(ckpt_dir), wargs.probe_steps,
-            other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples,
-            wargs.depth)
+            job,
+            Path(ckpt_dir),
+            wargs.probe_steps,
+            other_docs,
+            burst_docs,
+            wargs.n_layers,
+            wargs.seq_len,
+            wargs.max_samples,
+            wargs.depth,
+        )
     else:
         step_results = retrain_and_probe_at_steps(
-            job, tp, bp, wargs.probe_steps,
-            other_docs, burst_docs, wargs.n_layers, wargs.seq_len, wargs.max_samples,
-            wargs.depth)
+            job,
+            tp,
+            bp,
+            wargs.probe_steps,
+            other_docs,
+            burst_docs,
+            wargs.n_layers,
+            wargs.seq_len,
+            wargs.max_samples,
+            wargs.depth,
+        )
 
     with open(wargs.output_path, "wb") as f:
         pickle.dump({"label": job["label"], "step_results": step_results}, f)
@@ -616,12 +661,22 @@ def _worker_main():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Next-token probes (logit lens + learned) for Other vs Burst regimes")
+        description="Next-token probes (logit lens + learned) for Other vs Burst regimes"
+    )
     parser.add_argument("run_dir", type=str)
-    parser.add_argument("--probe-steps", type=int, nargs="+", default=None,
-                        help="Global steps to probe at (default: total_steps + reversion_steps)")
-    parser.add_argument("--probe-step", type=int, default=None,
-                        help="Single step (legacy, use --probe-steps for multiple)")
+    parser.add_argument(
+        "--probe-steps",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Global steps to probe at (default: total_steps + reversion_steps)",
+    )
+    parser.add_argument(
+        "--probe-step",
+        type=int,
+        default=None,
+        help="Single step (legacy, use --probe-steps for multiple)",
+    )
     parser.add_argument("--probe-max-samples", type=int, required=True)
     parser.add_argument("--seed-override", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
@@ -629,7 +684,8 @@ def main():
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    from burst.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths
+
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with open(cfg_path) as f:
         cfg = json.load(f)
@@ -648,8 +704,9 @@ def main():
     else:
         probe_steps = [total_steps + reversion_steps]
 
-    base_output_dir = (Path(args.output_dir) if args.output_dir
-                       else run_dir / "next_token_regime_probes")
+    base_output_dir = (
+        Path(args.output_dir) if args.output_dir else run_dir / "next_token_regime_probes"
+    )
     base_output_dir.mkdir(parents=True, exist_ok=True)
 
     f3_pos = get_final_output_positions(seq_len, depth)
@@ -677,7 +734,7 @@ def main():
     ckpt_root = logs_dir / "checkpoints"
     use_checkpoints = ckpt_root.exists()
 
-    schedules_to_run = sorted(set(j["schedule"] for j in jobs_cfg))
+    schedules_to_run = sorted({j["schedule"] for j in jobs_cfg})
     n_workers = min(len(jobs_cfg), args.n_workers or gpu_cfg.probe_workers)
     print(f"\n{gpu_cfg.summary()}")
     print(f"Schedules: {schedules_to_run}")
@@ -692,10 +749,15 @@ def main():
     for jcfg in jobs_cfg:
         label, seed, schedule = jcfg["label"], jcfg["seed"], jcfg["schedule"]
         job_entry = {
-            "label": label, "schedule": schedule, "seed": seed,
-            "cfg": {**bcfg, "seed": seed,
-                    "vocab_size": cfg_out["vocab_size"],
-                    "context_size": cfg_out["context_size"]},
+            "label": label,
+            "schedule": schedule,
+            "seed": seed,
+            "cfg": {
+                **bcfg,
+                "seed": seed,
+                "vocab_size": cfg_out["vocab_size"],
+                "context_size": cfg_out["context_size"],
+            },
         }
         if use_checkpoints:
             job_entry["ckpt_dir"] = str(ckpt_root / label)
@@ -704,14 +766,20 @@ def main():
     step_args = [str(s) for s in probe_steps]
 
     def build_cmd(script, job_path, data_path, output_path):
-        return ([sys.executable, script, "--worker",
-                 "--job-path", job_path, "--data-path", data_path,
-                 "--output-path", output_path,
-                 "--probe-steps"] + step_args +
-                ["--n-layers", str(n_layers),
-                 "--seq-len", str(seq_len),
-                 "--max-samples", str(args.probe_max_samples),
-                 "--depth", str(depth)])
+        return (
+            [
+                sys.executable, script,
+                "--worker",
+                "--job-path", job_path,
+                "--data-path", data_path,
+                "--output-path", output_path,
+                "--probe-steps", *step_args,
+                "--n-layers", str(n_layers),
+                "--seq-len", str(seq_len),
+                "--max-samples", str(args.probe_max_samples),
+                "--depth", str(depth),
+            ]
+        )
 
     all_step_results: dict[int, dict] = {step: {} for step in probe_steps}
 
@@ -750,8 +818,8 @@ def main():
 
         save_data = {
             "all_results": all_results,
-            "diffs": {m: {s: arr for s, arr in diffs[m].items()} for m in PROBE_METHODS},
-            "diff_in_diffs": {m: {p: arr for p, arr in did[m].items()} for m in PROBE_METHODS},
+            "diffs": {m: dict(diffs[m].items()) for m in PROBE_METHODS},
+            "diff_in_diffs": {m: dict(did[m].items()) for m in PROBE_METHODS},
             "probe_step": probe_step,
             "methods": PROBE_METHODS,
             "n_layers": n_layers,
@@ -773,15 +841,20 @@ def main():
         all_step_diffs_per_seed[probe_step] = diffs_ps
 
     if len(probe_steps) > 1:
-        print(f"\nPlotting combined charts across all steps...", flush=True)
+        print("\nPlotting combined charts across all steps...", flush=True)
         combined_dir = base_output_dir / "combined"
         combined_dir.mkdir(parents=True, exist_ok=True)
 
         for method in PROBE_METHODS:
             print(f"  {method}...")
             plot_combined_curves(all_step_results, method, n_layers, combined_dir)
-            plot_combined_diffs(all_step_diffs, method, n_layers, combined_dir,
-                                step_diffs_per_seed=all_step_diffs_per_seed)
+            plot_combined_diffs(
+                all_step_diffs,
+                method,
+                n_layers,
+                combined_dir,
+                step_diffs_per_seed=all_step_diffs_per_seed,
+            )
 
     print(f"\nAll done. Results in {base_output_dir}")
 

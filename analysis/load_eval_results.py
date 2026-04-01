@@ -1,8 +1,9 @@
 # %%
 import pickle
-import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -11,7 +12,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # In-order evaluation results
 # ============================================================
 inorder_path = PROJECT_ROOT / "data/inorder_eval_step_random50/accs.pkl"
-with open(inorder_path, 'rb') as f:
+with open(inorder_path, "rb") as f:
     accs_inorder = pickle.load(f)
 
 iterations = [entry[0][0] for entry in accs_inorder]
@@ -46,7 +47,7 @@ metrics = [
 ]
 
 for ax, (title, mean, std, color) in zip(axes, metrics):
-    ax.plot(iterations, mean, color=color, marker='o', markersize=4)
+    ax.plot(iterations, mean, color=color, marker="o", markersize=4)
     ax.fill_between(iterations, mean - std, mean + std, alpha=0.2, color=color)
     ax.set_title(title)
     ax.set_xlabel("Training Iteration")
@@ -60,12 +61,21 @@ plt.show()
 
 # %%
 fig, ax = plt.subplots(figsize=(8, 5))
-ax.plot(iterations, token_acc_mean, marker='o', markersize=4, label="Token Acc (Autoregressive)")
-ax.plot(iterations, strict_acc_mean, marker='s', markersize=4, label="Strict Acc (Autoregressive)")
-ax.plot(iterations, teacher_acc_mean, marker='^', markersize=4, label="Token Acc (Teacher-Forced)")
-ax.fill_between(iterations, token_acc_mean - token_acc_std, token_acc_mean + token_acc_std, alpha=0.15)
-ax.fill_between(iterations, strict_acc_mean - strict_acc_std, strict_acc_mean + strict_acc_std, alpha=0.15)
-ax.fill_between(iterations, teacher_acc_mean - teacher_acc_std, teacher_acc_mean + teacher_acc_std, alpha=0.15)
+ax.plot(iterations, token_acc_mean, marker="o", markersize=4, label="Token Acc (Autoregressive)")
+ax.plot(iterations, strict_acc_mean, marker="s", markersize=4, label="Strict Acc (Autoregressive)")
+ax.plot(iterations, teacher_acc_mean, marker="^", markersize=4, label="Token Acc (Teacher-Forced)")
+ax.fill_between(
+    iterations, token_acc_mean - token_acc_std, token_acc_mean + token_acc_std, alpha=0.15
+)
+ax.fill_between(
+    iterations, strict_acc_mean - strict_acc_std, strict_acc_mean + strict_acc_std, alpha=0.15
+)
+ax.fill_between(
+    iterations,
+    teacher_acc_mean - teacher_acc_std,
+    teacher_acc_mean + teacher_acc_std,
+    alpha=0.15,
+)
 ax.set_xlabel("Training Iteration")
 ax.set_ylabel("Accuracy")
 ax.set_ylim(-0.05, 1.05)
@@ -80,15 +90,15 @@ plt.show()
 # Out-of-order evaluation results
 # ============================================================
 outorder_path = PROJECT_ROOT / "data/outorder_eval_step_random50/accs.pkl"
-with open(outorder_path, 'rb') as f:
+with open(outorder_path, "rb") as f:
     accs_outorder = pickle.load(f)
 
 # Keys are (num_identities, displacement)
 # Values are dicts mapping task_id -> (step_accs_array, final_accs_array)
 all_keys = sorted(accs_outorder.keys())
 
-num_ids = sorted(set(k[0] for k in all_keys))
-displacements = sorted(set(k[1] for k in all_keys))
+num_ids = sorted({k[0] for k in all_keys})
+displacements = sorted({k[1] for k in all_keys})
 
 step_acc_grid = np.full((len(num_ids), len(displacements)), np.nan)
 final_acc_grid = np.full((len(num_ids), len(displacements)), np.nan)
@@ -106,10 +116,12 @@ for (ni, disp), task_dict in accs_outorder.items():
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-for ax, grid, title in zip(axes,
-                           [step_acc_grid, final_acc_grid],
-                           ["Step-by-Step Accuracy", "Final Output Accuracy"]):
-    im = ax.imshow(grid, cmap="RdYlGn", vmin=0, vmax=1, aspect='auto')
+for ax, grid, title in zip(
+    axes,
+    [step_acc_grid, final_acc_grid],
+    ["Step-by-Step Accuracy", "Final Output Accuracy"],
+):
+    im = ax.imshow(grid, cmap="RdYlGn", vmin=0, vmax=1, aspect="auto")
     ax.set_xticks(range(len(displacements)))
     ax.set_xticklabels(displacements)
     ax.set_yticks(range(len(num_ids)))
@@ -121,12 +133,20 @@ for ax, grid, title in zip(axes,
         for jj in range(len(displacements)):
             val = grid[ii, jj]
             if not np.isnan(val):
-                ax.text(jj, ii, f"{val:.2f}", ha='center', va='center',
-                        fontsize=8, color='black' if val > 0.4 else 'white')
+                ax.text(
+                    jj,
+                    ii,
+                    f"{val:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="black" if val > 0.4 else "white",
+                )
     plt.colorbar(im, ax=ax, shrink=0.8)
 
-fig.suptitle("Out-of-Order Evaluation: Accuracy by (Num Identities, Displacement)",
-             fontsize=13, y=1.02)
+fig.suptitle(
+    "Out-of-Order Evaluation: Accuracy by (Num Identities, Displacement)", fontsize=13, y=1.02
+)
 fig.tight_layout()
 plt.show()
 
@@ -140,7 +160,7 @@ for ni in num_ids:
             step_accs = np.array([np.mean(v[0]) for v in task_dict.values()])
             disps.append(disp)
             means.append(step_accs.mean())
-    ax.plot(disps, means, marker='o', markersize=5, label=f"Identities={ni}")
+    ax.plot(disps, means, marker="o", markersize=5, label=f"Identities={ni}")
 
 ax.set_xlabel("Displacement")
 ax.set_ylabel("Mean Step Accuracy")

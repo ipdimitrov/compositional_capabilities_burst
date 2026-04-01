@@ -7,20 +7,21 @@ must learn during finetuning.
 The returned data dict is self-contained and can be pickled/passed between
 phases.
 """
+
 import itertools
+
 import numpy as np
 
-
 # ── defaults ─────────────────────────────────────────────────────────────
-N_ALPH = 10       # alphabet size
-SEQ_LEN = 6       # input sequence length per document
-N_A = 4           # background functions per position
-DEPTH = 3         # composition depth
-BURST_POS = 3     # which position (1-indexed) gets b*
+N_ALPH = 10  # alphabet size
+SEQ_LEN = 6  # input sequence length per document
+N_A = 4  # background functions per position
+DEPTH = 3  # composition depth
+BURST_POS = 3  # which position (1-indexed) gets b*
 DATA_SEED = 999
-N_BURST = 4       # number of novel functions at burst position
-N_DOCS = 100      # docs per task for training pools
-N_EVAL = 100      # docs per task for eval pools
+N_BURST = 4  # number of novel functions at burst position
+N_DOCS = 100  # docs per task for training pools
+N_EVAL = 100  # docs per task for eval pools
 
 
 def _build_vocab(n_alph, n_bijections):
@@ -46,39 +47,37 @@ def _build_vocab(n_alph, n_bijections):
 def _make_doc(task, bijections, seq_len, token_idx, fn_tok):
     """Generate one document for a task = (class_label, f_D, ..., f_1)."""
     fns = task[1:]
-    inp = np.random.choice(len([k for k in token_idx if k.startswith("X")]),
-                           size=seq_len, replace=True)
+    inp = np.random.choice(
+        len([k for k in token_idx if k.startswith("X")]), size=seq_len, replace=True
+    )
     sp = np.array([token_idx[" "]])
     cur = inp.copy()
     outs = []
     for fn_idx in reversed(fns):
         cur = bijections[fn_idx][cur]
         outs.append(cur.copy())
-    doc = [np.array([token_idx["S"]]),
-           np.array([fn_tok[f] for f in fns]),
-           sp, inp]
+    doc = [np.array([token_idx["S"]]), np.array([fn_tok[f] for f in fns]), sp, inp]
     for o in outs:
         doc.extend([sp, o])
     return np.concatenate(doc)
 
 
 def _gen_pool(tasks, n, bijections, seq_len, token_idx, fn_tok):
-    return {t: np.array([_make_doc(t, bijections, seq_len, token_idx, fn_tok)
-                         for _ in range(n)])
-            for t in tasks}
+    return {
+        t: np.array([_make_doc(t, bijections, seq_len, token_idx, fn_tok) for _ in range(n)])
+        for t in tasks
+    }
 
 
 def _pad_pools(*pools):
     """Pad all pools to the same document length."""
-    max_len = max(docs.shape[1]
-                  for pool in pools for docs in pool.values())
+    max_len = max(docs.shape[1] for pool in pools for docs in pool.values())
     out = []
     for pool in pools:
         new = {}
         for key, docs in pool.items():
             if docs.shape[1] < max_len:
-                pad = np.zeros((docs.shape[0], max_len - docs.shape[1]),
-                               dtype=docs.dtype)
+                pad = np.zeros((docs.shape[0], max_len - docs.shape[1]), dtype=docs.dtype)
                 docs = np.concatenate([docs, pad], axis=1)
             new[key] = docs
         out.append(new)
@@ -117,20 +116,17 @@ def make_data(
 
     # -- bijections --
     bijections = [np.arange(n_alph)]  # identity
-    for _ in range(n_a * depth + n_burst):
-        bijections.append(rng.permutation(n_alph))
+    bijections.extend(rng.permutation(n_alph) for _ in range(n_a * depth + n_burst))
     burst_fns = list(range(n_a * depth + 1, n_a * depth + n_burst + 1))
 
-    pos_fns = {p: list(range((p - 1) * n_a + 1, p * n_a + 1))
-               for p in range(1, depth + 1)}
+    pos_fns = {p: list(range((p - 1) * n_a + 1, p * n_a + 1)) for p in range(1, depth + 1)}
 
     _, token_idx, fn_tok, vocab_size = _build_vocab(n_alph, len(bijections))
 
     # -- task definitions --
-    other_combos = list(itertools.product(
-        *[pos_fns[p] for p in range(1, depth + 1)]))
+    other_combos = list(itertools.product(*[pos_fns[p] for p in range(1, depth + 1)]))
     rng.shuffle(other_combos)
-    other_tasks = [("other",) + combo for combo in other_combos]
+    other_tasks = [("other", *combo) for combo in other_combos]
 
     non_bp = [p for p in range(1, depth + 1) if p != burst_pos]
     remaining = list(itertools.product(*[pos_fns[p] for p in non_bp]))
@@ -139,21 +135,20 @@ def make_data(
         for bf in burst_fns:
             fns = list(combo)
             fns.insert(burst_pos - 1, bf)
-            burst_tasks.append(("burst",) + tuple(fns))
+            burst_tasks.append(("burst", *tuple(fns)))
 
     # -- pools --
     np.random.seed(seed)
-    bg_pool = _gen_pool(other_tasks, n_docs, bijections, seq_len,
-                        token_idx, fn_tok)
-    target_pool = _gen_pool(burst_tasks, n_docs, bijections, seq_len,
-                            token_idx, fn_tok)
-    eval_other_pool = _gen_pool(other_tasks[:min(8, len(other_tasks))],
-                                n_eval, bijections, seq_len, token_idx, fn_tok)
-    eval_burst_pool = _gen_pool(burst_tasks, n_eval, bijections, seq_len,
-                                token_idx, fn_tok)
+    bg_pool = _gen_pool(other_tasks, n_docs, bijections, seq_len, token_idx, fn_tok)
+    target_pool = _gen_pool(burst_tasks, n_docs, bijections, seq_len, token_idx, fn_tok)
+    eval_other_pool = _gen_pool(
+        other_tasks[: min(8, len(other_tasks))], n_eval, bijections, seq_len, token_idx, fn_tok
+    )
+    eval_burst_pool = _gen_pool(burst_tasks, n_eval, bijections, seq_len, token_idx, fn_tok)
 
     bg_pool, target_pool, eval_other_pool, eval_burst_pool = _pad_pools(
-        bg_pool, target_pool, eval_other_pool, eval_burst_pool)
+        bg_pool, target_pool, eval_other_pool, eval_burst_pool
+    )
 
     eval_other = _cat(eval_other_pool)
     eval_burst = _cat(eval_burst_pool)
@@ -171,8 +166,11 @@ def make_data(
         "vocab_size": vocab_size + 10,
         "context_size": ref.shape[1] + 5,
         "task_info": {
-            "n_alph": n_alph, "seq_len": seq_len, "n_a": n_a,
-            "depth": depth, "burst_pos": burst_pos,
+            "n_alph": n_alph,
+            "seq_len": seq_len,
+            "n_a": n_a,
+            "depth": depth,
+            "burst_pos": burst_pos,
             "n_other_tasks": len(other_tasks),
             "n_burst_tasks": len(burst_tasks),
             "doc_len": int(ref.shape[1]),

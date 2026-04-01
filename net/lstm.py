@@ -1,10 +1,5 @@
-import math
-import inspect
-from dataclasses import dataclass
-
 import torch
-import torch.nn as nn
-from torch.nn import functional as F
+from torch import nn
 
 
 class AutoLstm(nn.Module):
@@ -13,21 +8,19 @@ class AutoLstm(nn.Module):
         self.config = config
 
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        self.lstm = nn.LSTM(config.n_embd, config.n_embd,
-                            num_layers=config.n_layer,
-                            batch_first=True, 
-                            bias=True)
+        self.lstm = nn.LSTM(
+            config.n_embd, config.n_embd, num_layers=config.n_layer, batch_first=True, bias=True
+        )
         self.fc = nn.Linear(config.n_embd, config.vocab_size)
         self.hidden = None
-        self.use_hidden=False
+        self.use_hidden = False
 
         # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections
 
     def get_num_params(self):
-        n_params = sum(p.numel() for p in self.parameters())
-        return n_params
+        return sum(p.numel() for p in self.parameters())
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -39,7 +32,7 @@ class AutoLstm(nn.Module):
 
         if isinstance(module, nn.LSTM):
             for name, param in module.named_parameters():
-                if 'weight' in name:
+                if "weight" in name:
                     nn.init.orthogonal_(param.data, gain=1.0)
 
     def forward(self, inp):
@@ -51,6 +44,5 @@ class AutoLstm(nn.Module):
         else:
             lstm_out, (hidden, cell) = self.lstm(x_embd, None)
 
-        logits = self.fc(lstm_out)
+        return self.fc(lstm_out)
 
-        return logits 

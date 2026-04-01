@@ -1,76 +1,136 @@
-# Compositional Capabilities of Autoregressive Transformers: A Study on Synthetic, Interpretable Tasks
+# Burst Pipeline (Canonical CLI)
 
-Code for our ICML 24 paper:  [Compositional Capabilities of Autoregressive Transformers: A Study on Synthetic, Interpretable Tasks](https://arxiv.org/abs/2311.12997)
+This repo contains the synthetic compositional task code and the burst-training analysis pipeline.
 
-**Summary.** We create a synthetic setup to evaluate the ability of autoregressive Transformers to learn function compositions. We find that: (1) Autoregressive Transformers learn function compositions using very compositions in the training data (unlike LSTMs); (2) generating intermediate outputs when composing functions is more effective for generalizing to new, unseen compositions; (3) the attention layers select which function to apply while the feed-forward layers execute the selected capability. 
+The canonical entrypoint is:
+
+```bash
+uv run python -m burst.core <mode> ...
+```
+
+## Why this CLI exists
+
+- One command surface for train + metrics + chart pipeline.
+- Explicit run modes with no hidden behavior.
+- Reproducibility contract on every run:
+  - deterministic toggle
+  - explicit seed
+  - machine-readable run manifest at `results/repro_manifest.json`
 
 ## Setup
-
-### Option A: uv (recommended)
-
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) then run:
 
 ```bash
 uv sync
 ```
 
-This creates a `.venv` with all pinned dependencies (including CUDA 11.8 PyTorch). Run scripts with:
+Then run everything with `uv run python ...`.
+
+## Ruff (linting)
+
+Run lint checks:
 
 ```bash
-uv run python 01_generate_data.py
+uv run ruff check .
 ```
 
-Or activate the venv directly:
+Auto-fix safe issues:
 
 ```bash
-source .venv/bin/activate
-python 01_generate_data.py
+uv run ruff check . --fix
 ```
 
-For notebooks in VS Code / Cursor, select the interpreter at `.venv/bin/python` or the **Python (composition-uv)** kernel.
-
-### Option B: micromamba
-
-Install [micromamba](https://mamba.readthedocs.io/en/latest/installation.html) then run:
+Format:
 
 ```bash
-micromamba create -y -f env.yml
-micromamba activate composition
+uv run ruff format .
 ```
 
-# Usage
-
-**Step 1**: Generate training data using `01_generate_data.py`. The config file `config/gen/conf.yaml` can be modified to generate prompts in the direct or step-by-step formats. The config file also controls other choices like the number of in-order or out-of-order compositions. 
-
-**Step 2**: Train model using `02_train.py`. Modify `config/train/conf.yaml` to use the data generated in step 1.
-
-**Step 3**: Evaluate data on in-order (`03_evaluate_i.py`) or out-of-order (`03_evaluate_o.py`) compositions. Note that during evaluation, the model must autoregressively generate the outputs. Modify 
-
+Current `pyproject.toml` enables only `E` and `F` rules, so magic-number rules are not active by default.
+If you want to explicitly scan for magic values:
 
 ```bash
-python 01_generate_data.py
-python 02_train.py
-python 03_evaluate_i.py
+uv run ruff check . --select PLR2004
 ```
 
-The default config runs all 3 steps in less than 10 minutes.
+## Canonical Modes
 
-## Directory structure
+### 1) Train
 
+```bash
+uv run python -m burst.core train \
+  --depth 3 \
+  --burst-pos 3 \
+  --burst-mode current \
+  --n-seeds 10 \
+  --seed 1337 \
+  --deterministic
 ```
-├── 01_generate_data.py. # Generate train data
-├── 02_train.py                   # Train networks
-├── 03_evaluate_i.py         # Evaluating in-order functions
-├── 03_evaluate_o.py.       # Evaluating out-of-order functions
-├── env.yml                          # Environment files 
-├── config/                           # Config files
-├── net/                                 # Training scripts and architectures
-│   ├── lstm.py
-│   ├── nanogpt.py               
-│   └── runner.py                   # Training scripts for Transformer
-├── run.sh
-└── synthetic
-    ├── functions.py.    # Create functions and compositions
-    ├── generator.py.    # Generate prompts for training and eval
-    └── init.py                # Load config and set random seed
+
+This creates a new run directory in `data/` with `logs/` and `results/`.
+
+### 2) Gradient Metrics
+
+```bash
+uv run python -m burst.core gradients data/<run_dir> \
+  --grad-sim-batch-size 2048 \
+  --n-workers 8 \
+  --seed 1337 \
+  --deterministic
 ```
+
+### 3) Build Bundle (Stage 1)
+
+```bash
+uv run python -m burst.core bundle data/<run_dir> --seed 1337 --deterministic
+```
+
+### 4) Render Charts (Stage 2)
+
+```bash
+uv run python -m burst.core charts data/<run_dir> --seed 1337 --deterministic
+```
+
+### 5) Full Core Analysis Pipeline
+
+```bash
+uv run python -m burst.core pipeline data/<run_dir> --seed 1337 --deterministic
+```
+
+`pipeline` = `bundle` + `charts`.
+
+## Reproducibility Contract
+
+Every canonical mode records:
+
+- mode
+- seed
+- deterministic setting
+- runtime metadata (python/torch/cuda/gpu/git sha)
+- CLI args
+
+Output path:
+
+- `data/<run_dir>/results/repro_manifest.json`
+
+You can disable strict deterministic execution when needed:
+
+```bash
+uv run python -m burst.core pipeline data/<run_dir> --seed 1337 --no-deterministic
+```
+
+## Code Layout
+
+- `burst/core/`: production pipeline code
+  - `train/`: training orchestration + workers
+  - `metrics/`: gradient metric computation
+  - `bundle.py`: stage-1 chart data artifacts
+  - `charts/`: stage-2 chart rendering
+  - `cli.py`: canonical discriminated CLI
+  - `repro.py`: deterministic + manifest contract
+- `burst/dev/`: heavy/experimental analyses and appendix tooling
+- `simple/`: separate compact experimentation codepath
+
+## Notes
+
+- Prefer canonical CLI modes over direct file execution.
+- If a script is in `burst/dev/`, treat it as optional and non-core.
