@@ -18,6 +18,7 @@ N_A = 4           # background functions per position
 DEPTH = 3         # composition depth
 BURST_POS = 3     # which position (1-indexed) gets b*
 DATA_SEED = 999
+N_BURST = 4       # number of novel functions at burst position
 N_DOCS = 100      # docs per task for training pools
 N_EVAL = 100      # docs per task for eval pools
 
@@ -95,6 +96,7 @@ def make_data(
     n_alph: int = N_ALPH,
     seq_len: int = SEQ_LEN,
     n_a: int = N_A,
+    n_burst: int = N_BURST,
     depth: int = DEPTH,
     burst_pos: int = BURST_POS,
     seed: int = DATA_SEED,
@@ -115,9 +117,9 @@ def make_data(
 
     # -- bijections --
     bijections = [np.arange(n_alph)]  # identity
-    for _ in range(n_a * depth + 1):
+    for _ in range(n_a * depth + n_burst):
         bijections.append(rng.permutation(n_alph))
-    b_star = n_a * depth + 1
+    burst_fns = list(range(n_a * depth + 1, n_a * depth + n_burst + 1))
 
     pos_fns = {p: list(range((p - 1) * n_a + 1, p * n_a + 1))
                for p in range(1, depth + 1)}
@@ -134,9 +136,10 @@ def make_data(
     remaining = list(itertools.product(*[pos_fns[p] for p in non_bp]))
     burst_tasks = []
     for combo in remaining:
-        fns = list(combo)
-        fns.insert(burst_pos - 1, b_star)
-        burst_tasks.append(("burst",) + tuple(fns))
+        for bf in burst_fns:
+            fns = list(combo)
+            fns.insert(burst_pos - 1, bf)
+            burst_tasks.append(("burst",) + tuple(fns))
 
     # -- pools --
     np.random.seed(seed)

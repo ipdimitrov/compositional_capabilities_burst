@@ -97,7 +97,7 @@ def forget(
     log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
            "loss_other": [], "loss_burst": [], "lr": [],
            "weight_drift_from_ft": [], "weight_drift_from_pt": [],
-           "grad_norm": [], "grad_cosine_burst_bg": [],
+           "grad_norm": [], "grad_norm_burst": [], "grad_cosine_burst_bg": [],
            "grad_cosine_per_layer": [],
            "grad_norm_entropy": []}
 
@@ -147,6 +147,7 @@ def forget(
             idx = np.random.randint(len(eval_burst), size=min(batch_size, len(eval_burst)))
             burst_batch = eval_burst[idx]
             g_burst = _get_grad_vector(net, burst_batch)
+            log["grad_norm_burst"].append(g_burst.norm().item())
             import torch.nn.functional as _F
             gc = _F.cosine_similarity(
                 g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
