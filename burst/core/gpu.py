@@ -14,11 +14,14 @@ Usage from shell (post_process.sh etc.):
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from dataclasses import dataclass
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 CUDA_CONTEXT_MB = 650
 MODEL_PLUS_ACTS_MB = 200
@@ -72,21 +75,26 @@ def _detect_gpu() -> tuple[int, int]:
 
 @dataclass(frozen=True)
 class GpuConfig:
+    """Single source of truth for GPU capabilities and worker counts."""
+
     vram_gb: int
     tflops_bf16: int
     gpu_name: str
 
     @property
     def ratio(self) -> float:
+        """Return TFLOPS-per-GB ratio."""
         if self.vram_gb == 0:
             return 0.0
         return self.tflops_bf16 / self.vram_gb
 
     @property
     def usable_vram_mb(self) -> int:
+        """Return usable VRAM in MB after reserving 10% headroom."""
         return int(self.vram_gb * 1024 * 0.90)
 
     def _cap_by_vram(self, per_proc_mb: int) -> int:
+        """Return max worker count that fits in usable VRAM."""
         return max(1, int(self.usable_vram_mb * 0.85 / per_proc_mb))
 
     @property
@@ -160,6 +168,7 @@ class GpuConfig:
         return min(by_vram, by_compute)
 
     def summary(self) -> str:
+        """Return a human-readable GPU config summary."""
         return (
             f"GPU: {self.gpu_name}\n"
             f"  VRAM: {self.vram_gb} GB, BF16 TFLOPS: {self.tflops_bf16}, "
@@ -171,6 +180,7 @@ class GpuConfig:
         )
 
     def shell_exports(self) -> str:
+        """Return shell export statements for worker counts and GPU info."""
         return (
             f"export N_WORKERS={self.train_workers}\n"
             f"export PROBE_WORKERS={self.probe_workers}\n"
@@ -182,6 +192,7 @@ class GpuConfig:
 
 
 def make_gpu_config() -> GpuConfig:
+    """Detect GPU and return a frozen GpuConfig."""
     vram, tflops = _detect_gpu()
     name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
     return GpuConfig(vram_gb=vram, tflops_bf16=tflops, gpu_name=name)
@@ -193,7 +204,8 @@ gpu_cfg = make_gpu_config()
 if __name__ == "__main__":
     import sys
 
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if "--shell" in sys.argv:
-        print(gpu_cfg.shell_exports())
+        logger.info(gpu_cfg.shell_exports())
     else:
-        print(gpu_cfg.summary())
+        logger.info(gpu_cfg.summary())

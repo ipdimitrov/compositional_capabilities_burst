@@ -4,13 +4,14 @@ Trains a model from scratch until loss plateaus (convergence),
 then saves a checkpoint that finetune() can load.
 """
 
+import logging
 from pathlib import Path
 
 import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from simple.model import (
+from burst.notebook.model import (
     MODEL_DEFAULTS,
     eval_accuracy,
     eval_loss,
@@ -20,8 +21,10 @@ from simple.model import (
     train_step,
 )
 
+logger = logging.getLogger(__name__)
 
-def pretrain(
+
+def pretrain(  # noqa: PLR0913, PLR0915
     data: dict,
     out_dir: str | Path,
     *,
@@ -41,21 +44,7 @@ def pretrain(
     seed: int = 42,
     quiet: bool = False,
 ) -> dict:
-    """Pretrain on background data until convergence and save checkpoint.
-
-    Training runs until eval loss plateaus for `patience` consecutive eval
-    checks, or until `max_steps` is reached (safety cap).
-
-    Args:
-        data: dict from make_data()
-        out_dir: directory to save pretrain_ckpt.pt and pretrain_log.npz
-        patience: stop when eval loss doesn't improve for this many
-                  consecutive eval checks
-        max_steps: safety cap to prevent infinite loops
-
-    Returns:
-        dict with keys: log (dict of lists), ckpt_path (str), model_cfg (dict)
-    """
+    """Pretrain on background data until convergence and save checkpoint."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -98,7 +87,6 @@ def pretrain(
     pbar = tqdm(desc="Pretrain", disable=quiet)
     s = 0
     while s < max_steps:
-        # sample background batch
         per = batch_size // len(bg_ids)
         rem = batch_size % len(bg_ids)
         parts = []
@@ -109,7 +97,6 @@ def pretrain(
                 parts.append(bg_pool[tid][idx])
         batch = np.concatenate(parts)[np.random.permutation(batch_size)]
 
-        # constant lr after warmup
         cur_lr = lr * min(1.0, (s + 1) / warmup) if warmup > 0 else lr
         loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)
 
@@ -136,7 +123,9 @@ def pretrain(
                 wait += 1
             if wait >= patience:
                 if not quiet:
-                    print(f"\nConverged at step {s} (eval loss plateaued for {patience} checks)")
+                    logger.info(
+                        "Converged at step %d (eval loss plateaued for %d checks)", s, patience,
+                    )
                 break
 
         s += 1
@@ -145,15 +134,14 @@ def pretrain(
 
     if not quiet:
         peak = max(log["acc_other"]) if log["acc_other"] else 0
-        print(
-            f"Pretrain done: peak acc_other={peak:.4f}, "
-            f"final loss_other={log['loss_other'][-1]:.4f}"
+        logger.info(
+            "Pretrain done: peak acc_other=%.4f, final loss_other=%.4f",
+            peak, log["loss_other"][-1],
         )
 
     ckpt_path = out_dir / "pretrain_ckpt.pt"
     save_model(net, ckpt_path)
 
-    # save log as npz for easy loading
     np.savez(out_dir / "pretrain_log.npz", **{k: np.array(v) for k, v in log.items()})
 
     return {

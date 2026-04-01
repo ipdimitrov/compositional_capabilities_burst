@@ -19,14 +19,15 @@ def build_representation_summary(
     *,
     n_docs_per_class: int = 64,
 ) -> dict[str, Any]:
+    """Build per-schedule representation drift metrics from checkpoints."""
     _cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     data_path = logs_dir / "_data.pkl"
     ckpt_root = logs_dir / "checkpoints"
     if not data_path.exists() or not ckpt_root.exists():
         return {}
 
-    with open(data_path, "rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+    with data_path.open("rb") as f:
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     other_docs = _subsample_pool(bg_pool, n_docs_per_class, seed=0)
     burst_docs = _subsample_pool(target_pool, n_docs_per_class, seed=1)
@@ -69,6 +70,7 @@ def _representation_for_run(
     other_docs_BL: np.ndarray,
     burst_docs_BL: np.ndarray,
 ) -> dict[str, float] | None:
+    """Compute representation drift metrics for a single seed run."""
     ckpt_files = sorted(ckpt_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
     if not ckpt_files:
         return None
@@ -116,7 +118,8 @@ def _representation_for_run(
     }
 
 
-def _mean_layer_vectors(net, docs_BL: np.ndarray) -> list[np.ndarray]:
+def _mean_layer_vectors(net: Any, docs_BL: np.ndarray) -> list[np.ndarray]:
+    """Return mean activation vector per layer, averaged over docs and positions."""
     activations_KPTN = collect_activations_KPTN(net, docs_BL)
     return [
         reduce(activation_PTN, "p t n -> n", "mean").numpy() for activation_PTN in activations_KPTN
@@ -124,11 +127,13 @@ def _mean_layer_vectors(net, docs_BL: np.ndarray) -> list[np.ndarray]:
 
 
 def _late_layer_indices(n_layers_total: int) -> list[int]:
+    """Return indices of the last two layers (or fewer if model is small)."""
     start = max(1, n_layers_total - 2)
     return list(range(start, n_layers_total))
 
 
-def _subsample_pool(pool: dict, n_docs: int, *, seed: int) -> np.ndarray:
+def _subsample_pool(pool: dict[Any, np.ndarray], n_docs: int, *, seed: int) -> np.ndarray:
+    """Concatenate and subsample documents from a pool to at most n_docs."""
     if not pool:
         return np.zeros((0, 0), dtype=np.int64)
     docs = np.concatenate(list(pool.values()))
@@ -140,6 +145,7 @@ def _subsample_pool(pool: dict, n_docs: int, *, seed: int) -> np.ndarray:
 
 
 def _mean_ci_payload(values: np.ndarray) -> dict[str, float]:
+    """Return {mean, ci} dict with 95% confidence interval."""
     mean = float(np.mean(values))
     ci = 0.0 if values.size <= 1 else float(1.96 * np.std(values) / np.sqrt(values.size))
     return {"mean": mean, "ci": ci}

@@ -1,9 +1,13 @@
 import torch
+from omegaconf import DictConfig
 from torch import nn
 
 
 class AutoLstm(nn.Module):
-    def __init__(self, config):
+    """Autoregressive LSTM language model."""
+
+    def __init__(self, config: DictConfig) -> None:
+        """Initialize embedding, LSTM layers, and output projection."""
         super().__init__()
         self.config = config
 
@@ -12,17 +16,17 @@ class AutoLstm(nn.Module):
             config.n_embd, config.n_embd, num_layers=config.n_layer, batch_first=True, bias=True
         )
         self.fc = nn.Linear(config.n_embd, config.vocab_size)
-        self.hidden = None
+        self.hidden: tuple[torch.Tensor, torch.Tensor] | None = None
         self.use_hidden = False
 
-        # init all weights
         self.apply(self._init_weights)
-        # apply special scaled init to the residual projections
 
-    def get_num_params(self):
+    def get_num_params(self) -> int:
+        """Return total number of parameters."""
         return sum(p.numel() for p in self.parameters())
 
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize weights with normal or orthogonal distribution."""
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -35,7 +39,8 @@ class AutoLstm(nn.Module):
                 if "weight" in name:
                     nn.init.orthogonal_(param.data, gain=1.0)
 
-    def forward(self, inp):
+    def forward(self, inp: torch.Tensor) -> torch.Tensor:
+        """Compute logits for the input token indices."""
         x_embd = self.wte(inp)
 
         if self.use_hidden:

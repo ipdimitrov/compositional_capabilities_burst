@@ -6,15 +6,14 @@ post-hoc grad-sim, and writes training metrics.
 """
 
 import argparse
-import os
+import csv
 import pickle
 import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-
-import csv
 from collections import Counter
 from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import numpy as np
 import torch
@@ -38,22 +37,24 @@ from net.runner import configure_optimizers, reset_optimizer_state, update_phase
 from synthetic.init import set_seed
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+GRAD_NORM_EPS = 1e-6
 CHECKPOINT_EVERY = 10
 PAIRWISE_STEP_NAMES = {"begin", "mid_burst", "end_burst", "mid_reversion", "end_reversion"}
 
 
-def _cross_entropy_logits_BTV_targets_BT(
+def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
     logits_BTV: torch.Tensor, targets_BT: torch.Tensor
 ) -> torch.Tensor:
+    """Compute cross-entropy loss after flattening batch and time dims."""
     logits_bv = rearrange(logits_BTV, "b t v -> (b t) v")
     targets_b = rearrange(targets_BT, "b t -> (b t)")
     return F.cross_entropy(logits_bv, targets_b)
 
 
-def n_target_for_step(step, total_steps, schedule, p, batch_size):
-    """Number of special-class examples in a batch at a given burst-phase step.
+def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batch_size: int) -> int:
+    """Return the number of special-class examples in a batch at a given burst-phase step.
 
-    All schedules 25–100% use binomial sampling throughout the full burst phase.
+    All schedules 25-100% use binomial sampling throughout the full burst phase.
     burst_100 returns the full batch (frac=1.0) every step.
     """
     T = total_steps
@@ -82,10 +83,15 @@ def n_target_for_step(step, total_steps, schedule, p, batch_size):
     if schedule == "reversion_only":
         return 0
 
-    raise ValueError(f"Unknown schedule: {schedule}")
+    msg = f"Unknown schedule: {schedule}"
+    raise ValueError(msg)
 
 
-def sample_batch(target_pool, bg_pool, n_target, batch_size, t_ids=None, b_ids=None):
+def sample_batch(  # noqa: PLR0913
+    target_pool: dict, bg_pool: dict, n_target: int, batch_size: int,
+    t_ids: list | None = None, b_ids: list | None = None,
+) -> tuple[np.ndarray, list]:
+    """Sample a mixed batch from target and background pools."""
     if t_ids is None:
         t_ids = list(target_pool.keys())
     if b_ids is None:
@@ -93,7 +99,8 @@ def sample_batch(target_pool, bg_pool, n_target, batch_size, t_ids=None, b_ids=N
     parts = []
     sampled_tasks = []
 
-    def _sample_from(pool, ids, n):
+    def _sample_from(pool: dict, ids: list, n: int) -> None:
+        """Sample n documents evenly across task ids from pool."""
         if n == 0:
             return
         per = n // len(ids)
@@ -113,7 +120,8 @@ def sample_batch(target_pool, bg_pool, n_target, batch_size, t_ids=None, b_ids=N
 
 
 @torch.no_grad()
-def eval_free_gen(net, docs_BL, prompt_len: int):
+def eval_free_gen(net: Any, docs_BL: np.ndarray, prompt_len: int) -> float:
+    """Evaluate free-generation accuracy on the last 6 output positions."""
     if docs_BL.shape[0] == 0:
         return 0.0
     net.eval()
@@ -124,10 +132,10 @@ def eval_free_gen(net, docs_BL, prompt_len: int):
     total = 0
     n_new = docs_BL.shape[1] - prompt_len
     for dat, tgt in loader:
-        dat, tgt = dat.to(DEVICE, non_blocking=True), tgt.to(DEVICE, non_blocking=True)
-        full = net.generate(dat[:, :prompt_len], n_new)
+        dat_d, tgt_d = dat.to(DEVICE, non_blocking=True), tgt.to(DEVICE, non_blocking=True)
+        full = net.generate(dat_d[:, :prompt_len], n_new)
         gen = full[:, prompt_len:]
-        ref = tgt[:, prompt_len - 1 :]
+        ref = tgt_d[:, prompt_len - 1 :]
         ml = min(gen.shape[1], ref.shape[1])
         last6 = max(0, ml - 6)
         correct_t += (gen[:, last6:ml] == ref[:, last6:ml]).float().sum()
@@ -137,7 +145,8 @@ def eval_free_gen(net, docs_BL, prompt_len: int):
 
 
 @torch.no_grad()
-def eval_loss(net, docs_BL):
+def eval_loss(net: Any, docs_BL: np.ndarray) -> float:
+    """Evaluate average cross-entropy loss on a document set."""
     if docs_BL.shape[0] == 0:
         return float("nan")
     net.eval()
@@ -147,10 +156,10 @@ def eval_loss(net, docs_BL):
     total_loss = 0.0
     n_batches = 0
     for inputs_BT, targets_BT in loader:
-        inputs_BT = inputs_BT.to(DEVICE, non_blocking=True)
-        targets_BT = targets_BT.to(DEVICE, non_blocking=True)
-        logits_BTV = net(inputs_BT)
-        loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV, targets_BT)
+        inp_d = inputs_BT.to(DEVICE, non_blocking=True)
+        tgt_d = targets_BT.to(DEVICE, non_blocking=True)
+        logits_BTV = net(inp_d)
+        loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV, tgt_d)
         total_loss += loss.item()
         n_batches += 1
     net.train()
@@ -190,23 +199,24 @@ def checkpoint_steps(P: int, T: int, U: int) -> dict[int, str]:
     return steps
 
 
-def run(job, shared_data_path, run_dir, progress_dir):
+def run(job: dict, shared_data_path: str, run_dir: str, progress_dir: str) -> None:  # noqa: C901, PLR0912, PLR0915
+    """Train one model on one schedule and write results to disk."""
     label, schedule, seed, cfg = job["label"], job["schedule"], job["seed"], job["cfg"]
     deterministic = bool(job.get("deterministic", True))
-    set_reproducibility(seed, deterministic)
+    set_reproducibility(seed, deterministic=deterministic)
     pretrain_ckpt = job.get("pretrain_ckpt")
     pretrain_log_path = job.get("pretrain_log_path")
 
     progress_file = Path(progress_dir) / f"{label}.txt"
     progress_file.write_text("0")
 
-    with open(shared_data_path, "rb") as f:
-        target_pool, bg_pool, eval_docs, prompt_len, _ = pickle.load(f)
+    with Path(shared_data_path).open("rb") as f:
+        target_pool, bg_pool, eval_docs, prompt_len, _ = pickle.load(f)  # noqa: S301
 
     pretrain_log = None
     if pretrain_log_path and Path(pretrain_log_path).exists():
-        with open(pretrain_log_path, "rb") as f:
-            pretrain_log = pickle.load(f)
+        with Path(pretrain_log_path).open("rb") as f:
+            pretrain_log = pickle.load(f)  # noqa: S301
 
     set_seed(seed)
     net = nanoGPT(
@@ -265,7 +275,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_steps = checkpoint_steps(0, T, U)
 
-    def do_eval(global_step, phase, loss_val):
+    def do_eval(global_step: int, phase: str, loss_val: float) -> None:
+        """Evaluate and append metrics to the training log."""
         log["step"].append(global_step)
         log["loss"].append(loss_val)
         log["phase"].append(phase)
@@ -277,7 +288,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     max_micro_bs = 512
 
-    def do_train_step(batch_np, global_step):
+    def do_train_step(batch_np: np.ndarray, global_step: int) -> float:
+        """Run one forward/backward pass with gradient accumulation."""
         tokens_BL = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inputs_BT, targets_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
         update_phase_lr(
@@ -352,7 +364,8 @@ def run(job, shared_data_path, run_dir, progress_dir):
     stats_dir = Path(run_dir) / "task_distributions"
     stats_dir.mkdir(exist_ok=True)
 
-    def save_task_distribution_stats(phase_name, counter_data):
+    def save_task_distribution_stats(phase_name: str, counter_data: Counter) -> None:
+        """Write per-task sample counts to a CSV file."""
         csv_path = stats_dir / f"{label}_{phase_name}.csv"
 
         rows = []
@@ -377,7 +390,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
             fieldnames = ["schedule", "seed", "phase", "task_type", "composition", "count"]
             depth = len(next(iter(counter_data))[1:])
             fieldnames += [f"f{d}" for d in range(depth, 0, -1)]
-            with open(csv_path, "w", newline="") as f:
+            with csv_path.open("w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
                 writer.writeheader()
                 writer.writerows(rows)
@@ -406,7 +419,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     thresholds = TrainConfig().reversion_thresholds
     life_times: dict[str, int] = {}
-    if peak_burst > 1e-6:
+    if peak_burst > GRAD_NORM_EPS:
         remaining = dict.fromkeys(thresholds, True)
         for acc_val, us in zip(reversion_accs, reversion_steps_rel, strict=False):
             for t in list(remaining):
@@ -421,7 +434,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
             life_times[k] = U
 
     dropoff_abs = peak_burst - reversion_end_burst
-    dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > 1e-6 else 0.0
+    dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > GRAD_NORM_EPS else 0.0
 
     result = {
         "schedule": schedule,
@@ -443,7 +456,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
             vals = [log[k][i] for i, ph in enumerate(log["phase"]) if ph == phase]
             result[f"{phase}_end_{k}"] = vals[-1] if vals else 0
 
-    with open(Path(run_dir) / f"{label}.pkl", "wb") as f:
+    with (Path(run_dir) / f"{label}.pkl").open("wb") as f:
         pickle.dump(result, f)
 
 
@@ -455,6 +468,6 @@ if __name__ == "__main__":
     parser.add_argument("--progress-dir", required=True)
     args = parser.parse_args()
 
-    with open(args.job_path, "rb") as f:
-        job = pickle.load(f)
+    with Path(args.job_path).open("rb") as f:
+        job = pickle.load(f)  # noqa: S301
     run(job, args.data_path, args.run_dir, args.progress_dir)

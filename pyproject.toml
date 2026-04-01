@@ -47,55 +47,35 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "ANN",
-    "D",
-    "T201",
+    # ── formatter conflicts ──
     "COM812",
     "ISC001",
-    "S101",
-    "FBT",
+
+    # ── not applicable to research code ──
     "INP001",
-    "PLR0913",
-    "PLR0915",
-    "PLR0912",
-    "C901",
-    "ERA001",
+
+    # ── docstring style ──
+    "D203",   # conflicts with D211 (no-blank-line-before-class)
+    "D213",   # conflicts with D212 (multi-line-summary-first-line)
+    "D100",   # module docstrings — not useful for scripts
+    "D104",   # package __init__ docstrings
+    "D105",   # magic method docstrings
+
+    # ── annotation style ──
+    "ANN401", # Dynamically typed expressions (typing.Any) are disallowed
+
+    # ── Shazeer typing conventions ──
     "N806",
     "N803",
-    "N802",
-    "N801",
     "N812",
-    "PLR2004",
-    "B905",
-    "EM101",
-    "EM102",
-    "TRY003",
-    "S301",
-    "S603",
-    "S607",
-    "BLE001",
-    "RUF001",
-    "RUF002",
-    "RUF003",
-    "ARG001",
-    "PLW2901",
-    "B007",
-    "SIM108",
-    "TC003",
-    "TRY300",
-    "S110",
-    "PLC0415",
-    "PTH",
+
+    # ── ML-specific ──
     "NPY002",
-    "NPY201",
-    "RET504",
-    "EXE002",
+    "S101",
+    "G004",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S", "PLR"]
-"burst/dev/*" = ["ALL"]
-"_fix*.py" = ["ALL"]
 "notebooks/*" = ["ALL"]
 
 [tool.ruff.format]

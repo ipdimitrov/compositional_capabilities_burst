@@ -9,11 +9,12 @@ into one process saves ~(N-1)*400 MB of VRAM.
 """
 
 import argparse
-import os
+import logging
 import pickle
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 import torch
 
@@ -30,13 +31,13 @@ if __name__ == "__main__":
     parser.add_argument("--progress-dir", required=True)
     args = parser.parse_args()
 
-    with open(args.jobs_path, "rb") as f:
-        jobs = pickle.load(f)
+    with Path(args.jobs_path).open("rb") as f:
+        jobs = pickle.load(f)  # noqa: S301
 
     for job in jobs:
         try:
             run(job, args.data_path, args.run_dir, args.progress_dir)
-        except Exception as e:
-            print(f"WORKER FAIL {job.get('label', '?')}: {e}", file=sys.stderr, flush=True)
+        except Exception:
+            logging.getLogger(__name__).exception("WORKER FAIL %s", job.get("label", "?"))
         if DEVICE == "cuda":
             torch.cuda.empty_cache()

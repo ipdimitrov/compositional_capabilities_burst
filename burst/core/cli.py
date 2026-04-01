@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from burst.core.charts.render import render_core_charts
 from burst.core.repro import set_reproducibility, write_repro_manifest
 from burst.core.train_utils import resolve_run_paths
 
+logger = logging.getLogger(__name__)
+
 
 def run_core_analysis(
     run_dir: str | Path,
@@ -21,6 +24,7 @@ def run_core_analysis(
     render_charts: bool = True,
     out_dir: str | Path | None = None,
 ) -> tuple[Path | None, list[Path]]:
+    """Build the core bundle and render charts for a training run."""
     run_dir = Path(run_dir)
     bundle_out: Path | None = None
     chart_paths: list[Path] = []
@@ -42,6 +46,8 @@ RunMode = Literal["train", "gradients", "bundle", "charts", "pipeline"]
 
 @dataclass(frozen=True)
 class CliCommand:
+    """Parsed CLI arguments for the burst pipeline."""
+
     mode: RunMode
     run_dir: Path | None
     out_dir: Path | None
@@ -52,7 +58,8 @@ class CliCommand:
     gradients_args: list[str]
 
 
-def _parse_args() -> CliCommand:
+def _parse_args() -> CliCommand:  # noqa: C901, PLR0915
+    """Parse CLI arguments into a CliCommand."""
     parser = argparse.ArgumentParser(description="Canonical burst pipeline CLI.")
     parser.add_argument("--seed", type=int, default=DEFAULT_REPRO_SEED)
     parser.add_argument(
@@ -65,6 +72,7 @@ def _parse_args() -> CliCommand:
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
     def add_common_options(p: argparse.ArgumentParser) -> None:
+        """Add seed, deterministic, and note options to a subparser."""
         p.add_argument("--seed", type=int, default=None)
         p.add_argument(
             "--deterministic",
@@ -168,11 +176,12 @@ def _parse_args() -> CliCommand:
 
 
 def main() -> None:
+    """Run the burst pipeline CLI."""
     cmd = _parse_args()
-    set_reproducibility(cmd.seed, cmd.deterministic)
+    set_reproducibility(cmd.seed, deterministic=cmd.deterministic)
 
     if cmd.mode == "train":
-        subprocess.run(
+        subprocess.run(  # noqa: S603
             [sys.executable, "-m", "burst.core.train.experiment", *cmd.train_args],
             check=True,
         )
@@ -192,7 +201,7 @@ def main() -> None:
             },
             note=cmd.note,
         )
-        subprocess.run(
+        subprocess.run(  # noqa: S603
             [
                 sys.executable,
                 "-m",
@@ -225,17 +234,18 @@ def main() -> None:
     )
 
     if bundle_path is not None:
-        print(f"bundle: {bundle_path}", flush=True)
+        logger.info(f"bundle: {bundle_path}")
     if chart_paths:
         target_dir = (
             Path(cmd.out_dir)
             if cmd.out_dir is not None
             else (resolve_run_paths(cmd.run_dir)[2] / CORE_CHARTS_DIRNAME)
         )
-        print(f"charts: {target_dir}", flush=True)
-        print(f"count: {len(chart_paths)}", flush=True)
-    print(f"repro_manifest: {manifest_path}", flush=True)
+        logger.info(f"charts: {target_dir}")
+        logger.info(f"count: {len(chart_paths)}")
+    logger.info(f"repro_manifest: {manifest_path}")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

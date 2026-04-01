@@ -1,44 +1,44 @@
 import functools
 import itertools
+import logging
 import random
 
 import numpy as np
+from omegaconf import DictConfig
+
+logger = logging.getLogger(__name__)
 
 
 class BaseFunction:
-    """List of functions applied on data"""
+    """List of functions applied on data."""
 
     @staticmethod
-    def identity(xstr):
-        """Identify function"""
+    def identity(xstr: np.ndarray) -> np.ndarray:
+        """Return input unchanged."""
         return xstr
 
     @staticmethod
-    def map(xstr, mapping):
-        """Apply bijection to tokens"""
+    def map(xstr: np.ndarray, mapping: np.ndarray) -> np.ndarray:
+        """Apply bijection mapping to tokens."""
         return mapping[xstr]
 
     @staticmethod
-    def permute(xstr, mapping):
-        """Permute the token"""
+    def permute(xstr: np.ndarray, mapping: np.ndarray) -> np.ndarray:
+        """Permute the token order."""
         return xstr[mapping]
 
 
 class CreateFunctions:
-    """Generate a family of functions and compose them together"""
+    """Generate a family of functions and compose them together."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: DictConfig) -> None:
+        """Initialize from config."""
         self.n_alphabets = cfg.n_alphabets
         self.seq_len = cfg.seq_len
         self.function_properties = cfg.function
 
-    def generate_bijections(self):
-        """
-        Create a set of bijective mapping functions.
-
-        Args:
-            nfuncs: number of different map functions
-        """
+    def generate_bijections(self) -> list[list[np.ndarray]]:
+        """Create a set of bijective mapping functions."""
         n_functions = self.function_properties.n_functions
         depth = self.function_properties.depth
 
@@ -76,7 +76,8 @@ class CreateFunctions:
 
         return all_functions
 
-    def reduce_functions(self, fn_list):
+    def reduce_functions(self, fn_list: list[np.ndarray]) -> np.ndarray:
+        """Reduce a list of functions into a single composed mapping."""
         depth = self.function_properties.depth
         cur_fn = np.arange(self.n_alphabets)
 
@@ -84,7 +85,8 @@ class CreateFunctions:
             cur_fn = fn_list[i][cur_fn]
         return cur_fn
 
-    def compose_bijections(self):
+    def compose_bijections(self) -> tuple[list[tuple], dict]:
+        """Compose bijections across all depth-function combinations."""
         depth = self.function_properties.depth
         n_functions = self.function_properties.n_functions
         all_functions = self.generate_bijections()
@@ -114,7 +116,7 @@ class CreateFunctions:
 
         reduced_functions = np.array(function_info["composition_reduced"])
         if not self.function_properties.permute:
-            print(
+            logger.info(
                 f"Number of unique/total functions: "
                 f"{len(np.unique(reduced_functions, axis=0))}/{len(reduced_functions)}"
             )
@@ -124,15 +126,16 @@ class CreateFunctions:
 
         return composed_functions, function_info
 
-    def get_train_functions(self, composed_functions):
-
+    def get_train_functions(
+        self, composed_functions: list[tuple],
+    ) -> tuple[list[tuple], list[tuple]]:
+        """Select training functions based on split strategy."""
         depth = self.function_properties.depth
         n_functions = self.function_properties.n_functions
 
         alltask_ids = set(itertools.product(range(n_functions + 1), repeat=depth))
 
         if self.function_properties.split.strategy == "base":
-            # Base tasks
             base_ids = [tuple(np.zeros(depth, dtype=int))] + [
                 tuple(int(k == d) * i for k in range(depth))
                 for d in range(depth)
@@ -148,8 +151,8 @@ class CreateFunctions:
 
             traintask_ids = list(base_ids) + list(additional_tasks)
 
-            print(f"Number of base  tasks: {len(base_ids)}")
-            print(f"Number of train tasks: {len(traintask_ids)}")
+            logger.info(f"Number of base  tasks: {len(base_ids)}")
+            logger.info(f"Number of train tasks: {len(traintask_ids)}")
 
         elif self.function_properties.split.strategy == "random":
             traintask_ids = random.sample(
@@ -173,11 +176,10 @@ class CreateFunctions:
                 sub_taskids, self.function_properties.split.n_compositions
             )
 
-            print(f"Number of possible functions: {len(sub_taskids)}")
-            print(f"Number of train tasks: {len(traintask_ids)}")
+            logger.info(f"Number of possible functions: {len(sub_taskids)}")
+            logger.info(f"Number of train tasks: {len(traintask_ids)}")
 
         elif self.function_properties.split.strategy == "randombase_combo":
-            # base functions
             base_ids = [tuple((d0, 0) for d0 in range(depth))] + [
                 tuple((k, 0) if k != d else (d, i) for k in range(depth))
                 for d in range(depth)
@@ -192,7 +194,6 @@ class CreateFunctions:
                 all_tids, self.function_properties.split.n_compositions_inorder
             )
 
-            # out-of-order functions
             nf_choices = [
                 [(d2, i) for d2 in range(depth) if d2 != d for i in range(n_functions)]
                 for d in range(depth)
@@ -236,7 +237,7 @@ class CreateFunctions:
             )
             traintask_ids = list(base_ids) + list(additional_tasks)
 
-            print(f"Number of train tasks: {len(traintask_ids)}")
+            logger.info(f"Number of train tasks: {len(traintask_ids)}")
 
         train_fns = []
 
@@ -259,13 +260,8 @@ class CreateFunctions:
 
         return train_fns, traintask_ids
 
-    def compose(self):
-        """
-        Compose together different sets of functions. Divide them into 2 groups,
-        _train_ and  _all_. _train_ is seen during training, _all is the set of
-        all compositions of functions. Not that all compositions are not seen
-        during training.
-        """
+    def compose(self) -> tuple[dict[str, list[tuple]], dict]:
+        """Compose functions and split into train and all sets."""
         composed_functions = {"train": [], "all": []}
 
         allcomp_functions, info = self.compose_bijections()

@@ -7,13 +7,15 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
+TEXT_CONTRAST_THRESHOLD = 0.4
+
 # %%
 # ============================================================
 # In-order evaluation results
 # ============================================================
 inorder_path = PROJECT_ROOT / "data/inorder_eval_step_random50/accs.pkl"
-with open(inorder_path, "rb") as f:
-    accs_inorder = pickle.load(f)
+with inorder_path.open("rb") as f:
+    accs_inorder = pickle.load(f)  # noqa: S301
 
 iterations = [entry[0][0] for entry in accs_inorder]
 
@@ -53,7 +55,7 @@ for ax, (title, mean, std, color) in zip(axes, metrics, strict=False):
     ax.set_xlabel("Training Iteration")
     ax.set_ylabel("Accuracy")
     ax.set_ylim(-0.05, 1.05)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
 fig.suptitle("In-Order Evaluation: Accuracy over Training", fontsize=14, y=1.02)
 fig.tight_layout()
@@ -81,7 +83,7 @@ ax.set_ylabel("Accuracy")
 ax.set_ylim(-0.05, 1.05)
 ax.set_title("In-Order Evaluation: All Metrics Compared")
 ax.legend()
-ax.grid(True, alpha=0.3)
+ax.grid(visible=True, alpha=0.3)
 fig.tight_layout()
 plt.show()
 
@@ -90,8 +92,8 @@ plt.show()
 # Out-of-order evaluation results
 # ============================================================
 outorder_path = PROJECT_ROOT / "data/outorder_eval_step_random50/accs.pkl"
-with open(outorder_path, "rb") as f:
-    accs_outorder = pickle.load(f)
+with outorder_path.open("rb") as f:
+    accs_outorder = pickle.load(f)  # noqa: S301
 
 # Keys are (num_identities, displacement)
 # Values are dicts mapping task_id -> (step_accs_array, final_accs_array)
@@ -140,7 +142,7 @@ for ax, grid, title in zip(
                     ha="center",
                     va="center",
                     fontsize=8,
-                    color="black" if val > 0.4 else "white",
+                    color="black" if val > TEXT_CONTRAST_THRESHOLD else "white",
                 )
     plt.colorbar(im, ax=ax, shrink=0.8)
 
@@ -167,6 +169,6 @@ ax.set_ylabel("Mean Step Accuracy")
 ax.set_title("Out-of-Order: Step Accuracy by Displacement (per Num Identities)")
 ax.set_ylim(-0.05, 1.05)
 ax.legend()
-ax.grid(True, alpha=0.3)
+ax.grid(visible=True, alpha=0.3)
 fig.tight_layout()
 plt.show()

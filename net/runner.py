@@ -1,28 +1,35 @@
 import inspect
+import logging
 import math
-import os
 import warnings
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from omegaconf import DictConfig
+from torch.utils.data import DataLoader
 
 from synthetic.generator import get_vocab_len
 
+logger = logging.getLogger(__name__)
 
-def sanity_checks(cfg, loader):
+MATRIX_NDIM = 2
+
+
+def sanity_checks(cfg: DictConfig, loader: DataLoader[Any]) -> None:
+    """Validate config compatibility with data and hardware."""
     vocab_len = get_vocab_len(cfg.data.path)
     seq_len = loader.dataset.data.shape[1]
 
-    print("Sequence length: ", seq_len)
-    print("Vocabulary length: ", vocab_len)
+    logger.info("Sequence length: %s", seq_len)
+    logger.info("Vocabulary length: %s", vocab_len)
 
-    # Check if vocabulary size and sequence length are compatible
     assert cfg.net.vocab_size >= vocab_len
     assert cfg.net.context_size >= seq_len
     assert cfg.net.n_embd % cfg.net.n_head == 0
 
-    # Check if BF16 is supported
     if not torch.cuda.is_available():
         warnings.warn("WARNING: running on CPU", UserWarning, stacklevel=2)
     else:
@@ -30,34 +37,33 @@ def sanity_checks(cfg, loader):
             warnings.warn("WARNING: running without BF16", UserWarning, stacklevel=2)
 
         if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
-            raise NotImplementedError("Flash Attention requires PyTorch >= 2.0")
+            msg = "Flash Attention requires PyTorch >= 2.0"
+            raise NotImplementedError(msg)
 
 
-# Optimizer
-def configure_optimizers(net, optim_cfg):
-    # filter out those that do not require grad
+def configure_optimizers(net: torch.nn.Module, optim_cfg: DictConfig) -> torch.optim.Optimizer:
+    """Configure AdamW optimizer with weight decay for matrix params only."""
     param_dict = dict(net.named_parameters())
     param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
 
     # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
     # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-    decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-    nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+    decay_params = [p for n, p in param_dict.items() if p.dim() >= MATRIX_NDIM]
+    nodecay_params = [p for n, p in param_dict.items() if p.dim() < MATRIX_NDIM]
     optim_groups = [
         {"params": decay_params, "weight_decay": optim_cfg.weight_decay},
         {"params": nodecay_params, "weight_decay": 0.0},
     ]
     num_decay_params = sum(p.numel() for p in decay_params)
     num_nodecay_params = sum(p.numel() for p in nodecay_params)
-    print(
+    logger.info(
         f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
     )
-    print(
+    logger.info(
         f"num non-decayed parameter tensors: {len(nodecay_params)}, "
         f"with {num_nodecay_params:,} parameters"
     )
 
-    # Create AdamW optimizer and use the fused version if it is available
     fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
     use_fused = fused_available and torch.cuda.is_available()
     extra_args = {"fused": True} if use_fused else {}
@@ -67,17 +73,18 @@ def configure_optimizers(net, optim_cfg):
         betas=(optim_cfg.beta1, optim_cfg.beta2),
         **extra_args,
     )
-    print(f"using fused AdamW: {use_fused}")
+    logger.info(f"using fused AdamW: {use_fused}")
 
     return optimizer
 
 
 def _cosine_segment(t_frac: float, lr_start: float, lr_end: float) -> float:
+    """Interpolate between two learning rates with a cosine schedule."""
     coeff = 0.5 * (1.0 + math.cos(math.pi * t_frac))
     return lr_end + coeff * (lr_start - lr_end)
 
 
-def phase_lr(
+def phase_lr(  # noqa: PLR0913
     global_step: int,
     warmup_steps: int,
     pretrain_steps: int,
@@ -129,9 +136,9 @@ def reset_optimizer_state(optimizer: torch.optim.Optimizer) -> None:
                     state[k] = 0
 
 
-def update_phase_lr(
+def update_phase_lr(  # noqa: PLR0913
     global_step: int,
-    optimizer,
+    optimizer: torch.optim.Optimizer,
     warmup_steps: int,
     pretrain_steps: int,
     burst_steps: int,
@@ -141,6 +148,7 @@ def update_phase_lr(
     lr_burst_end_frac: float,
     lr_reversion_end_frac: float,
 ) -> float:
+    """Compute phase-based LR and apply it to all optimizer param groups."""
     lr = phase_lr(
         global_step,
         warmup_steps,
@@ -157,7 +165,13 @@ def update_phase_lr(
     return lr
 
 
-def update_cosine_warmup_lr(it, cfg, optimizer, total_steps):
+def update_cosine_warmup_lr(
+    it: int,
+    cfg: DictConfig,
+    optimizer: torch.optim.Optimizer,
+    total_steps: int,
+) -> tuple[int, float]:
+    """Update learning rate with cosine decay and linear warmup."""
     it += 1
     lr = cfg.learning_rate
 
@@ -170,15 +184,16 @@ def update_cosine_warmup_lr(it, cfg, optimizer, total_steps):
             coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
             lr = cfg.min_lr + coeff * (lr - cfg.min_lr)
 
-    # Update learning rate
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
     return it, lr
 
 
-# Move data
-def move_to_device(dat, targets, device):
+def move_to_device(
+    dat: torch.Tensor, targets: torch.Tensor, device: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Move data and targets to the specified device."""
     if device == "cuda":
         dat = dat.pin_memory().cuda(non_blocking=True)
         targets = targets.pin_memory().cuda(non_blocking=True)
@@ -186,9 +201,14 @@ def move_to_device(dat, targets, device):
     return dat, targets
 
 
-# Evaluate
 @torch.no_grad()
-def evaluate(net, evalLoaders, space_pos, device_info):
+def evaluate(
+    net: torch.nn.Module,
+    evalLoaders: list[DataLoader[Any]],
+    space_pos: int,
+    device_info: tuple[str, torch.dtype],
+) -> dict[str, float]:
+    """Compute loss and accuracy on train and full eval splits."""
     all_loss, all_acc = [], []
     device, dt = device_info
     net.eval()
@@ -199,23 +219,22 @@ def evaluate(net, evalLoaders, space_pos, device_info):
         sequences, total_loss, total_acc = 0.0, 0.0, 0.0
 
         for dat, targets in loader:
-            dat, targets = move_to_device(dat, targets, device)
-            bs = dat.size(0)
+            dat_d, targets_d = move_to_device(dat, targets, device)
+            bs = dat_d.size(0)
 
             with torch.amp.autocast(device_type=device, dtype=dt):
-                logits = net(dat)[:, space_pos:]
-                targets = targets[:, space_pos:]
+                logits_out = net(dat_d)[:, space_pos:]
+                targets_out = targets_d[:, space_pos:]
 
-                logits = logits.reshape(-1, logits.size(-1))
-                targets = targets.reshape(-1)
+                logits_flat = logits_out.reshape(-1, logits_out.size(-1))
+                targets_flat = targets_out.reshape(-1)
 
-                loss = F.cross_entropy(logits, targets)
+                loss = F.cross_entropy(logits_flat, targets_flat)
                 total_loss += loss.item() * bs
 
-                acc = logits.argmax(-1) == targets
+                acc = logits_flat.argmax(-1) == targets_flat
                 total_acc += acc.float().mean().item() * bs
 
-            # Find the last position with label == space_idx
             sequences += bs
 
         if sequences == 0:
@@ -237,7 +256,15 @@ def evaluate(net, evalLoaders, space_pos, device_info):
 
 
 @torch.no_grad()
-def evaluate_freegen(net, evalLoaders, seq_info, device_info, lstm=False):
+def evaluate_freegen(
+    net: torch.nn.Module,
+    evalLoaders: list[DataLoader[Any]],
+    seq_info: dict[str, int],
+    device_info: tuple[str, torch.dtype],
+    *,
+    lstm: bool = False,
+) -> dict[str, float]:
+    """Compute autoregressive generation accuracy on train and full eval splits."""
     all_acc = []
     net.eval()
     device, dt = device_info
@@ -251,20 +278,19 @@ def evaluate_freegen(net, evalLoaders, seq_info, device_info, lstm=False):
         sequences, _total_loss, total_acc = 0.0, 0.0, 0.0
 
         for dat, targets in loader:
-            dat, targets = move_to_device(dat, targets, device)
-            bs = dat.size(0)
+            dat_d, targets_d = move_to_device(dat, targets, device)
+            bs = dat_d.size(0)
 
             with torch.amp.autocast(device_type=device, dtype=dt):
-                dat = dat[:, : seq_info["prompt"]]
-                output = generate(net, dat, seq_info["new"], lstm)
+                prompt = dat_d[:, : seq_info["prompt"]]
+                output = generate(net, prompt, seq_info["new"], lstm=lstm)
 
                 output_l = output[:, 1 + seq_info["last_space"] :]
-                targets_l = targets[:, seq_info["last_space"] :]
+                targets_l = targets_d[:, seq_info["last_space"] :]
 
                 acc_l = output_l.reshape(-1) == targets_l.reshape(-1)
                 total_acc += acc_l.float().mean().item() * bs
 
-            # Find the last position with label == space_idx
             sequences += bs
 
         if sequences == 0:
@@ -281,7 +307,14 @@ def evaluate_freegen(net, evalLoaders, seq_info, device_info, lstm=False):
 
 
 @torch.no_grad()
-def generate(net, inp, max_new_tokens, lstm):
+def generate(
+    net: torch.nn.Module,
+    inp: torch.Tensor,
+    max_new_tokens: int,
+    *,
+    lstm: bool,
+) -> torch.Tensor:
+    """Generate tokens autoregressively by greedy decoding."""
     if lstm:
         net.hidden = None
     for _ in range(max_new_tokens):
@@ -293,29 +326,41 @@ def generate(net, inp, max_new_tokens, lstm):
     return inp
 
 
-# Logging functions
-def save_model(cfg, net, optimizer, it):
+def save_model(
+    cfg: DictConfig,
+    net: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    it: int,
+) -> None:
+    """Save model checkpoint to disk."""
     checkpoint = {
         "net": net.state_dict(),
         "optimizer": optimizer.state_dict(),
         "iter": it,
         "config": cfg,
     }
-    fdir = "ckpts/" + cfg.tag
-    os.makedirs(fdir, exist_ok=True)
-    fname = os.path.join(fdir, "ckpt_" + str(it + 1) + ".pt")
+    fdir = Path("ckpts") / cfg.tag
+    fdir.mkdir(parents=True, exist_ok=True)
+    fname = fdir / ("ckpt_" + str(it + 1) + ".pt")
     torch.save(checkpoint, fname)
 
 
-def log_train(it, lr, train_loss):
-    print(f"train -- iter: {it}, lr: {lr:.6f}, loss: {np.mean(train_loss):.4f}")
+def log_train(it: int, lr: float, train_loss: list[float]) -> list[float]:
+    """Log training iteration metrics and return an empty loss buffer."""
+    logger.info(f"train -- iter: {it}, lr: {lr:.6f}, loss: {np.mean(train_loss):.4f}")
     return []
 
 
-def log_eval(it, lr, eval_info, eval_info2=None):
-    print("----\nIteration: ", it)
-    print(f"Acc (train/all): {eval_info['train_acc']:.3f}/{eval_info['all_acc']:.3f}")
-    print(f"loss (train/all): {eval_info['train_loss']:.4f}/{eval_info['all_loss']:.4f}")
+def log_eval(
+    it: int,
+    _lr: float,
+    eval_info: dict[str, float],
+    eval_info2: dict[str, float] | None = None,
+) -> None:
+    """Log evaluation metrics for loss and accuracy."""
+    logger.info("----\nIteration: %s", it)
+    logger.info(f"Acc (train/all): {eval_info['train_acc']:.3f}/{eval_info['all_acc']:.3f}")
+    logger.info(f"loss (train/all): {eval_info['train_loss']:.4f}/{eval_info['all_loss']:.4f}")
 
     if eval_info2 is not None:
-        print(f"acc (train/all): {eval_info2['train_acc']:.4f}/{eval_info2['all_acc']:.4f}")
+        logger.info(f"acc (train/all): {eval_info2['train_acc']:.4f}/{eval_info2['all_acc']:.4f}")

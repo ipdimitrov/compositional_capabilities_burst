@@ -1,16 +1,21 @@
-"""Model utilities shared across phases: creation, saving, loading, training step, eval."""
+"""Model utilities for notebook phases: creation, saving, loading, training step, eval.
+
+Delegates to burst.core.train_utils and burst.core.train.worker where possible.
+"""
 
 import math
+from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
+from burst.core.train_utils import DEVICE, make_net, make_net_bare
 from net.nanogpt import nanoGPT
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+MATRIX_NDIM = 2
 
-# ── defaults ─────────────────────────────────────────────────────────────
 MODEL_DEFAULTS = {
     "n_layer": 6,
     "n_embd": 120,
@@ -26,10 +31,31 @@ MODEL_DEFAULTS = {
 }
 
 
-def make_model(vocab_size, context_size, *, n_layer=6, n_embd=120, n_head=4, compile_model=True):
-    """Create a fresh nanoGPT."""
-    cfg = OmegaConf.create(
-        {
+def make_model(
+    vocab_size: int, context_size: int, *,
+    n_layer: int = 6, n_embd: int = 120, n_head: int = 4, compile_model: bool = True,
+) -> torch.nn.Module:
+    cfg = {
+        "vocab_size": vocab_size,
+        "context_size": context_size,
+        "n_layer": n_layer,
+        "n_head": n_head,
+        "n_embd": n_embd,
+    }
+    return make_net(cfg) if (compile_model and DEVICE == "cuda") else make_net_bare(cfg)
+
+
+def save_model(net: torch.nn.Module, path: str | Path) -> None:
+    raw = getattr(net, "_orig_mod", net)
+    torch.save(raw.state_dict(), path)
+
+
+def load_model(
+    path: str | Path, vocab_size: int, context_size: int, *,
+    n_layer: int = 6, n_embd: int = 120, n_head: int = 4, compile_model: bool = True,
+) -> torch.nn.Module:
+    net = nanoGPT(
+        OmegaConf.create({
             "compile": False,
             "vocab_size": vocab_size,
             "context_size": context_size,
@@ -39,37 +65,7 @@ def make_model(vocab_size, context_size, *, n_layer=6, n_embd=120, n_head=4, com
             "dropout": 0.0,
             "bias": False,
             "mlp": True,
-        }
-    )
-    net = nanoGPT(cfg).to(DEVICE)
-    if compile_model and DEVICE == "cuda":
-        net = torch.compile(net)
-    return net
-
-
-def save_model(net, path):
-    raw = getattr(net, "_orig_mod", net)
-    torch.save(raw.state_dict(), path)
-
-
-def load_model(
-    path, vocab_size, context_size, *, n_layer=6, n_embd=120, n_head=4, compile_model=True
-):
-    """Load a model from a checkpoint."""
-    net = nanoGPT(
-        OmegaConf.create(
-            {
-                "compile": False,
-                "vocab_size": vocab_size,
-                "context_size": context_size,
-                "n_layer": n_layer,
-                "n_head": n_head,
-                "n_embd": n_embd,
-                "dropout": 0.0,
-                "bias": False,
-                "mlp": True,
-            }
-        )
+        })
     ).to(DEVICE)
     net.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
     if compile_model and DEVICE == "cuda":
@@ -77,17 +73,20 @@ def load_model(
     return net
 
 
-def make_optimizer(net, lr=1e-3, _weight_decay=1e-3, beta1=0.9, beta2=0.9):
-    decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() >= 2]
-    no_decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() < 2]
+def make_optimizer(
+    net: torch.nn.Module, lr: float = 1e-3, _weight_decay: float = 1e-3,
+    beta1: float = 0.9, beta2: float = 0.9,
+) -> torch.optim.Optimizer:
+    decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() >= MATRIX_NDIM]
+    no_decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() < MATRIX_NDIM]
     groups = [
-        {"params": decay, "weight_decay": 0.0},  # weight_decay},
+        {"params": decay, "weight_decay": 0.0},
         {"params": no_decay, "weight_decay": 0.0},
     ]
     return torch.optim.AdamW(groups, lr=lr, betas=(beta1, beta2), fused=(DEVICE == "cuda"))
 
 
-def reset_optimizer(optimizer):
+def reset_optimizer(optimizer: torch.optim.Optimizer) -> None:
     for group in optimizer.param_groups:
         for p in group["params"]:
             state = optimizer.state.get(p)
@@ -100,27 +99,22 @@ def reset_optimizer(optimizer):
                     state[k] = 0
 
 
-# ── LR schedule ──────────────────────────────────────────────────────────
-
-
-def cosine_lr(step, total_steps, lr_max, lr_min, warmup=0):
-    """Single-phase cosine with optional warmup."""
+def cosine_lr(step: int, total_steps: int, lr_max: float, lr_min: float, warmup: int = 0) -> float:
     if step <= warmup:
         return lr_max * step / max(warmup, 1)
     t = (step - warmup) / max(total_steps - warmup, 1)
     return lr_min + 0.5 * (lr_max - lr_min) * (1 + math.cos(math.pi * t))
 
 
-def set_lr(optimizer, lr):
+def set_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
     for pg in optimizer.param_groups:
         pg["lr"] = lr
 
 
-# ── training step ────────────────────────────────────────────────────────
-
-
-def train_step(net, optimizer, batch_np, lr=None, grad_clip=1.0):
-    """One forward+backward step. Returns loss float."""
+def train_step(
+    net: torch.nn.Module, optimizer: torch.optim.Optimizer, batch_np: np.ndarray,
+    lr: float | None = None, grad_clip: float = 1.0,
+) -> float:
     if lr is not None:
         set_lr(optimizer, lr)
     dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
@@ -136,18 +130,13 @@ def train_step(net, optimizer, batch_np, lr=None, grad_clip=1.0):
     return loss.item()
 
 
-# ── evaluation ───────────────────────────────────────────────────────────
-
-
 @torch.no_grad()
-def eval_accuracy(net, docs_BL, prompt_len):
-    """Free-generation accuracy on last 6 tokens."""
+def eval_accuracy(net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int) -> float:
     if docs_BL.shape[0] == 0:
         return 0.0
     net.eval()
     n_new = docs_BL.shape[1] - prompt_len
     dat = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    # process in chunks to avoid OOM
     correct, total = 0, 0
     bs = 256
     for i in range(0, dat.shape[0], bs):
@@ -165,7 +154,7 @@ def eval_accuracy(net, docs_BL, prompt_len):
 
 
 @torch.no_grad()
-def eval_loss(net, docs_BL):
+def eval_loss(net: torch.nn.Module, docs_BL: np.ndarray) -> float:
     if docs_BL.shape[0] == 0:
         return float("nan")
     net.eval()

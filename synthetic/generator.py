@@ -1,26 +1,28 @@
 import functools
 import itertools
 import json
-import os
 import pickle
 import random
 from itertools import combinations
+from pathlib import Path
 
 import numpy as np
 import torch
 import tqdm
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from synthetic.functions import BaseFunction
 
 
 class SyntheticData:
-    """Generates a synthetic sequence of the form
-    t, x, t(x)
-    """
+    """Generates a synthetic sequence of the form t, x, t(x)."""
 
-    def __init__(self, cfg, composed_functions, functions_info):
+    def __init__(
+        self, cfg: DictConfig, composed_functions: dict[str, list[tuple]],
+        functions_info: dict,
+    ) -> None:
+        """Initialize with config, composed functions, and function metadata."""
         self.cfg = cfg
         self.special_tokens = [" ", "<PAD>", "S"]
         self.n_special = len(self.special_tokens)
@@ -30,9 +32,10 @@ class SyntheticData:
         self.functions_info = functions_info
         self.task_map()
 
-        self.fdir = "data/" + cfg.tag
+        self.fdir = Path("data") / cfg.tag
 
-    def task_map(self):
+    def task_map(self) -> None:
+        """Build mappings between task indices and (depth, tid) pairs."""
         self.task_idx = {}
         self.task = {}
 
@@ -48,51 +51,51 @@ class SyntheticData:
                 self.task[idx] = (dep, tid)
                 self.task_idx[(dep, tid)] = idx
 
-    def init_tokens(self):
-        """
-        Initialize the set of tokens and store it into dictionary.
-        """
+    def init_tokens(self) -> None:
+        """Initialize the set of tokens and store into dictionaries."""
         self.token = {}
         self.token_idx = {}
 
-        # Alphabet tokens
         for i in range(self.n_alphabets):
             self.token[i] = "X" + str(i)
             self.token_idx["X" + str(i)] = i
 
-        # Task tokens
         for i in range(self.n_tasks):
             idx = i + self.n_alphabets
             task_str = "T" + str(self.task[idx][0]) + "_" + str(self.task[idx][1])
             self.token[idx] = task_str
             self.token_idx[task_str] = idx
 
-        # Special tokens
         for i in range(len(self.special_tokens)):
             idx = i + self.n_alphabets + self.n_tasks
             self.token[idx] = self.special_tokens[i]
             self.token_idx[self.special_tokens[i]] = idx
 
-    def sample_task(self, split="train"):
+    def sample_task(self, split: str = "train") -> tuple:
+        """Sample a random task from the given split."""
         idx = np.random.randint(0, self.nsplit_tasks[split])
         return self.functions[split][idx]
 
-    def sample_token(self):
-        # Sample tokens without replacement from [0, self.n_alphabets]
+    def sample_token(self) -> np.ndarray:
+        """Sample tokens from the alphabet."""
         alph = np.arange(self.n_alphabets)
         return np.random.choice(alph, size=self.cfg.seq_len, replace=self.cfg.with_replacement)
 
-    def decode(self, token_idx):
+    def decode(self, token_idx: np.ndarray) -> str:
+        """Decode token indices to a subscript-formatted string."""
         txt_list = [self.token[t] for t in token_idx]
         txt = "".join(txt_list)
         SUB = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
         return txt.translate(SUB)
 
-    def encode(self, token):
+    def encode(self, token: list[str]) -> list[int]:
+        """Encode token strings to indices."""
         return [self.token_idx[t] for t in token]
 
-    def stepbystep_outputs(self, inp, task_fns):
-
+    def stepbystep_outputs(
+        self, inp: np.ndarray, task_fns: list[functools.partial],
+    ) -> list[np.ndarray]:
+        """Compute intermediate outputs for each function in the chain."""
         outputs = []
         cur_inp = inp
 
@@ -102,10 +105,8 @@ class SyntheticData:
 
         return outputs
 
-    def generate_task_token_document(self, split):
-        """
-        Generate a document of the form t, x, t(x)
-        """
+    def generate_task_token_document(self, split: str) -> np.ndarray:
+        """Generate a document of the form t, x, t(x)."""
         token_idx = self.sample_token()
         space_idx = np.array([self.token_idx[" "]])
         start_idx = np.array([self.token_idx["S"]])
@@ -124,10 +125,8 @@ class SyntheticData:
         return np.concatenate([start_idx, task_idx, space_idx, token_idx, space_idx, output])
 
 
-    def generate_step_document(self, split):
-        """
-        Generate a document of the form t, x, t(x)
-        """
+    def generate_step_document(self, split: str) -> np.ndarray:
+        """Generate a step-by-step document of the form t, x, f1(x), f2(f1(x)), ..."""
         token_idx = self.sample_token()
         space_idx = np.array([self.token_idx[" "]])
         start_idx = np.array([self.token_idx["S"]])
@@ -152,12 +151,14 @@ class SyntheticData:
         return np.concatenate(document)
 
 
-    def generate_document(self, split="train"):
+    def generate_document(self, split: str = "train") -> np.ndarray:
+        """Generate a document using step-by-step or direct mode."""
         if not self.cfg.direct:
             return self.generate_step_document(split)
         return self.generate_task_token_document(split)
 
-    def generate_corpus(self):
+    def generate_corpus(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """Generate training and evaluation corpora."""
         corpus = [self.generate_document() for _ in tqdm.trange(self.cfg.ndocuments)]
         self.corpus = np.array(corpus)
 
@@ -170,94 +171,90 @@ class SyntheticData:
 
         return self.corpus, self.eval_corpus
 
-    def store_data(self):
-        """
-        Store the tokens into a file
-        """
-        # Store transition matrix, token dictionaries
-        os.makedirs(self.fdir, exist_ok=True)
+    def store_data(self) -> None:
+        """Store tokens, corpus, and config to disk."""
+        self.fdir.mkdir(parents=True, exist_ok=True)
 
-        with open(self.fdir + "/token_idx.pkl", "wb") as f:
+        with (self.fdir / "token_idx.pkl").open("wb") as f:
             pickle.dump(self.token_idx, f)
-        with open(self.fdir + "/token.pkl", "wb") as f:
+        with (self.fdir / "token.pkl").open("wb") as f:
             pickle.dump(self.token, f)
 
-        np.save(self.fdir + "/corpus.npy", self.corpus)
-        np.save(self.fdir + "/train_eval_corpus.npy", self.eval_corpus["train"])
-        np.save(self.fdir + "/all_eval_corpus.npy", self.eval_corpus["all"])
+        np.save(self.fdir / "corpus.npy", self.corpus)
+        np.save(self.fdir / "train_eval_corpus.npy", self.eval_corpus["train"])
+        np.save(self.fdir / "all_eval_corpus.npy", self.eval_corpus["all"])
 
-        with open(self.fdir + "/functions_info.pkl", "wb") as f:
+        with (self.fdir / "functions_info.pkl").open("wb") as f:
             pickle.dump(self.functions_info, f)
 
         self.cfg = OmegaConf.to_container(self.cfg)
-        with open(self.fdir + "/config.json", "w") as f:
+        with (self.fdir / "config.json").open("w") as f:
             json.dump(dict(self.cfg), f, indent=4)
 
 
 class SyntheticDataset:
-    """
-    Dataset object to create a dataloader
-    """
+    """Dataset object to create a dataloader."""
 
-    def __init__(self, fpath, split="train"):
+    def __init__(self, fpath: str | Path, split: str = "train") -> None:
+        """Initialize dataset from file path and split name."""
+        fpath = Path(fpath)
         datafiles = {
-            "train": os.path.join(fpath, "corpus.npy"),
-            "train_eval": os.path.join(fpath, "train_eval_corpus.npy"),
-            "all_eval": os.path.join(fpath, "all_eval_corpus.npy"),
+            "train": fpath / "corpus.npy",
+            "train_eval": fpath / "train_eval_corpus.npy",
+            "all_eval": fpath / "all_eval_corpus.npy",
         }
 
         self.data = np.load(datafiles[split])
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """Return number of samples."""
         return len(self.data)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (input, target) pair for the given index."""
         elem = torch.from_numpy(self.data[idx])
         dat, target = elem[:-1], elem[1:]
         return dat, target
 
 
 class SyntheticEval(SyntheticData):
-    """
-    Create dataloader for each function composition
-    """
+    """Create dataloader for each function composition."""
 
-    def __init__(self, net_cfg, nsamples, nbatch, direct_eval=None, permute=None):
-        # Evaluate step by step
+    def __init__(
+        self, net_cfg: DictConfig, nsamples: int, nbatch: int,
+        *, direct_eval: bool | None = None, permute: bool | None = None,
+    ) -> None:
+        """Initialize evaluation from network config."""
         self.step_eval = not direct_eval
 
-        # Use permute / bijections
         self.permute_eval = permute
 
-        # Load data properties
-        info_fname = os.path.join(net_cfg.data.path, "functions_info.pkl")
-        data_fname = os.path.join(net_cfg.data.path, "config.json")
+        data_path = Path(net_cfg.data.path)
+        info_fname = data_path / "functions_info.pkl"
+        data_fname = data_path / "config.json"
 
         self.token_idx = np.load(
-            os.path.join(net_cfg.data.path, "token_idx.pkl"), allow_pickle=True
+            data_path / "token_idx.pkl", allow_pickle=True
         )
 
-        with open(data_fname) as f:
+        with data_fname.open() as f:
             self.cfg = OmegaConf.create(json.load(f))
         self.special_tokens = [" ", "<PAD>", "S"]
         self.n_special = len(self.special_tokens)
         self.n_alphabets = self.cfg.n_alphabets
 
-        # Create functions
         self.functions_info = np.load(info_fname, allow_pickle=True)
         self.composed_functions = self.functions_info["composition_reduced"]
 
-        # Network configuration
         self.net_cfg = net_cfg
 
-        # Number of samples to evaluate
         self.nsamples = nsamples
-        # Number of functiosn to evaluate at same time
         self.nbatch = nbatch
 
         self.task_map()
 
-    def get_seq_info(self, sample):
+    def get_seq_info(self, sample: np.ndarray) -> dict[str, int]:
+        """Extract sequence structure info from a sample."""
         sp_idx = self.token_idx[" "]
         total_len = len(sample)
         sp_pos = np.where(sample == sp_idx)[0]
@@ -267,10 +264,8 @@ class SyntheticEval(SyntheticData):
             "new": total_len - (sp_pos[1] + 1),
         }
 
-    def generate_step_document(self, task_info):
-        """
-        Generate a document of the form t, x, t(x)
-        """
+    def generate_step_document(self, task_info: tuple) -> np.ndarray:
+        """Generate a document for evaluation."""
         token_idx = self.sample_token()
         space_idx = np.array([self.token_idx[" "]])
         start_idx = np.array([self.token_idx["S"]])
@@ -298,8 +293,11 @@ class SyntheticEval(SyntheticData):
 
 
     @torch.no_grad()
-    def evaluate_docs(self, net, dat, seq_info, device, lstm=False):
-
+    def evaluate_docs(
+        self, net: torch.nn.Module, dat: torch.Tensor,
+        seq_info: dict[str, int], device: str, *, lstm: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Evaluate documents and return total, sharp, and cached accuracies."""
         shape = dat.shape
         if device == "cuda":
             dat = dat.cuda(non_blocking=True)
@@ -340,10 +338,10 @@ class SyntheticEval(SyntheticData):
 
         return total_acc, sharp_acc, total_acc_c
 
-    def get_acc(self, net, lstm=False):
-        """
-        Get the accuracy of each function composition and store seperately
-        """
+    def get_acc(
+        self, net: torch.nn.Module, *, lstm: bool = False,
+    ) -> dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Get the accuracy of each function composition."""
         info = self.functions_info
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -371,7 +369,6 @@ class SyntheticEval(SyntheticData):
 
             task_info = (tid, reduced_func, task_funcs)
 
-            # Generate document for task composition
             docs = [self.generate_step_document(task_info) for _ in range(self.nsamples)]
 
             if idx == 0:
@@ -384,32 +381,34 @@ class SyntheticEval(SyntheticData):
             if idx % self.nbatch == self.nbatch - 1 or idx == len(info["task_id"]) - 1:
                 flatten_docs = torch.Tensor(np.array(doc_list, dtype=int)).long()
 
-                acc_list = self.evaluate_docs(net, flatten_docs, seq_info, device, lstm)
+                acc_list = self.evaluate_docs(net, flatten_docs, seq_info, device, lstm=lstm)
 
-                for idx in range(len(tid_list)):
-                    tid = tid_list[idx]
-                    acc_map[tuple(tid)] = (acc_list[0][idx], acc_list[1][idx], acc_list[2][idx])
+                for j in range(len(tid_list)):
+                    t = tid_list[j]
+                    acc_map[tuple(t)] = (acc_list[0][j], acc_list[1][j], acc_list[2][j])
 
                 tid_list = []
                 doc_list = []
 
         return acc_map
 
-    def save_accs(self, cfg, accs):
-        self.fdir = "data/" + cfg.tag
-        os.makedirs(self.fdir, exist_ok=True)
-        with open(self.fdir + "/accs.pkl", "wb") as f:
+    def save_accs(self, cfg: DictConfig, accs: dict) -> None:
+        """Save accuracy results to disk."""
+        self.fdir = Path("data") / cfg.tag
+        self.fdir.mkdir(parents=True, exist_ok=True)
+        with (self.fdir / "accs.pkl").open("wb") as f:
             pickle.dump(accs, f)
 
 
 class SyntheticEvalCombinatorial(SyntheticEval):
-    """
-    Evaluate on in-order and out-of-order functions
-    """
+    """Evaluate on in-order and out-of-order functions."""
 
     @torch.no_grad()
-    def evaluate_docs(self, net, dat, seq_info, device):
-
+    def evaluate_docs(  # type: ignore[override]
+        self, net: torch.nn.Module, dat: torch.Tensor,
+        seq_info: dict[str, int], device: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate documents and return total and cached accuracies."""
         shape = dat.shape
 
         if device == "cuda":
@@ -445,10 +444,8 @@ class SyntheticEvalCombinatorial(SyntheticEval):
 
         return total_acc, total_acc_c
 
-    def generate_step_document(self, task_info):
-        """
-        Generate a document of the form t, x, t(x)
-        """
+    def generate_step_document(self, task_info: tuple) -> np.ndarray:
+        """Generate a step-by-step document for combinatorial evaluation."""
         token_idx = self.sample_token()
         space_idx = np.array([self.token_idx[" "]])
         start_idx = np.array([self.token_idx["S"]])
@@ -469,23 +466,21 @@ class SyntheticEvalCombinatorial(SyntheticEval):
         return np.concatenate(document)
 
 
-    def get_task_list(self, depth, choices):
-
+    def get_task_list(self, depth: int, choices: int) -> dict[tuple[int, int], list[tuple]]:  # noqa: C901
+        """Build task list organized by (num_identity, num_swap)."""
         task_list = {}
 
         for num_identity in range(depth, -1, -1):
             num_funcs = depth - num_identity
 
-            # Position of identity
-            for id_pos in combinations(range(depth), num_identity):
-                # Number of swapped positions
+            for id_combo in combinations(range(depth), num_identity):
                 for num_swap in range(num_funcs + 1):
-                    for sw_pos in combinations(range(num_funcs), num_swap):
-                        fix_pos = set(range(depth)) - set(id_pos)
-                        fix_pos = tuple(fix_pos - set(sw_pos))
+                    for sw_combo in combinations(range(num_funcs), num_swap):
+                        fix_pos = set(range(depth)) - set(id_combo)
+                        fix_pos = tuple(fix_pos - set(sw_combo))
 
-                        id_pos = tuple(id_pos)
-                        sw_pos = tuple(sw_pos)
+                        id_pos = tuple(id_combo)
+                        sw_pos = tuple(sw_combo)
 
                         nfunc_choices = [None for d in range(depth)]
 
@@ -503,7 +498,6 @@ class SyntheticEvalCombinatorial(SyntheticEval):
 
                         cur_tlist = list(itertools.product(*nfunc_choices))
 
-                        # sample_num = min(len(cur_tlist), 1e9)
                         sample_num = min(len(cur_tlist), 500)
 
                         tlist = random.sample(cur_tlist, sample_num)
@@ -514,15 +508,10 @@ class SyntheticEvalCombinatorial(SyntheticEval):
 
         return task_list
 
-    def get_acc(self, net):
-        """
-        Compute accuracies for compositions with
-        - different number of identities (number of composition)
-        - different displacements
-
-        It is too expensive to compute all accuracies
-        """
-
+    def get_acc(  # type: ignore[override]
+        self, net: torch.nn.Module,
+    ) -> dict[tuple[int, int], dict[tuple, tuple[np.ndarray, np.ndarray]]]:
+        """Compute accuracies grouped by identity count and displacement."""
         depth = self.cfg.function.depth
         info = self.functions_info
 
@@ -564,10 +553,10 @@ class SyntheticEvalCombinatorial(SyntheticEval):
 
                     acc_list = self.evaluate_docs(net, flatten_docs, seq_info, device)
 
-                    for idx in range(len(tid_list)):
-                        tid = tid_list[idx]
+                    for j in range(len(tid_list)):
+                        t = tid_list[j]
 
-                        acc_map[key][tuple(tid)] = (acc_list[0][idx], acc_list[1][idx])
+                        acc_map[key][tuple(t)] = (acc_list[0][j], acc_list[1][j])
 
                     tid_list = []
                     doc_list = []
@@ -575,28 +564,26 @@ class SyntheticEvalCombinatorial(SyntheticEval):
         return acc_map
 
 
-def get_vocab_len(fpath):
-    token = np.load(os.path.join(fpath, "token.pkl"), allow_pickle=True)
+def get_vocab_len(fpath: str | Path) -> int:
+    """Return vocabulary size from saved token file."""
+    token = np.load(Path(fpath) / "token.pkl", allow_pickle=True)
     return len(token)
 
 
-def get_space_pos(fpath, loader):
-    """
-    Get positions of the space
-    """
-    token_idx = np.load(os.path.join(fpath, "token_idx.pkl"), allow_pickle=True)
+def get_space_pos(fpath: str | Path, loader: DataLoader) -> int:
+    """Get position of the last space token in the first sample."""
+    token_idx = np.load(Path(fpath) / "token_idx.pkl", allow_pickle=True)
     sp_idx = token_idx[" "]
     return np.where(loader.dataset.data[0] == sp_idx)[0][-1]
 
 
-def get_seq_info(fpath, loader):
-    """
-    Get markers in the seqeunce like length of prompt, last space
-    """
-    token_idx = np.load(os.path.join(fpath, "token_idx.pkl"), allow_pickle=True)
+def get_seq_info(fpath: str | Path, loader: DataLoader) -> dict[str, int]:
+    """Get sequence markers like prompt length and last space position."""
+    fpath = Path(fpath)
+    token_idx = np.load(fpath / "token_idx.pkl", allow_pickle=True)
     seq_info = {}
 
-    with open(os.path.join(fpath, "config.json")) as f:
+    with (fpath / "config.json").open() as f:
         data_cfg = json.load(f)
 
     sp_idx = token_idx[" "]
@@ -613,7 +600,8 @@ def get_seq_info(fpath, loader):
     return seq_info
 
 
-def get_trainLoader(cfg):
+def get_trainLoader(cfg: DictConfig) -> DataLoader:  # noqa: N802
+    """Create training dataloader."""
     dataset = SyntheticDataset(cfg.data.path, "train")
     return DataLoader(
         dataset,
@@ -624,10 +612,8 @@ def get_trainLoader(cfg):
     )
 
 
-def get_evalLoaders(cfg):
-    """
-    Create dataloaders for evaluation
-    """
+def get_evalLoaders(cfg: DictConfig) -> list[DataLoader]:  # noqa: N802
+    """Create dataloaders for evaluation."""
     loaders = []
     for split in ["train_eval", "all_eval"]:
         dataset = SyntheticDataset(cfg.data.path, split)

@@ -1,5 +1,10 @@
+import logging
+
 import torch
 import torch.nn.functional as F
+from omegaconf import DictConfig
+from torch import nn
+from torch.utils.data import DataLoader
 
 from net.nanogpt import nanoGPT
 from net.runner import (
@@ -15,33 +20,38 @@ from net.runner import (
 from synthetic.generator import get_evalLoaders, get_space_pos, get_trainLoader
 from synthetic.init import read_config, set_seed
 
+logger = logging.getLogger(__name__)
 
-def main(cfg):
+
+def main(cfg: DictConfig) -> None:
+    """Initialize model, data, and optimizer then run training."""
     set_seed(cfg.seed)
 
-    # Get data
     trainLoader = get_trainLoader(cfg)
     evalLoaders = get_evalLoaders(cfg)
 
-    # Check if network is compatible with data
     sanity_checks(cfg, trainLoader)
 
-    # Load network
     device = "cuda" if torch.cuda.is_available() else "cpu"
     net = nanoGPT(cfg.net)
     net.to(device)
     if cfg.net.compile:
         net = torch.compile(net)
-    print(f"number of parameters: {net.get_num_params() / 1e6:.2f}M")
+    logger.info(f"number of parameters: {net.get_num_params() / 1e6:.2f}M")
 
-    # Optimizer
     optimizer = configure_optimizers(net, cfg.optimizer)
 
     train(cfg, net, (trainLoader, evalLoaders), optimizer, device)
 
 
-def train(cfg, net, loaders, optimizer, device):
-
+def train(
+    cfg: DictConfig,
+    net: nn.Module,
+    loaders: tuple[DataLoader, list[DataLoader]],
+    optimizer: torch.optim.Optimizer,
+    device: str,
+) -> None:
+    """Run the training loop with periodic evaluation and checkpointing."""
     net.train()
     trainLoader, evalLoaders = loaders
 
@@ -59,8 +69,8 @@ def train(cfg, net, loaders, optimizer, device):
 
     save_model(cfg, net, optimizer, it)
 
-    print("Total training steps: ", total_steps)
-    print("Learning rate warmup steps: ", cfg.optimizer.warmup_iters)
+    logger.info("Total training steps: %s", total_steps)
+    logger.info("Learning rate warmup steps: %s", cfg.optimizer.warmup_iters)
 
     for _ in range(cfg.epochs):
         for dat, targets in trainLoader:
@@ -73,32 +83,29 @@ def train(cfg, net, loaders, optimizer, device):
             elif it % cfg.log.log_interval == 0:
                 train_loss = log_train(it, lr, train_loss)
 
-            # Update LR
             it, lr = update_cosine_warmup_lr(it, cfg.optimizer, optimizer, total_steps)
 
             optimizer.zero_grad(set_to_none=True)
-            dat, targets = move_to_device(dat, targets, device)
+            dat_d, targets_d = move_to_device(dat, targets, device)
 
-            # Compute loss
             with torch.amp.autocast(device_type=device, dtype=dt):
-                logits = net(dat)
-                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+                logits = net(dat_d)
+                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets_d.reshape(-1))
 
                 train_loss.append(loss.item())
 
-            # Update model
             loss.backward()
             if cfg.optimizer.grad_clip > 0.0:
                 torch.nn.utils.clip_grad_norm_(net.parameters(), cfg.optimizer.grad_clip)
 
             optimizer.step()
 
-    # Log one final time
     eval_info = evaluate(net, evalLoaders, space_pos, device_info)
     log_eval(it, lr, eval_info)
     save_model(cfg, net, optimizer, it)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = read_config("./config/train/conf.yaml")
     main(cfg)

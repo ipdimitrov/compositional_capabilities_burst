@@ -12,17 +12,19 @@ e.g. burst_100 → 200 steps, burst_50 → 400 steps, burst_25 → 800 steps.
 
 Burst modes
 -----------
-  "current"        – original setup: steps scale inversely with concentration  # noqa: RUF002
+  "current"        - original setup: steps scale inversely with concentration
                      so total special examples are constant; batch_size fixed.
-  "constant_steps" – all schedules run BURST_BASE_STEPS; batch_size fixed.  # noqa: RUF002
+  "constant_steps" - all schedules run BURST_BASE_STEPS; batch_size fixed.
                      Only the special:other ratio in each batch differs.
-  "scaled_batch"   – all schedules run BURST_BASE_STEPS; batch_size scales  # noqa: RUF002
+  "scaled_batch"   - all schedules run BURST_BASE_STEPS; batch_size scales
                      inversely with concentration so special-per-step is constant
                      while total data per step grows for dilute schedules.
 """
 
 import colorsys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Phase names (three-phase experiment)
@@ -53,6 +55,7 @@ UNIFORM_PCT = 25
 
 
 def _sched_name(pct: int) -> str:
+    """Return the canonical schedule name for a burst percentage."""
     return f"burst_{pct}"
 
 
@@ -77,7 +80,10 @@ SCHEDULE_ORDER: list[str] = [_sched_name(p) for p in _sorted_pcts]
 
 UNIFORM_SCHEDULE: str = _sched_name(UNIFORM_PCT)
 
-MIXED_FRACTIONS: dict[str, float] = {_sched_name(p): p / 100.0 for p in _sorted_pcts if p != 100}
+FULL_PCT = 100
+MIXED_FRACTIONS: dict[str, float] = {
+    _sched_name(p): p / 100.0 for p in _sorted_pcts if p != FULL_PCT
+}
 
 SCHED_COLORS: dict[str, str] = {
     _sched_name(p): c for p, c in zip(_sorted_pcts, _gradient, strict=False)
@@ -110,7 +116,6 @@ MODE_CONSTANT_STEPS = "constant_steps"
 MODE_SCALED_BATCH = "scaled_batch"
 BURST_MODES = (MODE_CURRENT, MODE_CONSTANT_STEPS, MODE_SCALED_BATCH)
 
-# Canonical CLI / reproducibility defaults
 DEFAULT_REPRO_SEED = 1337
 DEFAULT_DETERMINISTIC = True
 REPRO_MANIFEST_FILENAME = "repro_manifest.json"
@@ -123,7 +128,7 @@ def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) 
 
     All schedules see the same total special-class examples:
         burst_steps * frac = base_steps * 1.0
-    So burst_100 → base_steps, burst_50 → 2×base_steps, burst_25 → 4×base_steps.  # noqa: RUF002
+    So burst_100 -> base_steps, burst_50 -> 2x base_steps, burst_25 -> 4x base_steps.
     """
     if schedule == "burst_100":
         return base_steps
@@ -142,6 +147,7 @@ def burst_steps_for_mode(
     mode: str = MODE_CURRENT,
     base_steps: int = BURST_BASE_STEPS,
 ) -> int:
+    """Return burst phase length for a given schedule and mode."""
     if mode == MODE_CURRENT:
         return burst_steps_for_schedule(schedule, base_steps)
     return base_steps
@@ -152,6 +158,7 @@ def batch_size_for_mode(
     mode: str = MODE_CURRENT,
     base_batch_size: int = 128,
 ) -> int:
+    """Return batch size for a given schedule and mode."""
     if mode != MODE_SCALED_BATCH:
         return base_batch_size
     frac = MIXED_FRACTIONS.get(schedule, 1.0)
@@ -165,6 +172,8 @@ MIXED_FRACTIONS["burst_100"] = 1.0
 
 @dataclass
 class TrainConfig:
+    """Hyperparameters for a single training run."""
+
     n_alphabets: int = 10
     seq_len: int = 6
 
@@ -196,7 +205,8 @@ class TrainConfig:
     n_docs_per_task: int = 100
     n_eval_per_task: int = 100
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize all fields to a plain dict."""
         return {f.name: getattr(self, f.name) for f in self.__dataclass_fields__.values()}
 
 
@@ -207,6 +217,8 @@ class TrainConfig:
 
 @dataclass
 class ExperimentConfig:
+    """Top-level experiment configuration."""
+
     train: TrainConfig = field(default_factory=TrainConfig)
     n_seeds: int = 10
     n_workers: int = 0
@@ -218,23 +230,26 @@ class ExperimentConfig:
     run_next_token_probes: bool = False
     run_adl: bool = True
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Validate burst_mode and auto-detect worker count."""
         if self.burst_mode not in BURST_MODES:
-            raise ValueError(f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}")  # noqa: TRY003, EM102
+            msg = f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}"
+            raise ValueError(msg)
         if self.n_workers == 0:
             from burst.core.gpu import gpu_cfg  # noqa: PLC0415
 
             self.n_workers = gpu_cfg.train_workers
 
     @property
-    def base_cfg(self) -> dict:
+    def base_cfg(self) -> dict[str, Any]:
+        """Return training hyperparameters as a dict."""
         return self.train.to_dict()
 
 
 DEFAULT_CONFIG = ExperimentConfig()
 
 
-def parse_run_config(cfg: dict) -> dict:
+def parse_run_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Extract experiment-level fields from a saved config.json dict.
 
     Returns dict with keys: depth, burst_pos, n_a, base_cfg.
@@ -244,36 +259,41 @@ def parse_run_config(cfg: dict) -> dict:
 
     depth = cfg.get("depth") or cfg.get("task_info", {}).get("depth")
     if depth is None:
-        raise KeyError("config missing 'depth' (checked cfg.depth and cfg.task_info.depth)")  # noqa: TRY003, EM101
+        msg = "config missing 'depth' (checked cfg.depth and cfg.task_info.depth)"
+        raise KeyError(msg)
 
     burst_pos = cfg.get("burst_pos") or cfg.get("task_info", {}).get("burst_pos")
     if burst_pos is None:
-        raise KeyError(
-            "config missing 'burst_pos' (checked cfg.burst_pos and cfg.task_info.burst_pos)"
-        )
+        msg = "config missing 'burst_pos' (checked cfg.burst_pos and cfg.task_info.burst_pos)"
+        raise KeyError(msg)
 
     n_a = cfg.get("n_a") or cfg.get("task_info", {}).get("n_a")
     if n_a is None:
-        raise KeyError("config missing 'n_a' (checked cfg.n_a and cfg.task_info.n_a)")  # noqa: TRY003, EM101
+        msg = "config missing 'n_a' (checked cfg.n_a and cfg.task_info.n_a)"
+        raise KeyError(msg)
 
     return {"depth": depth, "burst_pos": burst_pos, "n_a": n_a, "base_cfg": base_cfg}
 
 
 def reversion_life_key(threshold: float) -> str:
+    """Return the metric key for a reversion threshold."""
     pct = int(threshold * 100)
     return f"life_{pct}"
 
 
 def reversion_life_label(threshold: float) -> str:
+    """Return the display label for a reversion threshold."""
     pct = int(threshold * 100)
     return f"{pct}%-life"
 
 
-def ordered_schedules(scheds) -> list[str]:
+def ordered_schedules(scheds: Iterable[str]) -> list[str]:
+    """Sort schedules in canonical order."""
     return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
 
 
 def sched_sort_key(schedule: str) -> int:
+    """Return the sort index for a schedule name."""
     try:
         return SCHEDULE_ORDER.index(schedule)
     except ValueError:

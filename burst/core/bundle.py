@@ -27,31 +27,36 @@ BUNDLE_FILENAME = "core_bundle.json"
 
 
 def bundle_dir(run_dir: str | Path) -> Path:
+    """Return the versioned bundle directory for a run."""
     _, _, results_dir = resolve_run_paths(run_dir)
     return results_dir / BUNDLE_DIRNAME / BUNDLE_VERSION_DIR
 
 
 def bundle_path(run_dir: str | Path) -> Path:
+    """Return the path to the core bundle JSON file."""
     return bundle_dir(run_dir) / BUNDLE_FILENAME
 
 
 def load_core_bundle(run_dir: str | Path) -> dict[str, Any]:
+    """Load and return the core bundle dict from disk."""
     path = bundle_path(run_dir)
-    with open(path) as f:
+    with path.open() as f:
         return json.load(f)
 
 
 def build_and_save_core_bundle(run_dir: str | Path) -> Path:
+    """Build the core bundle and write it to disk."""
     bundle = build_core_bundle(run_dir)
     out_dir = bundle_dir(run_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / BUNDLE_FILENAME
-    with open(path, "w") as f:
+    with path.open("w") as f:
         json.dump(bundle, f, indent=2)
     return path
 
 
 def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
+    """Assemble the full core bundle dict from training results."""
     results, cfg = load_results(run_dir)
     assert results, "expected at least one result in all_results.pkl"
 
@@ -80,6 +85,7 @@ def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
 
 
 def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
+    """Load gradient cosine similarity records from JSON or pickle files."""
     run_dir = Path(run_dir)
     records: list[dict[str, Any]] = []
 
@@ -87,7 +93,7 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
         if not grad_dir.is_dir():
             continue
         for path in sorted(grad_dir.glob("*.json")):
-            with open(path) as f:
+            with path.open() as f:
                 records.append(json.load(f))
         if records:
             return records
@@ -95,8 +101,8 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
     for path in (run_dir / "logs" / "all_results.pkl", run_dir / "all_results.pkl"):
         if not path.exists():
             continue
-        with open(path, "rb") as f:
-            results = pickle.load(f)
+        with path.open("rb") as f:
+            results = pickle.load(f)  # noqa: S301
         for result in results:
             grad_log = result.get("grad_sim_log")
             if not grad_log or not grad_log.get("step"):
@@ -117,6 +123,7 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
 
 
 def _group_results(results: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group result dicts by schedule in canonical order."""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for result in results:
         grouped[result["schedule"]].append(result)
@@ -124,6 +131,7 @@ def _group_results(results: list[dict[str, Any]]) -> dict[str, list[dict[str, An
 
 
 def _group_grad_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group gradient records by schedule in canonical order."""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         grouped[record["schedule"]].append(record)
@@ -131,6 +139,7 @@ def _group_grad_records(records: list[dict[str, Any]]) -> dict[str, list[dict[st
 
 
 def _mean_ci(values: np.ndarray) -> tuple[float, float]:
+    """Return (mean, 95% CI) for an array of values."""
     if values.size == 0:
         return float("nan"), float("nan")
     mean = float(np.mean(values))
@@ -145,6 +154,7 @@ def _interpolate_to_reference(
     source_steps: np.ndarray,
     values: np.ndarray,
 ) -> np.ndarray:
+    """Interpolate values onto reference_steps grid."""
     if len(reference_steps) == len(source_steps) and np.allclose(reference_steps, source_steps):
         return values.astype(float)
     return np.interp(reference_steps, source_steps, values).astype(float)
@@ -155,6 +165,7 @@ def _interpolate_optional_metric(
     source_steps: np.ndarray,
     values: np.ndarray,
 ) -> np.ndarray:
+    """Interpolate a metric that may be missing, returning NaN if length mismatches."""
     if len(values) != len(source_steps):
         return np.full_like(reference_steps, np.nan, dtype=float)
     return _interpolate_to_reference(reference_steps, source_steps, values)
@@ -164,6 +175,7 @@ def _aggregate_series(
     runs: list[dict[str, Any]],
     key: str,
 ) -> dict[str, Any]:
+    """Aggregate a time-series metric across runs into mean and CI."""
     first_steps = np.array(runs[0]["log"]["step"], dtype=float)
     stacked = []
     for run in runs:
@@ -179,12 +191,14 @@ def _aggregate_series(
 
 
 def _series_ci(arr: np.ndarray) -> np.ndarray:
+    """Return per-timestep 95% CI across the first axis."""
     if arr.shape[0] <= 1:
         return np.nanstd(arr, axis=0)
     return 1.96 * np.nanstd(arr, axis=0) / np.sqrt(arr.shape[0])
 
 
 def _build_schedule_bars(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Build per-schedule burst fraction time-series for bar charts."""
     payload: dict[str, Any] = {}
     for schedule, runs in grouped.items():
         cfg = runs[0]["config"]
@@ -209,6 +223,7 @@ def _build_schedule_bars(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, 
 
 
 def _build_lr_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Build per-schedule learning rate curves."""
     payload: dict[str, Any] = {}
     for schedule, runs in grouped.items():
         cfg = runs[0]["config"]
@@ -218,6 +233,7 @@ def _build_lr_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]
 
 
 def _build_training_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Build per-schedule aggregated training curves (acc, loss)."""
     payload: dict[str, Any] = {}
     for schedule, runs in grouped.items():
         cfg = runs[0]["config"]
@@ -236,6 +252,7 @@ def _build_summary(
     grouped: dict[str, list[dict[str, Any]]],
     thresholds: list[float],
 ) -> dict[str, Any]:
+    """Build per-schedule summary statistics (peak, AUC, life times)."""
     schedules = list(grouped.keys())
     by_schedule: dict[str, Any] = {}
     for schedule, runs in grouped.items():
@@ -271,6 +288,7 @@ def _build_gradient_curves(
     grad_records: list[dict[str, Any]],
     burst_mode: str,
 ) -> dict[str, Any]:
+    """Build per-schedule gradient metric curves (cosine, norms, etc.)."""
     grouped_grad = _group_grad_records(grad_records)
     payload: dict[str, Any] = {}
     for schedule, runs in grouped_grad.items():
@@ -290,6 +308,7 @@ def _build_gradient_curves(
 
 
 def _gradient_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate gradient series across seeds for one schedule."""
     runs = [run for run in runs if run["grad_sim_log"].get("step")]
     if not runs:
         return {}
@@ -351,6 +370,7 @@ def _gradient_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _bundle_metric(series_list: list[np.ndarray]) -> dict[str, Any]:
+    """Stack series and return mean + CI dict."""
     arr = np.stack(series_list)
     return {
         "mean": np.nanmean(arr, axis=0).tolist(),

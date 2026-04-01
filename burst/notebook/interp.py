@@ -4,31 +4,37 @@ Provides weight-space, representation (CKA), and gradient metrics
 to understand why higher burst concentration leads to faster forgetting.
 """
 
+from collections.abc import Callable
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from simple.model import DEVICE, load_model
+from burst.notebook.model import DEVICE, load_model
+
+MATRIX_NDIM = 2
+NEAR_ZERO = 1e-10
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
 
-def _raw(net):
+def _raw(net: torch.nn.Module) -> torch.nn.Module:
     """Unwrap torch.compile wrapper if present."""
     return getattr(net, "_orig_mod", net)
 
 
-def state_dict_cpu(net):
+def state_dict_cpu(net: torch.nn.Module) -> dict[str, torch.Tensor]:
     """Get state dict with all tensors on CPU."""
     return {k: v.detach().cpu() for k, v in _raw(net).state_dict().items()}
 
 
-def load_sd(path):
+def load_sd(path: str | Path) -> dict[str, torch.Tensor]:
     """Load a state dict from disk (CPU)."""
     return torch.load(path, map_location="cpu", weights_only=True)
 
 
-def _layer_group(name):
+def _layer_group(name: str) -> str:
     """Map parameter name to a readable layer group."""
     if "transformer.h." in name:
         parts = name.split(".")
@@ -46,7 +52,7 @@ def _layer_group(name):
     return name
 
 
-def _block_group(name):
+def _block_group(name: str) -> str:
     """Coarser grouping: just the block index or embed/head."""
     if "transformer.h." in name:
         return f"block_{name.split('.')[2]}"
@@ -64,40 +70,46 @@ def _block_group(name):
 # ── weight-space metrics ──────────────────────────────────────────────────
 
 
-def weight_drift_l2(sd_ref, sd_now):
+def weight_drift_l2(sd_ref: dict[str, torch.Tensor], sd_now: dict[str, torch.Tensor]) -> dict:
     """Total and per-layer L2 distance between two state dicts."""
     per_layer = {}
     total_sq = 0.0
-    for k in sd_ref:
+    for k, v_ref in sd_ref.items():
         if k not in sd_now:
             continue
-        delta = sd_now[k].float() - sd_ref[k].float()
+        delta = sd_now[k].float() - v_ref.float()
         l2 = delta.norm().item()
         per_layer[_layer_group(k)] = l2
         total_sq += l2**2
     return {"total": total_sq**0.5, "per_layer": per_layer}
 
 
-def weight_cosine_per_layer(sd_ref, sd_now):
+def weight_cosine_per_layer(
+    sd_ref: dict[str, torch.Tensor], sd_now: dict[str, torch.Tensor],
+) -> dict[str, float]:
     """Cosine similarity between weight vectors per layer."""
     result = {}
-    for k in sd_ref:
+    for k, v_ref in sd_ref.items():
         if k not in sd_now:
             continue
-        a = sd_ref[k].float().flatten()
+        a = v_ref.float().flatten()
         b = sd_now[k].float().flatten()
         cos = F.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
         result[_layer_group(k)] = cos
     return result
 
 
-def weight_delta_svd(sd_ref, sd_now, top_k=10):
+def weight_delta_svd(
+    sd_ref: dict[str, torch.Tensor],
+    sd_now: dict[str, torch.Tensor],
+    top_k: int = 10,
+) -> dict[str, dict]:
     """SVD analysis of weight deltas for 2D weight matrices."""
     results = {}
-    for k in sd_ref:
-        if k not in sd_now or sd_ref[k].dim() != 2:
+    for k, v_ref in sd_ref.items():
+        if k not in sd_now or v_ref.dim() != MATRIX_NDIM:
             continue
-        delta = sd_now[k].float() - sd_ref[k].float()
+        delta = sd_now[k].float() - v_ref.float()
         S = torch.linalg.svdvals(delta)
         s = S.numpy()
         s_norm = s / (s.sum() + 1e-10)
@@ -118,7 +130,9 @@ def weight_delta_svd(sd_ref, sd_now, top_k=10):
 # ── representation metrics (CKA) ─────────────────────────────────────────
 
 
-def extract_hidden_states(net, data_np, prompt_len, batch_size=256):
+def extract_hidden_states(
+    net: torch.nn.Module, data_np: np.ndarray, prompt_len: int, batch_size: int = 256,
+) -> dict[int, np.ndarray]:
     """Capture per-layer hidden states at the last prompt position."""
     raw = _raw(net)
     net.eval()
@@ -127,8 +141,8 @@ def extract_hidden_states(net, data_np, prompt_len, batch_size=256):
     hooks = []
     for i, block in enumerate(raw.transformer.h):
 
-        def _make_hook(idx):
-            def hook_fn(_module, _inp, out):
+        def _make_hook(idx: int) -> Callable:
+            def hook_fn(_module: torch.nn.Module, _inp: tuple, out: torch.Tensor) -> None:
                 if idx not in layer_acts:
                     layer_acts[idx] = []
                 layer_acts[idx].append(out[:, prompt_len - 1, :].detach().cpu())
@@ -150,7 +164,7 @@ def extract_hidden_states(net, data_np, prompt_len, batch_size=256):
     return result
 
 
-def linear_cka(X, Y):
+def linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
     """Linear CKA between two (N, D) activation matrices."""
     X = X - X.mean(0, keepdims=True)
     Y = Y - Y.mean(0, keepdims=True)
@@ -160,7 +174,9 @@ def linear_cka(X, Y):
     return float(hsic_xy / (np.sqrt(hsic_xx * hsic_yy) + 1e-10))
 
 
-def cka_between_models(net1, net2, data_np, prompt_len):
+def cka_between_models(
+    net1: torch.nn.Module, net2: torch.nn.Module, data_np: np.ndarray, prompt_len: int,
+) -> np.ndarray:
     """Layer-by-layer CKA matrix between two models."""
     acts1 = extract_hidden_states(net1, data_np, prompt_len)
     acts2 = extract_hidden_states(net2, data_np, prompt_len)
@@ -172,7 +188,9 @@ def cka_between_models(net1, net2, data_np, prompt_len):
     return mat
 
 
-def cka_diagonal(net1, net2, data_np, prompt_len):
+def cka_diagonal(
+    net1: torch.nn.Module, net2: torch.nn.Module, data_np: np.ndarray, prompt_len: int,
+) -> dict[int, float]:
     """Same-layer CKA between two models (just the diagonal)."""
     acts1 = extract_hidden_states(net1, data_np, prompt_len)
     acts2 = extract_hidden_states(net2, data_np, prompt_len)
@@ -182,7 +200,7 @@ def cka_diagonal(net1, net2, data_np, prompt_len):
 # ── gradient metrics ──────────────────────────────────────────────────────
 
 
-def _get_grad_vector(net, batch_np):
+def _get_grad_vector(net: torch.nn.Module, batch_np: np.ndarray) -> torch.Tensor:
     """Compute gradient vector for a batch (returns flat tensor)."""
     dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
@@ -195,7 +213,7 @@ def _get_grad_vector(net, batch_np):
     return torch.cat(grads)
 
 
-def _get_grad_per_layer(net, batch_np):
+def _get_grad_per_layer(net: torch.nn.Module, batch_np: np.ndarray) -> dict[str, torch.Tensor]:
     """Compute per-layer gradient dict {block_group: flat tensor}."""
     dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
@@ -218,7 +236,7 @@ def _get_grad_per_layer(net, batch_np):
     return {k: torch.cat(vs) for k, vs in layer_grads.items()}
 
 
-def gradient_cosine(net, batch1_np, batch2_np):
+def gradient_cosine(net: torch.nn.Module, batch1_np: np.ndarray, batch2_np: np.ndarray) -> float:
     """Cosine similarity between gradients computed on two batches."""
     net.train()
     g1 = _get_grad_vector(net, batch1_np)
@@ -228,12 +246,10 @@ def gradient_cosine(net, batch1_np, batch2_np):
     return cos
 
 
-def gradient_cosine_per_layer(net, batch1_np, batch2_np):
-    """Per-block cosine similarity between gradients on two batches.
-
-    Returns dict {block_name: float} with cosine similarity per block.
-    Block names are coarse (block_0, block_1, ..., embed_tok, lm_head).
-    """
+def gradient_cosine_per_layer(
+    net: torch.nn.Module, batch1_np: np.ndarray, batch2_np: np.ndarray,
+) -> dict[str, float]:
+    """Per-block cosine similarity between gradients on two batches."""
     net.train()
     g1 = _get_grad_per_layer(net, batch1_np)
     g2 = _get_grad_per_layer(net, batch2_np)
@@ -247,7 +263,7 @@ def gradient_cosine_per_layer(net, batch1_np, batch2_np):
     return result
 
 
-def gradient_norm(net):
+def gradient_norm(net: torch.nn.Module) -> float:
     """Total gradient norm (call after backward)."""
     total = 0.0
     for p in net.parameters():
@@ -256,7 +272,7 @@ def gradient_norm(net):
     return total**0.5
 
 
-def gradient_norm_per_layer(net):
+def gradient_norm_per_layer(net: torch.nn.Module) -> dict[str, float]:
     """Per-layer gradient norms (call after backward)."""
     raw = _raw(net)
     norms = {}
@@ -266,13 +282,8 @@ def gradient_norm_per_layer(net):
     return norms
 
 
-def grad_norm_entropy(net, batch_np):
-    """Entropy of the per-block gradient norm distribution.
-
-    High entropy = gradient spread evenly across blocks.
-    Low entropy = gradient concentrated in few blocks.
-    Returns (entropy_float, per_block_norms_dict).
-    """
+def grad_norm_entropy(net: torch.nn.Module, batch_np: np.ndarray) -> tuple[float, dict[str, float]]:
+    """Entropy of the per-block gradient norm distribution."""
     net.train()
     g = _get_grad_per_layer(net, batch_np)
     net.zero_grad()
@@ -280,7 +291,7 @@ def grad_norm_entropy(net, batch_np):
     norms = {k: v.norm().item() for k, v in g.items()}
     vals = np.array(list(norms.values()))
     total = vals.sum()
-    if total < 1e-10:
+    if total < NEAR_ZERO:
         return 0.0, norms
     p = vals / total
     ent = float(-np.sum(p * np.log(p + 1e-10)))
@@ -290,11 +301,8 @@ def grad_norm_entropy(net, batch_np):
 # ── post-hoc analysis (call after all phases complete) ────────────────────
 
 
-def analyze(data, pt, ft_results, fg_results):
-    """Run full post-hoc interpretability analysis.
-
-    Returns dict with all analysis results, keyed by tag.
-    """
+def analyze(data: dict, pt: dict, ft_results: list[dict], fg_results: list[dict]) -> dict:
+    """Run full post-hoc interpretability analysis."""
     model_cfg = pt["model_cfg"]
     prompt_len = data["prompt_len"]
     eval_burst = data["eval_burst"]
@@ -308,12 +316,10 @@ def analyze(data, pt, ft_results, fg_results):
         tag = ft["tag"]
         sd_ft = load_sd(ft["ckpt_path"])
 
-        # weight-space: pretrained -> finetuned
         drift_pt_ft = weight_drift_l2(sd_pt, sd_ft)
         cosine_pt_ft = weight_cosine_per_layer(sd_pt, sd_ft)
         svd_pt_ft = weight_delta_svd(sd_pt, sd_ft)
 
-        # weight-space: finetuned -> forgotten
         fg_ckpt = fg.get("ckpt_path")
         if fg_ckpt:
             sd_fg = load_sd(fg_ckpt)
@@ -322,14 +328,12 @@ def analyze(data, pt, ft_results, fg_results):
             cosine_ft_fg = weight_cosine_per_layer(sd_ft, sd_fg)
             svd_ft_fg = weight_delta_svd(sd_ft, sd_fg)
         else:
-            drift_ft_fg = drift_pt_fg = cosine_ft_fg = svd_ft_fg = None
+            drift_ft_fg = drift_pt_fg = cosine_ft_fg =             svd_ft_fg = None
 
-        # CKA: pretrained vs finetuned
         net_ft = load_model(ft["ckpt_path"], compile_model=False, **model_cfg)
         cka_pt_ft_burst = cka_between_models(net_pt, net_ft, eval_burst, prompt_len)
         cka_pt_ft_other = cka_diagonal(net_pt, net_ft, eval_other, prompt_len)
 
-        # CKA: finetuned vs forgotten
         cka_ft_fg_burst = None
         if fg_ckpt:
             net_fg = load_model(fg_ckpt, compile_model=False, **model_cfg)

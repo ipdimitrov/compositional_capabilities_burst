@@ -12,14 +12,14 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from simple.interp import (
+from burst.notebook.interp import (
     _get_grad_vector,
     grad_norm_entropy,
     gradient_cosine_per_layer,
     state_dict_cpu,
     weight_drift_l2,
 )
-from simple.model import (
+from burst.notebook.model import (
     MODEL_DEFAULTS,
     cosine_lr,
     eval_accuracy,
@@ -31,13 +31,13 @@ from simple.model import (
 )
 
 
-def _sample_batch(target_pool, bg_pool, n_target, batch_size):
+def _sample_batch(target_pool: dict, bg_pool: dict, n_target: int, batch_size: int) -> np.ndarray:
     """Assemble a mixed batch of n_target special + rest background."""
     t_ids = list(target_pool.keys())
     b_ids = list(bg_pool.keys())
     parts = []
 
-    def _sample(pool, ids, n):
+    def _sample(pool: dict, ids: list, n: int) -> None:
         if n == 0:
             return
         per = n // len(ids)
@@ -53,7 +53,7 @@ def _sample_batch(target_pool, bg_pool, n_target, batch_size):
     return np.concatenate(parts)[np.random.permutation(batch_size)]
 
 
-def finetune(
+def finetune(  # noqa: PLR0913, PLR0915
     data: dict,
     pretrain_ckpt: str | Path,
     out_dir: str | Path,
@@ -76,19 +76,7 @@ def finetune(
     seed: int = 42,
     quiet: bool = False,
 ) -> dict:
-    """Run burst-phase finetuning.
-
-    Args:
-        data: dict from make_data()
-        pretrain_ckpt: path to pretrained checkpoint
-        out_dir: directory to save finetune checkpoint + log
-        burst_frac: fraction of each batch that is special-class (0.0-1.0)
-        steps: number of burst-phase training steps
-        tag: optional label (used in filenames); defaults to f"burst_{int(burst_frac*100)}"
-
-    Returns:
-        dict with: log, ckpt_path, burst_frac, tag, peak_burst
-    """
+    """Run burst-phase finetuning and return log, checkpoint path, and metrics."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -113,7 +101,6 @@ def finetune(
         net, lr=lr * lr_start_frac, _weight_decay=weight_decay, beta1=beta1, beta2=beta2
     )
 
-    # reference state dict for weight drift tracking
     sd_ref = state_dict_cpu(net)
 
     log = {
@@ -161,12 +148,10 @@ def finetune(
             log["loss_burst"].append(lb)
             log["lr"].append(cur_lr)
 
-            # interp metrics
             sd_now = state_dict_cpu(net)
             drift = weight_drift_l2(sd_ref, sd_now)["total"]
             log["weight_drift"].append(drift)
 
-            # gradient norms & cosine: burst vs background
             burst_batch = _sample_batch(target_pool, bg_pool, batch_size, batch_size)
             bg_batch = _sample_batch(target_pool, bg_pool, 0, batch_size)
             net.train()
@@ -180,17 +165,14 @@ def finetune(
             log["grad_norm_bg"].append(gn_bg)
             log["grad_cosine_burst_bg"].append(gc)
 
-            # per-layer gradient cosine
             gc_layers = gradient_cosine_per_layer(net, burst_batch, bg_batch)
             log["grad_cosine_per_layer"].append(gc_layers)
 
-            # gradient norm entropy
             ent_burst, _ = grad_norm_entropy(net, burst_batch)
             ent_bg, _ = grad_norm_entropy(net, bg_batch)
             log["grad_norm_entropy_burst"].append(ent_burst)
             log["grad_norm_entropy_bg"].append(ent_bg)
 
-            # training batch gradient norm
             g_train = _get_grad_vector(net, batch)
             log["grad_norm_train"].append(g_train.norm().item())
             net.zero_grad()
@@ -216,6 +198,6 @@ def finetune(
     }
 
 
-def _finetune_worker(kwargs):
+def _finetune_worker(kwargs: dict) -> dict:
     """Pickle-able entry point for multiprocessing."""
     return finetune(**kwargs)

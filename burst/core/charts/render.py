@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 import matplotlib as mpl
 import numpy as np
@@ -14,6 +15,7 @@ from burst.core.charts.style import apply_paper_style, save_figure, style_axes
 
 
 def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
+    """Render all core analysis charts to out_dir."""
     apply_paper_style()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -52,6 +54,7 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
 
 
 def _plot_schedule_bars(bundle: dict, out_dir: Path) -> Path:
+    """Plot burst fraction over time for each schedule."""
     schedules = bundle["config"]["schedules"]
     bars = bundle["schedule_bars"]
     fig, axes = plt.subplots(
@@ -77,6 +80,7 @@ def _plot_schedule_bars(bundle: dict, out_dir: Path) -> Path:
 
 
 def _plot_lr_curves(bundle: dict, out_dir: Path) -> Path:
+    """Plot learning rate schedules for all schedules."""
     fig, ax = plt.subplots(figsize=(11, 5))
     for schedule in bundle["config"]["schedules"]:
         curve = bundle["lr_curves"][schedule]
@@ -92,9 +96,10 @@ def _plot_lr_curves(bundle: dict, out_dir: Path) -> Path:
     return _save(fig, out_dir / "lr_schedule.png")
 
 
-def _plot_overlay(
+def _plot_overlay(  # noqa: PLR0913
     bundle: dict, out_dir: Path, metric: str, ylabel: str, title: str, filename: str
 ) -> Path:
+    """Plot a single metric overlaid across all schedules."""
     fig, ax = plt.subplots(figsize=(11, 6))
     max_burst_end = 0
     for schedule in bundle["config"]["schedules"]:
@@ -125,6 +130,7 @@ def _plot_overlay(
 
 
 def _plot_auc_bars(bundle: dict, out_dir: Path) -> Path:
+    """Plot reversion AUC bar chart across schedules."""
     schedules = bundle["config"]["schedules"]
     summary = bundle["summary"]["by_schedule"]
     means = [summary[schedule]["reversion_auc"]["mean"] for schedule in schedules]
@@ -143,6 +149,7 @@ def _plot_auc_bars(bundle: dict, out_dir: Path) -> Path:
 
 
 def _plot_summary_table(bundle: dict, out_dir: Path) -> Path:
+    """Render a summary statistics table as an image."""
     schedules = bundle["config"]["schedules"]
     summary = bundle["summary"]["by_schedule"]
     thresholds = bundle["config"]["thresholds"]
@@ -169,7 +176,7 @@ def _plot_summary_table(bundle: dict, out_dir: Path) -> Path:
     fig, ax = plt.subplots(figsize=(fig_w, 3.8))
     ax.axis("off")
     table = ax.table(cellText=rows, colLabels=headers, loc="center", cellLoc="center")
-    table.auto_set_font_size(False)
+    table.auto_set_font_size(auto=False)
     table.set_fontsize(10)
     table.scale(1.0, 1.55)
     for (row, col), cell in table.get_celld().items():
@@ -186,6 +193,7 @@ def _plot_summary_table(bundle: dict, out_dir: Path) -> Path:
 
 
 def _plot_reversion_zoom(bundle: dict, out_dir: Path) -> Path:
+    """Plot burst accuracy during the reversion phase only."""
     fig, ax = plt.subplots(figsize=(11, 6))
     for schedule in bundle["config"]["schedules"]:
         schedule_data = bundle["training"][schedule]
@@ -216,6 +224,7 @@ def _plot_reversion_zoom(bundle: dict, out_dir: Path) -> Path:
 
 
 def _plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot gradient cosine similarity overlay across schedules."""
     gradients = bundle["gradients"]
     if not gradients:
         return None
@@ -245,6 +254,7 @@ def _plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
 
 
 def _plot_grad_cosine_per_schedule(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot per-schedule gradient cosine similarity charts."""
     gradients = bundle["gradients"]
     if not gradients:
         return None
@@ -275,6 +285,7 @@ def _plot_grad_cosine_per_schedule(bundle: dict, out_dir: Path) -> Path | None:
 
 
 def _plot_grad_norms(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot burst and other gradient L2 norms side by side."""
     gradients = bundle["gradients"]
     if not gradients:
         return None
@@ -331,6 +342,7 @@ def _plot_grad_norms(bundle: dict, out_dir: Path) -> Path | None:
 
 
 def _plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot signed dot product and interference power charts."""
     gradients = bundle["gradients"]
     if not gradients:
         return None
@@ -379,13 +391,14 @@ def _plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
     axes[0].axhline(0.0, color="#666666", ls=":", lw=1.0)
     _annotate_global_phase_boundaries(axes[0], _max_burst_steps(bundle), _max_total_steps(bundle))
     _annotate_global_phase_boundaries(axes[1], _max_burst_steps(bundle), _max_total_steps(bundle))
-    style_axes(axes[0], "Step", "Signed Dot", "Grad Norm × Cosine")
+    style_axes(axes[0], "Step", "Signed Dot", "Grad Norm x Cosine")
     style_axes(axes[1], "Step", "Power", "Interference Power")
     axes[1].legend(loc="best", ncol=1)
     return _save(fig, out_dir / "grad_norm_x_cosine.png")
 
 
 def _plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot centroid drift and other-shift norm across schedules."""
     representation = bundle.get("representation", {})
     by_schedule = representation.get("by_schedule", {})
     if not by_schedule:
@@ -437,6 +450,7 @@ def _plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
 
 
 def _plot_per_schedule(bundle: dict, out_dir: Path) -> list[Path]:
+    """Plot per-schedule burst vs other accuracy charts."""
     paths: list[Path] = []
     for schedule in bundle["config"]["schedules"]:
         schedule_data = bundle["training"][schedule]
@@ -467,6 +481,7 @@ def _plot_per_schedule(bundle: dict, out_dir: Path) -> list[Path]:
 
 
 def _fmt_ci(metric: dict, digits: int = 3) -> str:
+    """Format a mean ± CI string from a metric dict."""
     mean = metric["mean"]
     ci = metric["ci"]
     if digits == 0:
@@ -474,12 +489,14 @@ def _fmt_ci(metric: dict, digits: int = 3) -> str:
     return f"{mean:.{digits}f} ± {ci:.{digits}f}"
 
 
-def _save(fig, path: Path) -> Path:
+def _save(fig: Any, path: Path) -> Path:
+    """Save a figure and return its path."""
     save_figure(fig, path)
     return path
 
 
 def _overlay_aliases(filename: str) -> list[Path]:
+    """Return short alias paths for an overlay chart filename."""
     if filename == "overlay_all_acc_burst.png":
         return [Path(filename.replace("overlay_all_acc_burst.png", "overlay_burst.png"))]
     if filename == "overlay_all_acc_other.png":
@@ -490,12 +507,14 @@ def _overlay_aliases(filename: str) -> list[Path]:
 
 
 def _write_aliases(source: Path, aliases: list[Path]) -> None:
+    """Copy source file to each alias path."""
     for alias in aliases:
         target = source.parent / alias.name if not alias.is_absolute() else alias
         shutil.copyfile(source, target)
 
 
 def _max_total_steps(bundle: dict) -> int:
+    """Return the maximum total steps across all schedules."""
     max_total = 0
     for schedule in bundle["config"]["schedules"]:
         schedule_data = bundle["training"][schedule]
@@ -509,6 +528,7 @@ def _max_total_steps(bundle: dict) -> int:
 
 
 def _max_burst_steps(bundle: dict) -> int:
+    """Return the maximum burst end step across all schedules."""
     max_burst = 0
     for schedule in bundle["config"]["schedules"]:
         schedule_data = bundle["training"][schedule]
@@ -516,7 +536,8 @@ def _max_burst_steps(bundle: dict) -> int:
     return max_burst
 
 
-def _annotate_global_phase_boundaries(ax, burst_end: float, total_steps: float) -> None:
+def _annotate_global_phase_boundaries(ax: Any, burst_end: float, total_steps: float) -> None:
+    """Draw vertical phase boundary lines and labels on an axes."""
     ax.axvline(burst_end, color="black", ls="--", lw=1.15, alpha=0.6)
     ymax = ax.get_ylim()[1]
     ax.text(
@@ -534,4 +555,5 @@ def _annotate_global_phase_boundaries(ax, burst_end: float, total_steps: float) 
 
 
 def _sched_pct_label(schedule: str) -> str:
+    """Extract the percentage suffix from a schedule name."""
     return schedule.rsplit("_", maxsplit=1)[-1]

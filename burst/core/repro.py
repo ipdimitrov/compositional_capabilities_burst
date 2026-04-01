@@ -16,7 +16,8 @@ import torch
 from burst.config import REPRO_MANIFEST_FILENAME
 
 
-def set_reproducibility(seed: int, deterministic: bool) -> None:
+def set_reproducibility(seed: int, *, deterministic: bool) -> None:
+    """Seed all RNGs and configure torch determinism settings."""
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -33,13 +34,17 @@ def set_reproducibility(seed: int, deterministic: bool) -> None:
 
 
 def _git_sha() -> str | None:
+    """Return the current git HEAD SHA, or None on failure."""
     try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True  # noqa: S607
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
         return None
 
 
 def _runtime() -> dict[str, Any]:
+    """Collect runtime environment info (Python, torch, CUDA, git)."""
     gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
     return {
         "python": sys.version.split()[0],
@@ -54,6 +59,7 @@ def _runtime() -> dict[str, Any]:
 
 
 def _jsonable(value: Any) -> Any:
+    """Recursively convert Path objects to strings for JSON serialisation."""
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
@@ -63,7 +69,7 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def write_repro_manifest(
+def write_repro_manifest(  # noqa: PLR0913
     run_dir: str | Path,
     *,
     mode: str,
@@ -72,6 +78,7 @@ def write_repro_manifest(
     cli_args: dict[str, Any],
     note: str = "",
 ) -> Path:
+    """Write a JSON reproducibility manifest to the run's results directory."""
     run_dir = Path(run_dir)
     results_dir = run_dir / "results" if (run_dir / "results").exists() else run_dir
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +92,6 @@ def write_repro_manifest(
         "cli_args": _jsonable(cli_args),
         "runtime": _runtime(),
     }
-    with open(manifest_path, "w") as f:
+    with manifest_path.open("w") as f:
         json.dump(payload, f, indent=2)
     return manifest_path

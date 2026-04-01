@@ -1,4 +1,4 @@
-"""Pure-bijection burst experiment with configurable depth and burst position.
+r"""Pure-bijection burst experiment with configurable depth and burst position.
 
 Launches parallel worker processes for training, tracks progress, collects
 results.  Grad-sim is computed post-hoc by burst/grad_sim.py on the saved
@@ -37,16 +37,16 @@ Usage:
 import argparse
 import itertools
 import json
-import os
+import logging
 import pickle
 import subprocess
 import sys
 import time
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import numpy as np
 import torch
@@ -79,19 +79,26 @@ from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_phase_lr
 from synthetic.init import set_seed
 
+logger = logging.getLogger(__name__)
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+PRETRAIN_ACC_THRESHOLD = 0.99
 
 
-def _cross_entropy_logits_BTV_targets_BT(
+def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
     logits_BTV: torch.Tensor, targets_BT: torch.Tensor
 ) -> torch.Tensor:
+    """Compute cross-entropy loss after flattening batch and time dims."""
     logits_bv = rearrange(logits_BTV, "b t v -> (b t) v")
     targets_b = rearrange(targets_BT, "b t -> (b t)")
     return F.cross_entropy(logits_bv, targets_b)
 
 
 class NpEncoder(json.JSONEncoder):
-    def default(self, obj):
+    """JSON encoder that handles numpy types."""
+
+    def default(self, obj: Any) -> Any:
+        """Serialise numpy scalars, arrays, and tuples to JSON-compatible types."""
         if isinstance(obj, (np.integer,)):
             return int(obj)
         if isinstance(obj, (np.floating,)):
@@ -122,7 +129,11 @@ class DepthNData:
       S [FN ... F1] ' ' [input] ' ' [after F1] ' ' ... ' ' [after FN]
     """
 
-    def __init__(self, n_alph: int, seq_len: int, n_a: int, depth: int, burst_pos: int, seed: int):
+    def __init__(  # noqa: PLR0913
+        self, n_alph: int, seq_len: int, n_a: int,
+        depth: int, burst_pos: int, seed: int,
+    ) -> None:
+        """Initialise bijections, vocabulary, and task splits."""
         assert 1 <= burst_pos <= depth, "burst_pos must be in [1, depth]"
         self.n_alph = n_alph
         self.seq_len = seq_len
@@ -131,15 +142,12 @@ class DepthNData:
         self.burst_pos = burst_pos
         rng = np.random.RandomState(seed)
 
-        # bijections[0] = identity; then n_a per position; then b*
         self.bijections = [np.arange(n_alph)]
         for _ in range(n_a * depth + 1):
             self.bijections.append(rng.permutation(n_alph))
 
-        # b* is the last bijection
         self.b_star = n_a * depth + 1
 
-        # position p (1-indexed) uses bijection indices pos_fns[p]
         self.pos_fns: dict[int, list[int]] = {
             p: list(range((p - 1) * n_a + 1, p * n_a + 1)) for p in range(1, depth + 1)
         }
@@ -147,7 +155,8 @@ class DepthNData:
         self._build_vocab()
         self._build_splits(rng)
 
-    def _build_vocab(self):
+    def _build_vocab(self) -> None:
+        """Build token-to-index and index-to-token mappings."""
         self.token, self.token_idx, self.fn_tok = {}, {}, {}
         idx = 0
         for i in range(self.n_alph):
@@ -165,17 +174,15 @@ class DepthNData:
             idx += 1
         self.vocab_size = idx
 
-    def _build_splits(self, rng):
+    def _build_splits(self, rng: np.random.RandomState) -> None:
+        """Build other-class and burst-class task lists."""
         D, bp = self.depth, self.burst_pos
 
-        # Other-class tasks: at each position p, pick one function from pos_fns[p]
-        # All combinations of (f_pos1, f_pos2, ..., f_posD) where f_posp in pos_fns[p]
         per_pos = [self.pos_fns[p] for p in range(1, D + 1)]
         other_combos = list(itertools.product(*per_pos))
         rng.shuffle(other_combos)
         self.other_train = [(CLASS_OTHER, *combo) for combo in other_combos]
 
-        # Burst tasks: same as other but position bp is replaced by b*
         non_burst_positions = [p for p in range(1, D + 1) if p != bp]
         per_pos_no_bp = [self.pos_fns[p] for p in non_burst_positions]
         remaining_combos = list(itertools.product(*per_pos_no_bp))
@@ -188,7 +195,8 @@ class DepthNData:
             burst_tasks.append((CLASS_BURST, *fns))
         self.burst_train = burst_tasks
 
-    def _make_doc(self, task: tuple) -> np.ndarray:
+    def _make_doc(self, task: tuple[int, ...]) -> np.ndarray:
+        """Generate a single tokenised document for a task composition."""
         fns = task[1:]
         inp = np.random.choice(self.n_alph, size=self.seq_len, replace=True)
         sp = np.array([self.token_idx[" "]])
@@ -204,11 +212,15 @@ class DepthNData:
             doc.extend([sp, o])
         return np.concatenate(doc)
 
-    def gen_pool(self, tasks: list, n: int) -> dict:
+    def gen_pool(self, tasks: list[tuple[int, ...]], n: int) -> dict[tuple[int, ...], np.ndarray]:
+        """Generate n documents per task, returning {task: docs_array}."""
         return {t: np.array([self._make_doc(t) for _ in range(n)]) for t in tasks}
 
 
-def build_data(cfg: dict, depth: int, burst_pos: int, n_a: int, data_seed: int = DATA_SEED):
+def build_data(
+    cfg: dict, depth: int, burst_pos: int, n_a: int, data_seed: int = DATA_SEED,
+) -> tuple[dict, dict, dict, int, dict, dict]:
+    """Build training/eval data pools and return pools, eval docs, prompt len, cfg, task info."""
     set_seed(data_seed)
     d = DepthNData(cfg["n_alphabets"], cfg["seq_len"], n_a, depth, burst_pos, data_seed)
     nd, ne = cfg["n_docs_per_task"], cfg["n_eval_per_task"]
@@ -227,7 +239,8 @@ def build_data(cfg: dict, depth: int, burst_pos: int, n_a: int, data_seed: int =
     for i, k in enumerate(eval_pools):
         eval_pools[k] = padded[i + 2]
 
-    def _cat(pool):
+    def _cat(pool: dict) -> np.ndarray:
+        """Concatenate all arrays in a pool into one."""
         if not pool:
             return np.zeros((1, next(iter(bg_pool.values())).shape[1]), dtype=np.int64)
         return np.concatenate(list(pool.values()))
@@ -254,7 +267,7 @@ def build_data(cfg: dict, depth: int, burst_pos: int, n_a: int, data_seed: int =
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
 
 
-def run_pretrain(
+def run_pretrain(  # noqa: C901, PLR0913, PLR0915
     cfg: dict,
     pretrain_steps: int,
     bg_pool: dict,
@@ -263,9 +276,10 @@ def run_pretrain(
     prompt_len: int = 0,
     eval_every: int = 25,
     seed: int = DATA_SEED,
-    save_checkpoint: bool = True,
     progress_prefix: str = "",
-) -> dict:
+    *,
+    save_checkpoint: bool = True,
+) -> dict[str, list]:
     """Train one model on all-but-special for pretrain_steps, save checkpoint.
 
     Uses the provided seed (default DATA_SEED).
@@ -273,8 +287,8 @@ def run_pretrain(
     Returns a pretrain log dict with step/loss/phase/acc_other/acc_burst lists
     so charts can show the pretraining trajectory.
     """
-    from burst.config import EVAL_KEYS, PHASE_PRE_BURST
-    from burst.core.train.worker import eval_free_gen, eval_loss
+    from burst.config import EVAL_KEYS, PHASE_PRE_BURST  # noqa: PLC0415
+    from burst.core.train.worker import eval_free_gen, eval_loss  # noqa: PLC0415
 
     set_seed(seed)
     net = nanoGPT(
@@ -373,21 +387,22 @@ def run_pretrain(
 
         if (s + 1) % 100 == 0 or s == pretrain_steps - 1:
             prefix = f"{progress_prefix} " if progress_prefix else ""
-            print(
-                f"{prefix}pretrain step {s + 1}/{pretrain_steps}  loss={loss.item():.4f}",
-                flush=True,
+            logger.info(
+                f"{prefix}pretrain step {s + 1}/{pretrain_steps}  loss={loss.item():.4f}"
             )
 
     if save_checkpoint:
         if ckpt_path is None:
-            raise ValueError("ckpt_path is required when save_checkpoint=True")
+            msg = "ckpt_path is required when save_checkpoint=True"
+            raise ValueError(msg)
         raw = getattr(net, "_orig_mod", net)
         torch.save(raw.state_dict(), ckpt_path)
-        print(f"  Pretrain checkpoint saved: {ckpt_path}", flush=True)
+        logger.info(f"  Pretrain checkpoint saved: {ckpt_path}")
     return log
 
 
-def main():
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
+    """Run the full burst training experiment."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-tag", default=None)
     parser.add_argument("--depth", type=int, default=3)
@@ -408,7 +423,7 @@ def main():
     )
     parser.add_argument("--note", type=str, default="")
     args = parser.parse_args()
-    set_reproducibility(args.seed, args.deterministic)
+    set_reproducibility(args.seed, deterministic=args.deterministic)
 
     exp = ExperimentConfig(
         depth=args.depth,
@@ -444,14 +459,13 @@ def main():
     progress_dir = logs_dir / "_progress"
     progress_dir.mkdir(exist_ok=True)
 
-    print(f"Output: {run_dir}\nDevice: {DEVICE}", flush=True)
+    logger.info(f"Output: {run_dir}\nDevice: {DEVICE}")
     if DEVICE == "cuda":
-        print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
 
     n_a = args.n_a
-    print(
-        f"\nBuilding data (depth={exp.depth}, burst_pos={exp.burst_pos}, n_a={n_a})...",
-        flush=True,
+    logger.info(
+        f"\nBuilding data (depth={exp.depth}, burst_pos={exp.burst_pos}, n_a={n_a})..."
     )
     tp, bp, ed, pl, cfg_out, ti = build_data(
         base_cfg,
@@ -460,15 +474,14 @@ def main():
         n_a,
         data_seed=args.seed,
     )
-    print(
+    logger.info(
         f"  Other classes: {ti['n_other_train']}  "
         f"Burst class: {ti['n_burst_train']}  "
-        f"doc_len: {ti['doc_len']}  prompt: {ti['prompt_len']}",
-        flush=True,
+        f"doc_len: {ti['doc_len']}  prompt: {ti['prompt_len']}"
     )
 
-    data_path = str(logs_dir / "_data.pkl")
-    with open(data_path, "wb") as f:
+    data_path = logs_dir / "_data.pkl"
+    with data_path.open("wb") as f:
         pickle.dump((tp, bp, ed, pl, None), f)
 
     # --- Pretrain: one shared checkpoint for all seeds ---
@@ -482,10 +495,9 @@ def main():
     pretrain_attempt = 0
     while True:
         pretrain_attempt += 1
-        print(
+        logger.info(
             f"\nPretraining shared checkpoint ({P} steps on all-but-special)"
-            f" — attempt {pretrain_attempt}...",
-            flush=True,
+            f" — attempt {pretrain_attempt}..."
         )
         pretrain_log = run_pretrain(
             pretrain_cfg,
@@ -498,11 +510,11 @@ def main():
             seed=args.seed,
         )
         peak_acc_other = max(pretrain_log.get("acc_other", [0.0]))
-        if peak_acc_other >= 0.99:
-            print(f"  Pretrain OK: peak acc_other={peak_acc_other:.4f}", flush=True)
+        if peak_acc_other >= PRETRAIN_ACC_THRESHOLD:
+            logger.info(f"  Pretrain OK: peak acc_other={peak_acc_other:.4f}")
             break
-        print(f"  Pretrain acc_other={peak_acc_other:.4f} < 0.99, retrying...", flush=True)
-    with open(logs_dir / "pretrain_log.pkl", "wb") as f:
+        logger.info(f"  Pretrain acc_other={peak_acc_other:.4f} < 0.99, retrying...")
+    with (logs_dir / "pretrain_log.pkl").open("wb") as f:
         pickle.dump(pretrain_log, f)
 
     pretrain_log_path = str(logs_dir / "pretrain_log.pkl")
@@ -533,7 +545,7 @@ def main():
                 }
             )
 
-    with open(results_dir / "config.json", "w") as f:
+    with (results_dir / "config.json").open("w") as f:
         json.dump(
             {
                 "base_cfg": base_cfg,
@@ -591,43 +603,42 @@ def main():
 
     n_procs = min(len(jobs), exp.n_workers)
     jobs_per_proc = max(1, (len(jobs) + n_procs - 1) // n_procs)
-    print(f"  {gpu_cfg.summary()}", flush=True)
-    print(f"  Layout: {n_procs} processes x ~{jobs_per_proc} jobs/proc", flush=True)
+    logger.info(f"  {gpu_cfg.summary()}")
+    logger.info(f"  Layout: {n_procs} processes x ~{jobs_per_proc} jobs/proc")
 
     tc = exp.train
-    print(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H", flush=True)
-    print(f"Burst mode: {burst_mode}", flush=True)
-    print(
-        f"Jobs: {len(jobs)}, parallel processes: {n_procs}, jobs/process: ~{jobs_per_proc}",
-        flush=True,
+    logger.info(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H")
+    logger.info(f"Burst mode: {burst_mode}")
+    logger.info(
+        f"Jobs: {len(jobs)}, parallel processes: {n_procs}, jobs/process: ~{jobs_per_proc}"
     )
-    print(f"Schedules: {exp.schedules}", flush=True)
+    logger.info(f"Schedules: {exp.schedules}")
     for sched in exp.schedules:
         T_s = burst_steps_for_mode(sched, burst_mode, BURST_BASE_STEPS)
         bs_s = batch_size_for_mode(sched, burst_mode, base_cfg["batch_size"])
-        print(
-            f"  {sched}: burst_steps={T_s}  batch_size={bs_s}  reversion={tc.reversion_steps}",
-            flush=True,
+        logger.info(
+            f"  {sched}: burst_steps={T_s}  batch_size={bs_s}  reversion={tc.reversion_steps}"
         )
-    print()
+    logger.info("")
 
     batched_script = str(Path(__file__).parent / "worker_batched.py")
     t0 = time.time()
 
     job_chunks = [jobs[i : i + jobs_per_proc] for i in range(0, len(jobs), jobs_per_proc)]
 
-    def launch_chunk(chunk_idx, chunk):
-        chunk_path = str(logs_dir / f"_chunk_{chunk_idx}.pkl")
-        with open(chunk_path, "wb") as f:
+    def launch_chunk(chunk_idx: int, chunk: list[dict]) -> subprocess.Popen:
+        """Pickle a job chunk and spawn a batched worker subprocess."""
+        chunk_path = logs_dir / f"_chunk_{chunk_idx}.pkl"
+        with chunk_path.open("wb") as f:
             pickle.dump(chunk, f)
-        return subprocess.Popen(
+        return subprocess.Popen(  # noqa: S603
             [
                 sys.executable,
                 batched_script,
                 "--jobs-path",
                 chunk_path,
                 "--data-path",
-                data_path,
+                str(data_path),
                 "--run-dir",
                 str(logs_dir),
                 "--progress-dir",
@@ -671,8 +682,8 @@ def main():
             if rp.exists():
                 reported_jobs.add(label)
                 n_done += 1
-                with open(rp, "rb") as f:
-                    r = pickle.load(f)
+                with rp.open("rb") as f:
+                    r = pickle.load(f)  # noqa: S301
                 thresholds = TrainConfig().reversion_thresholds
                 first_key = reversion_life_key(thresholds[0])
                 first_lbl = reversion_life_label(thresholds[0])
@@ -707,15 +718,15 @@ def main():
     pbar.update(pbar.total - pbar.n)
     pbar.close()
     total_time = time.time() - t0
-    print(f"\nAll {n_done} jobs done in {total_time:.0f}s ({total_time / 60:.1f} min)", flush=True)
+    logger.info(f"\nAll {n_done} jobs done in {total_time:.0f}s ({total_time / 60:.1f} min)")
 
     all_results = []
     for job in jobs:
         rp = logs_dir / f"{job['label']}.pkl"
         if rp.exists():
-            with open(rp, "rb") as f:
-                all_results.append(pickle.load(f))
-    with open(logs_dir / "all_results.pkl", "wb") as f:
+            with rp.open("rb") as f:
+                all_results.append(pickle.load(f))  # noqa: S301
+    with (logs_dir / "all_results.pkl").open("wb") as f:
         pickle.dump(all_results, f)
 
     for f in progress_dir.glob("*"):
@@ -725,11 +736,12 @@ def main():
     for f in logs_dir.glob("_chunk_*.pkl"):
         f.unlink()
 
-    print(f"Results: {run_dir} ({len(all_results)} ok)", flush=True)
-    print(f"repro_manifest: {manifest_path}", flush=True)
-    print(f"\nNext: uv run python -m burst.core gradients {run_dir}", flush=True)
-    print(f"Next: uv run python -m burst.core pipeline {run_dir}", flush=True)
+    logger.info(f"Results: {run_dir} ({len(all_results)} ok)")
+    logger.info(f"repro_manifest: {manifest_path}")
+    logger.info(f"\nNext: uv run python -m burst.core gradients {run_dir}")
+    logger.info(f"Next: uv run python -m burst.core pipeline {run_dir}")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

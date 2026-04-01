@@ -23,22 +23,24 @@ Dimension key:
 
 import argparse
 import json
-import os
+import logging
 import pickle
 import sys
 import warnings
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-
 from pathlib import Path
+from typing import Any
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-from einops import rearrange
-from omegaconf import OmegaConf
+logger = logging.getLogger(__name__)
 
-from burst.config import (
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from einops import rearrange  # noqa: E402
+from omegaconf import OmegaConf  # noqa: E402
+
+from burst.config import (  # noqa: E402
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
     PHASE_BURST,
@@ -46,30 +48,33 @@ from burst.config import (
     PHASE_REVERSION,
     parse_run_config,
 )
-from burst.core.gpu import gpu_cfg
-from burst.core.parallel import run_job_pool
-from burst.core.repro import set_reproducibility, write_repro_manifest
-from net.nanogpt import nanoGPT
+from burst.core.gpu import gpu_cfg  # noqa: E402
+from burst.core.parallel import run_job_pool  # noqa: E402
+from burst.core.repro import set_reproducibility, write_repro_manifest  # noqa: E402
+from net.nanogpt import nanoGPT  # noqa: E402
 
 warnings.filterwarnings("ignore", message=".*Full backward hook.*no inputs require gradients.*")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+MATRIX_NDIM = 2
+NEAR_ZERO = 1e-12
+MIN_VECTORS_FOR_SIMILARITY = 2
 
 # ---------------------------------------------------------------------------
 # Feature flags — comment out any key to skip that metric entirely.
 # This controls what is computed in each _worker_main() subprocess.
 # ---------------------------------------------------------------------------
 GRAD_METRICS: dict[str, bool] = {
-    "cosine_global": True,  # burst-vs-other cosine similarity (aggregate)
-    "cosine_per_layer": True,  # per-layer burst-vs-other cosine heatmap
-    "pairwise": False,  # pairwise task-group cosine sim matrix (disabled for speed)
-    "grad_norm_ratio": True,  # per-layer ||g_burst|| / ||g_other||
-    "grad_rank": True,  # effective rank of per-layer gradient matrix
-    "grad_snr": False,  # per-layer gradient signal-to-noise ratio (disabled for speed)
-    "conflict_rate": True,  # per-layer fraction of params with sign conflict
-    "token_pos_grad": False,  # per-token-position embedding gradient norm (disabled for speed)
-    "grad_attribution": False,  # intermediate-vs-final gradient fraction
-    "grad_projection": True,  # OGD-style projection: interference magnitude, useful learning, ratio
+    "cosine_global": True,
+    "cosine_per_layer": True,
+    "pairwise": False,  # disabled for speed
+    "grad_norm_ratio": True,
+    "grad_rank": True,
+    "grad_snr": False,  # disabled for speed
+    "conflict_rate": True,
+    "token_pos_grad": False,  # disabled for speed
+    "grad_attribution": False,
+    "grad_projection": True,  # OGD-style: interference vs useful component of g_burst
 }
 
 # Number of per-example gradients to sample for SNR estimation.
@@ -77,9 +82,10 @@ GRAD_METRICS: dict[str, bool] = {
 N_SNR_EXAMPLES: int = 16
 
 
-def _cross_entropy_logits_BTV_targets_BT(
+def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
     logits_BTV: torch.Tensor, targets_BT: torch.Tensor
 ) -> torch.Tensor:
+    """Compute cross-entropy loss from logits and targets."""
     logits_bv = rearrange(logits_BTV, "b t v -> (b t) v")
     targets_b = rearrange(targets_BT, "b t -> (b t)")
     return F.cross_entropy(logits_bv, targets_b)
@@ -90,12 +96,13 @@ def _cross_entropy_logits_BTV_targets_BT(
 # ---------------------------------------------------------------------------
 
 
-def _flat_grad(net) -> torch.Tensor:
+def _flat_grad(net: nanoGPT) -> torch.Tensor:
+    """Concatenate all parameter gradients into a single flat vector."""
     grads = [p.grad.detach().view(-1) for p in net.parameters() if p.grad is not None]
     return torch.cat(grads) if grads else torch.zeros(1, device=DEVICE)
 
 
-def _layer_groups(net) -> list[tuple[str, list[str]]]:
+def _layer_groups(net: nanoGPT) -> list[tuple[str, list[str]]]:
     """Return ordered (short_name, [param_name, ...]) groups for per-layer grad-sim.
 
     Groups:
@@ -141,7 +148,7 @@ def _layer_groups(net) -> list[tuple[str, list[str]]]:
 
 
 def _grad_vecs_per_layer(
-    net, docs_np: np.ndarray, n_samples: int, layer_groups: list[tuple[str, list[str]]]
+    net: nanoGPT, docs_np: np.ndarray, n_samples: int, layer_groups: list[tuple[str, list[str]]]
 ) -> dict[str, torch.Tensor]:
     """Run one backward pass and extract per-layer gradient vectors."""
     n = min(n_samples, docs_np.shape[0])
@@ -165,7 +172,8 @@ def _grad_vecs_per_layer(
     return result
 
 
-def _grad_vec_for_docs(net, docs_np: np.ndarray, n_samples: int) -> torch.Tensor:
+def _grad_vec_for_docs(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> torch.Tensor:
+    """Compute a flat gradient vector from a random subset of docs."""
     n = min(n_samples, docs_np.shape[0])
     idx = np.random.choice(docs_np.shape[0], n, replace=False)
     tokens_BL = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
@@ -192,7 +200,7 @@ def _effective_rank(g_vec: torch.Tensor, param_shape: tuple[int, int]) -> float:
     g_MN = rearrange(g_vec[: m * n].float(), "(m n) -> m n", m=m, n=n)
     try:
         sv = torch.linalg.svdvals(g_MN)
-    except Exception:
+    except (RuntimeError, torch.linalg.LinAlgError):
         return float("nan")
     sv = sv[sv > 0]
     if sv.numel() == 0:
@@ -203,7 +211,7 @@ def _effective_rank(g_vec: torch.Tensor, param_shape: tuple[int, int]) -> float:
 
 
 def _grad_rank_per_layer(
-    net, docs_np: np.ndarray, n_samples: int, layer_groups: list[tuple[str, list[str]]]
+    net: nanoGPT, docs_np: np.ndarray, n_samples: int, layer_groups: list[tuple[str, list[str]]]
 ) -> dict[str, float]:
     """Effective rank of the gradient matrix for each layer group (burst data)."""
     vecs = _grad_vecs_per_layer(net, docs_np, n_samples, layer_groups)
@@ -218,7 +226,7 @@ def _grad_rank_per_layer(
         shapes = [
             param_map[pn].shape
             for pn in pnames
-            if pn in param_map and len(param_map[pn].shape) == 2
+            if pn in param_map and len(param_map[pn].shape) == MATRIX_NDIM
         ]
         if shapes:
             m, n = shapes[0]
@@ -229,7 +237,7 @@ def _grad_rank_per_layer(
 
 
 def _grad_snr_per_layer(
-    net, docs_np: np.ndarray, n_examples: int, layer_groups: list[tuple[str, list[str]]]
+    net: nanoGPT, docs_np: np.ndarray, n_examples: int, layer_groups: list[tuple[str, list[str]]]
 ) -> dict[str, float]:
     """Per-layer gradient signal-to-noise ratio across individual examples.
 
@@ -241,7 +249,7 @@ def _grad_snr_per_layer(
     Uses torch.func.vmap + grad to compute all per-example gradients in one
     vectorised call instead of n_examples sequential backward passes.
     """
-    from torch.func import functional_call, grad, vmap
+    from torch.func import functional_call, grad, vmap  # noqa: PLC0415
 
     n = min(n_examples, docs_np.shape[0])
     idx = np.random.choice(docs_np.shape[0], n, replace=False)
@@ -252,7 +260,12 @@ def _grad_snr_per_layer(
     params = {k: v.detach() for k, v in net.named_parameters()}
     buffers = {k: v.detach() for k, v in net.named_buffers()}
 
-    def loss_fn(params, inp_1L, tgt_1L):
+    def loss_fn(
+        params: dict[str, torch.Tensor],
+        inp_1L: torch.Tensor,
+        tgt_1L: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute per-example loss for vmap-based gradient computation."""
         with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
             logits_1LV = functional_call(net, (params, buffers), (inp_1L.unsqueeze(0),))
         return _cross_entropy_logits_BTV_targets_BT(logits_1LV, tgt_1L.unsqueeze(0))
@@ -315,6 +328,7 @@ def _grad_projection_metrics(
       interference_ratio:     ||g_parallel|| / ||g_burst||  (= |cos(alpha)|, fraction wasted)
       burst_norm:             ||g_burst||
       other_norm:             ||g_other||
+
     """
     g_b = g_burst.float()
     g_o = g_other.float()
@@ -327,7 +341,7 @@ def _grad_projection_metrics(
     other_l1 = float(g_o.abs().sum().item())
     other_linf = float(g_o.abs().max().item())
 
-    if norm_o < 1e-12 or norm_b < 1e-12:
+    if norm_o < NEAR_ZERO or norm_b < NEAR_ZERO:
         return {
             "interference_magnitude": float("nan"),
             "useful_learning": float("nan"),
@@ -363,7 +377,7 @@ def _grad_projection_metrics(
     }
 
 
-def _token_pos_grad_norms(net, docs_np: np.ndarray, n_samples: int) -> list[float]:
+def _token_pos_grad_norms(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> list[float]:
     """Per-token-position gradient norm w.r.t. the embedding output.
 
     Hooks the wte embedding output to capture d(loss)/d(h_t) for each
@@ -377,7 +391,8 @@ def _token_pos_grad_norms(net, docs_np: np.ndarray, n_samples: int) -> list[floa
 
     emb_grad: list[torch.Tensor] = []
 
-    def _hook(module, grad_input, grad_output):
+    def _hook(_module: Any, _grad_input: Any, grad_output: tuple[torch.Tensor, ...]) -> None:
+        """Capture embedding gradient from backward hook."""
         emb_grad.append(grad_output[0].detach().float())
 
     handle = net.transformer.wte.register_full_backward_hook(_hook)
@@ -390,16 +405,15 @@ def _token_pos_grad_norms(net, docs_np: np.ndarray, n_samples: int) -> list[floa
 
     if not emb_grad:
         return []
-    # emb_grad[0]: B x T x N — average over batch, then take norm over N per position
-    g_BtN = emb_grad[0]  # B x T x N
-    norms_T = g_BtN.norm(dim=-1).mean(dim=0)  # T
+    g_BtN = emb_grad[0]
+    norms_T = g_BtN.norm(dim=-1).mean(dim=0)
     net.zero_grad(set_to_none=True)
     return norms_T.cpu().tolist()
 
 
 def _grad_attribution(
-    net, docs_np: np.ndarray, n_samples: int, prompt_len: int, doc_len: int
-) -> dict:
+    net: nanoGPT, docs_np: np.ndarray, n_samples: int, prompt_len: int, doc_len: int
+) -> dict[str, Any]:
     """Decompose gradient norm by which output token position it comes from.
 
     For each output position t in [prompt_len, doc_len-1], compute the
@@ -411,6 +425,7 @@ def _grad_attribution(
                            [prompt_len, doc_len-2] (intermediate outputs)
         final_frac:        fraction from position doc_len-1 (final output)
         per_pos:           list of grad norms for each output position
+
     """
     n = min(n_samples, docs_np.shape[0])
     idx = np.random.choice(docs_np.shape[0], n, replace=False)
@@ -456,7 +471,10 @@ def _grad_attribution(
 # ---------------------------------------------------------------------------
 
 
-def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL, n_samples: int) -> dict:
+def compute_grad_cosine_sim(
+    net: nanoGPT, docs_burst_BL: np.ndarray, docs_other_BL: np.ndarray, n_samples: int
+) -> dict[str, float]:
+    """Compute global burst-vs-other gradient cosine similarity."""
     net.train()
     net.zero_grad(set_to_none=True)
     g_burst = _grad_vec_for_docs(net, docs_burst_BL, n_samples=n_samples)
@@ -467,7 +485,9 @@ def compute_grad_cosine_sim(net, docs_burst_BL, docs_other_BL, n_samples: int) -
     return {"burst_vs_other": cos_sim}
 
 
-def compute_grad_cosine_sim_per_layer(net, docs_burst_BL, docs_other_BL, n_samples: int) -> dict:
+def compute_grad_cosine_sim_per_layer(
+    net: nanoGPT, docs_burst_BL: np.ndarray, docs_other_BL: np.ndarray, n_samples: int
+) -> dict[str, Any]:
     """Compute burst-vs-other cosine similarity separately for each layer group."""
     layer_groups = _layer_groups(net)
     net.train()
@@ -494,16 +514,16 @@ def compute_grad_cosine_sim_per_layer(net, docs_burst_BL, docs_other_BL, n_sampl
     }
 
 
-def compute_pairwise_grad_sim(
-    net,
-    task_docs: dict,
-    burst_tasks: list,
-    other_tasks: list,
+def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
+    net: nanoGPT,
+    task_docs: dict[Any, np.ndarray],
+    _burst_tasks: list[Any],
+    _other_tasks: list[Any],
     n_samples: int,
-    depth: int,
+    _depth: int,
     burst_pos: int,
     n_a: int,
-) -> dict:
+) -> dict[str, Any]:
     """Pairwise grad cosine sim with principled task grouping.
 
     Groups:
@@ -513,7 +533,7 @@ def compute_pairwise_grad_sim(
       ALL_OTHER   -- all other-class tasks pooled
       ALL_DATA    -- everything pooled
     """
-    from burst.config import CLASS_BURST
+    from burst.config import CLASS_BURST  # noqa: PLC0415
 
     net.train()
 
@@ -562,7 +582,7 @@ def compute_pairwise_grad_sim(
     n = len(label_order)
     matrix = np.eye(n)
     valid = [(i, v) for i, v in enumerate(grad_vecs) if v is not None]
-    if len(valid) >= 2:
+    if len(valid) >= MIN_VECTORS_FOR_SIMILARITY:
         G = torch.stack([v for _, v in valid])
         G_norm = F.normalize(G, dim=1)
         sim = (G_norm @ G_norm.T).cpu().numpy()
@@ -586,7 +606,8 @@ def compute_pairwise_grad_sim(
 # ---------------------------------------------------------------------------
 
 
-def _worker_main():
+def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
+    """Run a single gradient-metric job in a subprocess."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--job-path", required=True)
@@ -595,13 +616,13 @@ def _worker_main():
     parser.add_argument("--grad-sim-batch-size", type=int, required=True)
     args = parser.parse_args()
 
-    with open(args.job_path, "rb") as f:
-        job = pickle.load(f)
-    with open(args.data_path, "rb") as f:
-        target_pool, bg_pool = pickle.load(f)
+    with Path(args.job_path).open("rb") as f:
+        job = pickle.load(f)  # noqa: S301
+    with Path(args.data_path).open("rb") as f:
+        target_pool, bg_pool = pickle.load(f)  # noqa: S301
 
     cfg = job["cfg"]
-    set_reproducibility(int(cfg.get("seed", 0)), bool(job.get("deterministic", True)))
+    set_reproducibility(int(cfg.get("seed", 0)), deterministic=bool(job.get("deterministic", True)))
     ckpt_path = job["ckpt_path"]
     step = job["step"]
     phase = job["phase"]
@@ -641,7 +662,7 @@ def _worker_main():
     }
 
     if burst_docs_all is None or other_docs_all is None:
-        with open(args.output_path, "wb") as f:
+        with Path(args.output_path).open("wb") as f:
             pickle.dump(result, f)
         return
 
@@ -742,7 +763,7 @@ def _worker_main():
         )
         result["pairwise"] = snap
 
-    with open(args.output_path, "wb") as f:
+    with Path(args.output_path).open("wb") as f:
         pickle.dump(result, f)
 
 
@@ -781,7 +802,8 @@ def _resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
+    """Orchestrate gradient metric computation across all checkpoints."""
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--n-workers", type=int, default=None)
@@ -795,7 +817,7 @@ def main():
     )
     parser.add_argument("--note", type=str, default="")
     args = parser.parse_args()
-    set_reproducibility(args.seed, args.deterministic)
+    set_reproducibility(args.seed, deterministic=args.deterministic)
 
     run_dir = args.run_dir
     manifest_path = write_repro_manifest(
@@ -812,7 +834,7 @@ def main():
         note=args.note,
     )
     config_path, data_path, ckpt_root, gs_out_dir = _resolve_run_paths(run_dir)
-    with open(config_path) as f:
+    with config_path.open() as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
@@ -827,7 +849,7 @@ def main():
     pairwise_global_steps = {P, P + T // 2, P + T - 1, P + T + U // 2, P + T + U - 1}
 
     if not ckpt_root.exists():
-        print(f"No checkpoints directory in {run_dir}, nothing to do.", flush=True)
+        logger.info("No checkpoints directory in %s, nothing to do.", run_dir)
         return
 
     logs_dir = run_dir / "logs"
@@ -840,15 +862,15 @@ def main():
         if ckpt_dir.exists():
             sample_cfg_path = pkl_root / f"{label}.pkl"
             if sample_cfg_path.exists():
-                with open(sample_cfg_path, "rb") as f:
-                    pickle.load(f)
+                with sample_cfg_path.open("rb") as f:
+                    pickle.load(f)  # noqa: S301
             break
 
     n_workers = args.n_workers or gpu_cfg.gradsim_workers
-    print(f"{gpu_cfg.summary()}", flush=True)
-    print(f"Grad-sim: batch_size={gs_bs}, workers={n_workers}", flush=True)
+    logger.info("%s", gpu_cfg.summary())
+    logger.info("Grad-sim: batch_size=%d, workers=%d", gs_bs, n_workers)
     active = [k for k, v in GRAD_METRICS.items() if v]
-    print(f"Active metrics: {active}", flush=True)
+    logger.info("Active metrics: %s", active)
 
     jobs = []
     for j in job_entries:
@@ -860,8 +882,8 @@ def main():
         result_path = pkl_root / f"{label}.pkl"
         if not result_path.exists():
             continue
-        with open(result_path, "rb") as f:
-            result = pickle.load(f)
+        with result_path.open("rb") as f:
+            result = pickle.load(f)  # noqa: S301
         cfg = result["config"]
 
         for pt_file in sorted(ckpt_dir.glob("step_*.pt")):
@@ -892,17 +914,18 @@ def main():
             )
 
     if not jobs:
-        print("No checkpoint jobs found.", flush=True)
+        logger.info("No checkpoint jobs found.")
         return
 
-    print(f"Jobs: {len(jobs)} checkpoints across {len(job_entries)} labels", flush=True)
+    logger.info("Jobs: %d checkpoints across %d labels", len(jobs), len(job_entries))
 
-    with open(data_path, "rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+    with data_path.open("rb") as f:
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     worker_script = str(Path(__file__))
 
-    def build_cmd(script, job_path, data_path_tmp, output_path):
+    def build_cmd(script: str, job_path: str, data_path_tmp: str, output_path: str) -> list[str]:
+        """Build the subprocess command for a gradient worker."""
         return [
             sys.executable,
             script,
@@ -917,9 +940,10 @@ def main():
             str(gs_bs),
         ]
 
-    def on_done(jr, n_done, n_total):
+    def on_done(jr: Any, n_done: int, n_total: int) -> None:
+        """Log completion status of a gradient worker job."""
         status = "ok" if jr.success else f"FAIL: {jr.error[:80]}"
-        print(f"  [{n_done}/{n_total}] {jr.label}: {status}", flush=True)
+        logger.info("  [%d/%d] %s: %s", n_done, n_total, jr.label, status)
 
     results = run_job_pool(
         jobs=jobs,
@@ -932,7 +956,6 @@ def main():
         tmp_prefix="grad_sim_",
     )
 
-    # Collect results per label, sorted by step
     _LIST_KEYS = ("step", "phase", "burst_vs_other")
     _LAYER_DICT_KEYS = (
         "per_layer_sim",
@@ -1014,8 +1037,7 @@ def main():
             snap["phase"] = d["phase"]
             per_label[parent]["pairwise_snapshots"].append(snap)
 
-    # Sort all time-series by step
-    for label, entry in per_label.items():
+    for entry in per_label.values():
         gsl = entry["grad_sim_log"]
         if not gsl["step"]:
             continue
@@ -1047,7 +1069,6 @@ def main():
 
         entry["pairwise_snapshots"].sort(key=lambda s: s["step"])
 
-    # Write per-label JSON files
     for j in job_entries:
         label = j["label"]
         if label not in per_label:
@@ -1064,10 +1085,9 @@ def main():
             "pairwise_snapshots": entry["pairwise_snapshots"],
             "grad_projection_log": gsl.get("grad_projection", {}),
         }
-        with open(gs_out_dir / f"{label}.json", "w") as f:
+        with (gs_out_dir / f"{label}.json").open("w") as f:
             json.dump(record, f)
 
-    # Update all_results.pkl
     logs_dir = run_dir / "logs"
     all_results_path = (
         (logs_dir / "all_results.pkl")
@@ -1075,26 +1095,26 @@ def main():
         else (run_dir / "all_results.pkl")
     )
     if all_results_path.exists():
-        with open(all_results_path, "rb") as f:
-            all_results = pickle.load(f)
+        with all_results_path.open("rb") as f:
+            all_results = pickle.load(f)  # noqa: S301
         for r in all_results:
             label = r["label"]
             if label in per_label:
                 r["grad_sim_log"] = per_label[label]["grad_sim_log"]
                 r["pairwise_snapshots"] = per_label[label]["pairwise_snapshots"]
-        with open(all_results_path, "wb") as f:
+        with all_results_path.open("wb") as f:
             pickle.dump(all_results, f)
-        print(f"Updated all_results.pkl with grad-sim data for {len(per_label)} labels", flush=True)
+        logger.info("Updated all_results.pkl with grad-sim data for %d labels", len(per_label))
 
     if args.delete_checkpoints:
-        import shutil
+        import shutil  # noqa: PLC0415
 
         shutil.rmtree(ckpt_root)
-        print("Cleaned up checkpoints", flush=True)
+        logger.info("Cleaned up checkpoints")
 
     n_success = sum(result.success for result in results)
-    print(f"Grad-sim done: {len(per_label)} labels, {n_success}/{len(results)} ok", flush=True)
-    print(f"repro_manifest: {manifest_path}", flush=True)
+    logger.info("Grad-sim done: %d labels, %d/%d ok", len(per_label), n_success, len(results))
+    logger.info("repro_manifest: %s", manifest_path)
 
 
 if __name__ == "__main__":

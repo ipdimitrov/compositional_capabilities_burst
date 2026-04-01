@@ -5,17 +5,19 @@ configurations.  Finetune and forget are shown as a single continuous
 timeline per burst fraction wherever possible.
 """
 
+import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 
-# ── smoothing helper ──────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
-
-def _smooth(vals, alpha=0.3):
+def _smooth(vals: list[float], alpha: float = 0.3) -> list[float]:
     """Exponential moving average smoothing."""
     out = []
     s = vals[0]
@@ -25,53 +27,54 @@ def _smooth(vals, alpha=0.3):
     return out
 
 
-# ── colour helpers ────────────────────────────────────────────────────────
-
-
 def _frac_color(frac: float) -> str:
-    """Red (100%) -> Blue (0%) gradient."""
-    import colorsys
+    """Map burst fraction to a red-to-blue colour hex string."""
+    import colorsys  # noqa: PLC0415
 
     h = 0.0 + (1.0 - frac) * 0.58
     r, g, b = colorsys.hls_to_rgb(h, 0.42, 0.72)
     return f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
 
 
-def _tag_to_frac(tag):
+def _tag_to_frac(tag: str) -> float:
+    """Extract burst fraction from a tag string like 'burst_50'."""
     try:
         return int(tag.split("_")[1]) / 100
     except (IndexError, ValueError):
         return 0.5
 
 
-def _tag_color(tag):
+def _tag_color(tag: str) -> str:
+    """Get colour for a tag string."""
     return _frac_color(_tag_to_frac(tag))
 
 
-def _pair_ft_fg(ft_results, fg_results):
-    """Pair finetune and forget results by tag.  Returns list of (ft, fg) tuples."""
+def _pair_ft_fg(
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+) -> list[tuple[dict, dict | None]]:
+    """Pair finetune and forget results by tag."""
     ft_list = ft_results if isinstance(ft_results, list) else [ft_results]
     fg_list = fg_results if isinstance(fg_results, list) else [fg_results]
     fg_by_tag = {r["tag"]: r for r in fg_list}
     return [(ft, fg_by_tag.get(ft["tag"])) for ft in ft_list]
 
 
-def _offset_fg_steps(ft_log, fg_log):
+def _offset_fg_steps(ft_log: dict, fg_log: dict) -> list[int]:
     """Return forget steps offset so they continue from the end of finetune."""
     ft_end = ft_log["step"][-1] if ft_log["step"] else 0
     return [s + ft_end for s in fg_log["step"]]
 
 
-def _phase_boundary(ax, ft_log):
+def _phase_boundary(ax: Axes, ft_log: dict) -> None:
     """Draw a vertical dashed line at the finetune/forget boundary."""
     if ft_log["step"]:
         ax.axvline(ft_log["step"][-1], color="black", linewidth=1, linestyle="--", alpha=0.4)
 
 
-# ── phase plots (continuous finetune → forget) ───────────────────────────
 
 
-def plot_pretrain(pretrain_result, ax=None):
+def plot_pretrain(pretrain_result: dict, ax: Axes | None = None) -> Axes:
+    """Plot pretrain accuracy curves."""
     log = pretrain_result["log"]
     if ax is None:
         _, ax = plt.subplots(1, 1, figsize=(8, 4))
@@ -82,22 +85,23 @@ def plot_pretrain(pretrain_result, ax=None):
     ax.set_title("Pretrain Phase")
     ax.legend()
     ax.set_ylim(-0.05, 1.05)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
     return ax
 
 
-def plot_accuracy(ft_results, fg_results, figsize=(14, 5)):
-    """Burst and background accuracy on a continuous finetune → forget axis."""
+def plot_accuracy(
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    figsize: tuple[int, int] = (14, 5),
+) -> Figure:
+    """Burst and background accuracy on a continuous finetune-forget axis."""
     fig, (ax_burst, ax_other) = plt.subplots(1, 2, figsize=figsize, sharey=True)
     drawn_boundary = False
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
-        # burst accuracy
         ax_burst.plot(
             ft_log["step"], ft_log["acc_burst"], color=color, linewidth=2, label=ft["tag"]
         )
-        # other accuracy
         ax_other.plot(
             ft_log["step"], ft_log["acc_other"], color=color, linewidth=2, label=ft["tag"]
         )
@@ -117,13 +121,16 @@ def plot_accuracy(ft_results, fg_results, figsize=(14, 5)):
         ax.set_title(title)
         ax.set_ylim(-0.05, 1.05)
         ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
+        ax.grid(visible=True, alpha=0.3)
     fig.tight_layout()
     return fig
 
 
-def plot_loss(ft_results, fg_results, figsize=(14, 5)):
-    """Burst and background loss on a continuous finetune → forget axis."""
+def plot_loss(
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    figsize: tuple[int, int] = (14, 5),
+) -> Figure:
+    """Burst and background loss on a continuous finetune-forget axis."""
     fig, (ax_burst, ax_other) = plt.subplots(1, 2, figsize=figsize, sharey=True)
     drawn_boundary = False
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
@@ -150,21 +157,23 @@ def plot_loss(ft_results, fg_results, figsize=(14, 5)):
         ax.set_ylabel("Loss")
         ax.set_title(title)
         ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
+        ax.grid(visible=True, alpha=0.3)
     fig.tight_layout()
     return fig
 
 
-def plot_full_trajectory(pretrain_result, finetune_results, forget_results, figsize=(18, 10)):
-    """Pretrain + continuous finetune→forget for accuracy and loss."""
+def plot_full_trajectory(  # noqa: C901, PLR0915
+    pretrain_result: dict, finetune_results: list[dict] | dict,
+    forget_results: list[dict] | dict, figsize: tuple[int, int] = (18, 10),
+) -> Figure:
+    """Plot pretrain plus continuous finetune-forget for accuracy and loss."""
     fig = plt.figure(figsize=figsize)
     gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
 
-    # pretrain
     ax = fig.add_subplot(gs[0, 0])
     plot_pretrain(pretrain_result, ax)
 
-    # burst accuracy
+    # ── phase plots: finetune | forget ────────────────────────────────────
     ax = fig.add_subplot(gs[0, 1])
     drawn = False
     for ft, fg in _pair_ft_fg(finetune_results, forget_results):
@@ -182,9 +191,8 @@ def plot_full_trajectory(pretrain_result, finetune_results, forget_results, figs
     ax.set_title("Burst Accuracy")
     ax.set_ylim(-0.05, 1.05)
     ax.legend(fontsize=6)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
-    # background accuracy
     ax = fig.add_subplot(gs[0, 2])
     drawn = False
     for ft, fg in _pair_ft_fg(finetune_results, forget_results):
@@ -202,9 +210,8 @@ def plot_full_trajectory(pretrain_result, finetune_results, forget_results, figs
     ax.set_title("Background Accuracy")
     ax.set_ylim(-0.05, 1.05)
     ax.legend(fontsize=6)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
-    # burst loss
     ax = fig.add_subplot(gs[1, 1])
     drawn = False
     for ft, fg in _pair_ft_fg(finetune_results, forget_results):
@@ -221,9 +228,8 @@ def plot_full_trajectory(pretrain_result, finetune_results, forget_results, figs
     ax.set_ylabel("Loss")
     ax.set_title("Burst Loss")
     ax.legend(fontsize=6)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
-    # background loss
     ax = fig.add_subplot(gs[1, 2])
     drawn = False
     for ft, fg in _pair_ft_fg(finetune_results, forget_results):
@@ -240,16 +246,18 @@ def plot_full_trajectory(pretrain_result, finetune_results, forget_results, figs
     ax.set_ylabel("Loss")
     ax.set_title("Background Loss")
     ax.legend(fontsize=6)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
     fig.suptitle("Full Training Trajectory", fontsize=14, fontweight="bold")
     return fig
 
 
-# ── summary table ─────────────────────────────────────────────────────────
 
 
-def summary_table(finetune_results, forget_results):
+def summary_table(
+    finetune_results: list[dict] | dict, forget_results: list[dict] | dict,
+) -> list[dict]:
+    """Log a summary table and return rows as dicts."""
     if isinstance(finetune_results, dict):
         finetune_results = [finetune_results]
     if isinstance(forget_results, dict):
@@ -261,8 +269,8 @@ def summary_table(finetune_results, forget_results):
         f"{'Tag':<15} {'Burst%':>6} {'Peak':>6} {'End':>6} "
         f"{'Drop%':>6} {'AUC':>8} {'95%-life':>8} {'80%-life':>8}"
     )
-    print(header)
-    print("-" * len(header))
+    logger.info(header)
+    logger.info("-" * len(header))
     for tag, ft in ft_by_tag.items():
         fg = fg_by_tag.get(tag)
         row = {"tag": tag, "burst_frac": ft["burst_frac"], "peak_burst": ft["peak_burst"]}
@@ -287,10 +295,10 @@ def summary_table(finetune_results, forget_results):
                 }
             )
 
-        def _fmt(v, f=".3f"):
+        def _fmt(v: object, f: str = ".3f") -> str:
             return f"{v:{f}}" if isinstance(v, (int, float)) else str(v)
 
-        print(
+        logger.info(
             f"{row['tag']:<15} {row['burst_frac'] * 100:>5.0f}% "
             f"{_fmt(row['peak_burst']):>6} {_fmt(row.get('end_burst', '-')):>6} "
             f"{_fmt(row.get('dropoff_pct', '-'), '.1f'):>6} "
@@ -304,7 +312,8 @@ def summary_table(finetune_results, forget_results):
 # ── comparative charts ────────────────────────────────────────────────────
 
 
-def plot_peak_vs_frac(finetune_results, ax=None):
+def plot_peak_vs_frac(finetune_results: list[dict] | dict, ax: Axes | None = None) -> Axes:
+    """Scatter plot of peak burst accuracy vs burst fraction."""
     if isinstance(finetune_results, dict):
         finetune_results = [finetune_results]
     if ax is None:
@@ -319,11 +328,14 @@ def plot_peak_vs_frac(finetune_results, ax=None):
     ax.set_title("Peak Accuracy vs Concentration")
     ax.xaxis.set_major_formatter(mticker.PercentFormatter(1.0))
     ax.set_ylim(-0.05, 1.05)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
     return ax
 
 
-def plot_bg_loss_vs_forgetting(finetune_results, forget_results, figsize=(14, 5)):
+def plot_bg_loss_vs_forgetting(
+    finetune_results: list[dict] | dict, forget_results: list[dict] | dict,
+    figsize: tuple[int, int] = (14, 5),
+) -> Figure:
     """End-of-FT background loss/acc vs forgetting severity."""
     ft_list = finetune_results if isinstance(finetune_results, list) else [finetune_results]
     fg_list = forget_results if isinstance(forget_results, list) else [forget_results]
@@ -343,7 +355,6 @@ def plot_bg_loss_vs_forgetting(finetune_results, forget_results, figsize=(14, 5)
         fracs.append(ft["burst_frac"])
         colors.append(_frac_color(ft["burst_frac"]))
 
-    # Left: end-of-FT bg loss vs drop%
     ax1.scatter(end_bg_loss, drop_pcts, c=colors, s=80, zorder=3)
     for i, ft in enumerate([f for f in ft_list if fg_by_tag.get(f["tag"])]):
         ax1.annotate(
@@ -356,9 +367,8 @@ def plot_bg_loss_vs_forgetting(finetune_results, forget_results, figsize=(14, 5)
     ax1.set_xlabel("BG Loss at End of Finetune")
     ax1.set_ylabel("Accuracy Drop During Forget (%)")
     ax1.set_title("BG Loss at End of FT → Forgetting")
-    ax1.grid(True, alpha=0.3)
+    ax1.grid(visible=True, alpha=0.3)
 
-    # Right: end-of-FT bg accuracy vs drop%
     ax2.scatter(end_bg_acc, drop_pcts, c=colors, s=80, zorder=3)
     for i, ft in enumerate([f for f in ft_list if fg_by_tag.get(f["tag"])]):
         ax2.annotate(
@@ -371,13 +381,14 @@ def plot_bg_loss_vs_forgetting(finetune_results, forget_results, figsize=(14, 5)
     ax2.set_xlabel("BG Accuracy at End of Finetune")
     ax2.set_ylabel("Accuracy Drop During Forget (%)")
     ax2.set_title("BG Accuracy at End of FT → Forgetting")
-    ax2.grid(True, alpha=0.3)
+    ax2.grid(visible=True, alpha=0.3)
 
     fig.tight_layout()
     return fig
 
 
-def plot_retention_vs_frac(forget_results, ax=None):
+def plot_retention_vs_frac(forget_results: list[dict] | dict, ax: Axes | None = None) -> Axes:
+    """Bar chart of reversion AUC per burst fraction."""
     if isinstance(forget_results, dict):
         forget_results = [forget_results]
     if ax is None:
@@ -391,7 +402,7 @@ def plot_retention_vs_frac(forget_results, ax=None):
     ax.set_xticklabels(tags, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("Reversion AUC")
     ax.set_title("Knowledge Retention (higher = more retained)")
-    ax.grid(True, alpha=0.3, axis="y")
+    ax.grid(visible=True, alpha=0.3, axis="y")
     return ax
 
 
@@ -400,11 +411,13 @@ def plot_retention_vs_frac(forget_results, ax=None):
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def plot_weight_drift(ft_results, fg_results, figsize=(14, 5)):
-    """Weight drift: left = from pretrained, right = from finetuned (forget only)."""
+def plot_weight_drift(
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    figsize: tuple[int, int] = (14, 5),
+) -> Figure:
+    """Plot weight drift from pretrained and from finetuned."""
     fig, (ax_pt, ax_ft) = plt.subplots(1, 2, figsize=figsize)
 
-    # Left: drift from pretrained (continuous FT → forget)
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
@@ -427,9 +440,8 @@ def plot_weight_drift(ft_results, fg_results, figsize=(14, 5)):
     ax_pt.set_ylabel("L2 Distance from Pretrained")
     ax_pt.set_title("Drift from Pretrained")
     ax_pt.legend(fontsize=7)
-    ax_pt.grid(True, alpha=0.3)
+    ax_pt.grid(visible=True, alpha=0.3)
 
-    # Right: drift from finetuned (forget phase only)
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         if fg is None:
             continue
@@ -448,22 +460,20 @@ def plot_weight_drift(ft_results, fg_results, figsize=(14, 5)):
     ax_ft.set_ylabel("L2 Distance from Finetuned")
     ax_ft.set_title("Drift from Finetuned (forget phase)")
     ax_ft.legend(fontsize=7)
-    ax_ft.grid(True, alpha=0.3)
+    ax_ft.grid(visible=True, alpha=0.3)
 
     fig.tight_layout()
     return fig
 
 
-def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
-    """Gradient norms on a continuous finetune→forget axis.
-
-    Top: burst-only and bg-only norms (finetune only, forget has no burst training).
-    Bottom-left: burst/bg ratio (finetune).  Bottom-right: bg norm continuous.
-    """
+def plot_grad_norms(  # noqa: C901, PLR0915
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    figsize: tuple[int, int] = (14, 8),
+) -> Figure:
+    """Plot gradient norms on a continuous finetune-forget axis."""
     ft_list = ft_results if isinstance(ft_results, list) else [ft_results]
     fig, axes = plt.subplots(2, 2, figsize=figsize)
 
-    # Top-left: burst gradient norm (finetune only)
     ax = axes[0, 0]
     for r in ft_list:
         log = r["log"]
@@ -480,9 +490,8 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
     ax.set_ylabel("Gradient Norm")
     ax.set_title("Burst-Only Gradient Norm")
     ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
-    # Top-right: background gradient norm continuous (finetune bg → forget bg)
     ax = axes[0, 1]
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         color = _frac_color(ft["burst_frac"])
@@ -506,9 +515,8 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
     ax.set_ylabel("Gradient Norm")
     ax.set_title("Background Gradient Norm")
     ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
-    # Bottom-left: burst/bg ratio (finetune only)
     ax = axes[1, 0]
     for r in ft_list:
         log = r["log"]
@@ -530,9 +538,8 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
     ax.set_ylabel("Burst / Background Ratio")
     ax.set_title("Gradient Norm Ratio (finetune)")
     ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
-    # Bottom-right: training batch gradient norm continuous
     ax = axes[1, 1]
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         color = _frac_color(ft["burst_frac"])
@@ -555,15 +562,18 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
     ax.set_ylabel("Gradient Norm")
     ax.set_title("Training Gradient Norm")
     ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
     fig.suptitle("Gradient Norms Over Training", fontsize=13, fontweight="bold")
     fig.tight_layout()
     return fig
 
 
-def plot_grad_cosine(ft_results, fg_results, figsize=(12, 5)):
-    """Gradient cosine (burst vs bg) on a single continuous axis per frac."""
+def plot_grad_cosine(
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    figsize: tuple[int, int] = (12, 5),
+) -> Figure:
+    """Plot gradient cosine between burst and background on a continuous axis."""
     fig, ax = plt.subplots(figsize=figsize)
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         color = _frac_color(ft["burst_frac"])
@@ -592,16 +602,16 @@ def plot_grad_cosine(ft_results, fg_results, figsize=(12, 5)):
     ax.set_ylabel("Cosine Similarity")
     ax.set_title("Gradient Alignment: Burst vs Background")
     ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
     fig.tight_layout()
     return fig
 
 
-def plot_grad_alignment_norm(ft_results, fg_results, figsize=(14, 5)):
-    """Left: cosine(burst,bg) * ||grad_bg||.  Right: cosine(burst,bg) * ||grad_burst||.
-
-    Continuous finetune → forget axis.
-    """
+def plot_grad_alignment_norm(
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    figsize: tuple[int, int] = (14, 5),
+) -> Figure:
+    """Plot alignment times gradient norm on a continuous axis."""
     fig, (ax_bg, ax_burst) = plt.subplots(1, 2, figsize=figsize)
     drawn_boundary = False
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
@@ -611,7 +621,6 @@ def plot_grad_alignment_norm(ft_results, fg_results, figsize=(14, 5)):
             continue
         cos_ft = ft_log["grad_cosine_burst_bg"]
 
-        # finetune phase
         if "grad_norm_bg" in ft_log:
             prod_bg = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_bg"], strict=False)]
             ax_bg.plot(ft_log["step"], _smooth(prod_bg), color=color, linewidth=2, label=ft["tag"])
@@ -621,7 +630,6 @@ def plot_grad_alignment_norm(ft_results, fg_results, figsize=(14, 5)):
                 ft_log["step"], _smooth(prod_burst), color=color, linewidth=2, label=ft["tag"]
             )
 
-        # forget phase
         if fg is not None:
             fg_log = fg["log"]
             fg_steps = _offset_fg_steps(ft_log, fg_log)
@@ -641,20 +649,20 @@ def plot_grad_alignment_norm(ft_results, fg_results, figsize=(14, 5)):
             drawn_boundary = True
 
     for ax, title in [
-        (ax_bg, "Alignment × BG Grad Norm"),
-        (ax_burst, "Alignment × Burst Grad Norm"),
+        (ax_bg, "Alignment x BG Grad Norm"),
+        (ax_burst, "Alignment x Burst Grad Norm"),
     ]:
         ax.axhline(0, color="black", linewidth=0.5, linestyle=":")
         ax.set_xlabel("Step (finetune | forget)")
-        ax.set_ylabel("cos(burst,bg) × ||grad||")
+        ax.set_ylabel("cos(burst,bg) x ||grad||")
         ax.set_title(title)
         ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
+        ax.grid(visible=True, alpha=0.3)
     fig.tight_layout()
     return fig
 
 
-def _build_layer_cosine_matrix(results):
+def _build_layer_cosine_matrix(results: dict) -> tuple[np.ndarray, list[int], list[str]] | None:
     """Extract per-layer gradient cosine over steps into (steps, layers) matrix."""
     log = results["log"]
     key = "grad_cosine_per_layer"
@@ -667,19 +675,18 @@ def _build_layer_cosine_matrix(results):
     return matrix, steps, layer_names
 
 
-def plot_grad_norm_entropy(ft_results, fg_results, figsize=(14, 5)):
-    """Gradient norm entropy on a continuous finetune → forget axis.
-
-    High entropy = gradient spread evenly across blocks.
-    Low entropy = gradient concentrated in few blocks.
-    """
+def plot_grad_norm_entropy(
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    figsize: tuple[int, int] = (14, 5),
+) -> Figure:
+    """Plot gradient norm entropy on a continuous finetune-forget axis."""
     fig, (ax_burst, ax_bg) = plt.subplots(1, 2, figsize=figsize, sharey=True)
     drawn_boundary = False
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
 
-        # burst entropy (finetune only — no burst training during forget)
+        # finetune only: no burst objective during forget
         if ft_log.get("grad_norm_entropy_burst"):
             ax_burst.plot(
                 ft_log["step"],
@@ -689,7 +696,6 @@ def plot_grad_norm_entropy(ft_results, fg_results, figsize=(14, 5)):
                 label=ft["tag"],
             )
 
-        # bg entropy: continuous finetune → forget
         if ft_log.get("grad_norm_entropy_bg"):
             ax_bg.plot(
                 ft_log["step"],
@@ -713,24 +719,23 @@ def plot_grad_norm_entropy(ft_results, fg_results, figsize=(14, 5)):
     ax_burst.set_ylabel("Entropy")
     ax_burst.set_title("Burst Gradient Norm Entropy")
     ax_burst.legend(fontsize=7)
-    ax_burst.grid(True, alpha=0.3)
+    ax_burst.grid(visible=True, alpha=0.3)
 
     ax_bg.set_xlabel("Step (finetune | forget)")
     ax_bg.set_ylabel("Entropy")
     ax_bg.set_title("Background Gradient Norm Entropy")
     ax_bg.legend(fontsize=7)
-    ax_bg.grid(True, alpha=0.3)
+    ax_bg.grid(visible=True, alpha=0.3)
 
     fig.tight_layout()
     return fig
 
 
-def plot_grad_cosine_per_layer(ft_results, fg_results, figsize_per=(14, 3.5)):
-    """Heatmap of per-block gradient cosine over training.
-
-    One row per burst fraction.  Finetune and forget are concatenated
-    horizontally with a vertical line at the phase boundary.
-    """
+def plot_grad_cosine_per_layer(
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    figsize_per: tuple[float, float] = (14, 3.5),
+) -> Figure:
+    """Heatmap of per-block gradient cosine over training."""
     pairs = _pair_ft_fg(ft_results, fg_results)
     n_rows = len(pairs)
     fig, axes = plt.subplots(
@@ -786,7 +791,9 @@ def plot_grad_cosine_per_layer(ft_results, fg_results, figsize_per=(14, 3.5)):
 # ── post-hoc analysis plots ──────────────────────────────────────────────
 
 
-def plot_per_layer_drift(analysis, phase="pt_ft", figsize=(12, 5)):
+def plot_per_layer_drift(
+    analysis: dict, phase: str = "pt_ft", figsize: tuple[int, int] = (12, 5),
+) -> Figure | None:
     """Heatmap of per-layer weight drift across burst fractions."""
     tags = sorted(analysis.keys(), key=lambda t: analysis[t]["burst_frac"], reverse=True)
     if not tags:
@@ -814,8 +821,10 @@ def plot_per_layer_drift(analysis, phase="pt_ft", figsize=(12, 5)):
     return fig
 
 
-def plot_svd_analysis(analysis, phase="pt_ft", figsize=(14, 5)):
-    """Effective rank and spectral norm of weight deltas for a given phase."""
+def plot_svd_analysis(
+    analysis: dict, phase: str = "pt_ft", figsize: tuple[int, int] = (14, 5),
+) -> Figure | None:
+    """Plot effective rank and spectral norm of weight deltas for a given phase."""
     tags = sorted(analysis.keys(), key=lambda t: analysis[t]["burst_frac"], reverse=True)
     if not tags:
         return None
@@ -854,19 +863,19 @@ def plot_svd_analysis(analysis, phase="pt_ft", figsize=(14, 5)):
     ax1.set_ylabel("Effective Rank")
     ax1.set_title(f"Effective Rank ({phase_label})")
     ax1.legend(fontsize=7)
-    ax1.grid(True, alpha=0.3)
+    ax1.grid(visible=True, alpha=0.3)
     ax2.set_xticks(range(len(layers)))
     ax2.set_xticklabels(layers, rotation=90, fontsize=6)
     ax2.set_ylabel("Spectral Norm")
     ax2.set_title(f"Spectral Norm ({phase_label})")
     ax2.legend(fontsize=7)
-    ax2.grid(True, alpha=0.3)
+    ax2.grid(visible=True, alpha=0.3)
     fig.tight_layout()
     return fig
 
 
-def plot_cka_matrices(analysis, figsize=(5, 5)):
-    """CKA heatmaps: pretrained vs finetuned on burst data."""
+def plot_cka_matrices(analysis: dict, figsize: tuple[int, int] = (5, 5)) -> Figure | None:
+    """Plot CKA heatmaps of pretrained vs finetuned on burst data."""
     tags = sorted(analysis.keys(), key=lambda t: analysis[t]["burst_frac"], reverse=True)
     n = len(tags)
     if n == 0:
@@ -887,7 +896,10 @@ def plot_cka_matrices(analysis, figsize=(5, 5)):
     return fig
 
 
-def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
+def plot_summary_dashboard(  # noqa: PLR0915
+    ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    analysis: dict, figsize: tuple[int, int] = (16, 10),
+) -> Figure:
     """Multi-panel dashboard relating burst_frac to all key metrics."""
     ft_list = ft_results if isinstance(ft_results, list) else [ft_results]
     fg_list = fg_results if isinstance(fg_results, list) else [fg_results]
@@ -903,7 +915,7 @@ def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
     ax.set_xlabel("Burst Fraction")
     ax.set_ylabel("Peak Burst Accuracy")
     ax.set_title("Acquisition")
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
     ax = fig.add_subplot(gs[0, 1])
     fg_by_tag = {r["tag"]: r for r in fg_list}
@@ -913,7 +925,7 @@ def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
     ax.set_xlabel("Burst Fraction")
     ax.set_ylabel("Accuracy Drop (%)")
     ax.set_title("Forgetting Severity")
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
     ax = fig.add_subplot(gs[0, 2])
     drifts = [analysis[t]["drift_pt_ft"]["total"] if t in analysis else 0 for t in tags]
@@ -922,7 +934,7 @@ def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
     ax.set_xlabel("Burst Fraction")
     ax.set_ylabel("Total L2 Drift")
     ax.set_title("Weight Displacement")
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
     ax = fig.add_subplot(gs[1, 0])
     mean_ranks = []
@@ -938,7 +950,7 @@ def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
     ax.set_xlabel("Burst Fraction")
     ax.set_ylabel("Mean Effective Rank")
     ax.set_title("Weight Delta Dimensionality")
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
     ax = fig.add_subplot(gs[1, 1])
     mean_cka = []
@@ -952,7 +964,7 @@ def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
     ax.set_xlabel("Burst Fraction")
     ax.set_ylabel("Mean CKA (diagonal)")
     ax.set_title("Representation Preservation")
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
     ax = fig.add_subplot(gs[1, 2])
     end_gc = []
@@ -968,7 +980,7 @@ def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
     ax.set_xlabel("Burst Fraction")
     ax.set_ylabel("Gradient Cosine (end)")
     ax.set_title("Final Burst-BG Alignment")
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
 
     fig.suptitle(
         "Burst Concentration vs Forgetting: Summary Dashboard",
@@ -982,13 +994,9 @@ def plot_summary_dashboard(ft_results, fg_results, analysis, figsize=(16, 10)):
 # ── function distribution diagnostic ─────────────────────────────────────
 
 
-def plot_function_distribution(data, figsize=None):
-    """Show which functions appear in each slot for pretraining vs finetuning.
-
-    Each subplot is one slot (depth position).  Bars show how many tasks use
-    each function index in that slot, colored by phase (pretrain / finetune).
-    """
-    from collections import Counter
+def plot_function_distribution(data: dict, figsize: tuple[int, int] | None = None) -> Figure:
+    """Show which functions appear in each slot for pretraining vs finetuning."""
+    from collections import Counter  # noqa: PLC0415
 
     bg_pool = data["bg_pool"]
     target_pool = data["target_pool"]
@@ -1038,7 +1046,7 @@ def plot_function_distribution(data, figsize=None):
         ax.set_xlabel("Function")
         ax.set_title(f"Slot {slot_idx + 1}")
         ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3, axis="y")
+        ax.grid(visible=True, alpha=0.3, axis="y")
 
     axes[0].set_ylabel("# Tasks using this function")
     fig.suptitle(
@@ -1051,14 +1059,17 @@ def plot_function_distribution(data, figsize=None):
 # ── save full report ──────────────────────────────────────────────────────
 
 
-def save_report(pt, ft_results, fg_results, out_dir, analysis=None, prefix="report"):
+def save_report(  # noqa: PLR0913
+    pt: dict, ft_results: list[dict] | dict, fg_results: list[dict] | dict,
+    out_dir: str | Path, analysis: dict | None = None, prefix: str = "report",
+) -> None:
     """Save all charts to a directory."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ft_list = ft_results if isinstance(ft_results, list) else [ft_results]
     fg_list = fg_results if isinstance(fg_results, list) else [fg_results]
 
-    def _save(fig, name):
+    def _save(fig: Figure | None, name: str) -> None:
         if fig is not None:
             fig.savefig(out_dir / f"{prefix}_{name}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
@@ -1088,4 +1099,4 @@ def save_report(pt, ft_results, fg_results, out_dir, analysis=None, prefix="repo
         _save(plot_cka_matrices(analysis), "11_cka_matrices")
         _save(plot_summary_dashboard(ft_list, fg_list, analysis), "12_summary_dashboard")
 
-    print(f"Report saved to {out_dir}")
+    logger.info(f"Report saved to {out_dir}")

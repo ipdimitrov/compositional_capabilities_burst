@@ -12,15 +12,20 @@ After running:
   data/_heavy/<run_name>/       (symlink to <run_dir>/_heavy/)
 """
 
+import logging
 import shutil
 import sys
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
+EXPECTED_PARTS = 2
 HEAVY_EXTENSIONS = {".pkl", ".pt"}
 HEAVY_DIRS = {"checkpoints"}
 
 
-def organize(run_dir: Path):
+def organize(run_dir: Path) -> None:
+    """Move heavy files into _heavy/ and create top-level symlinks."""
     heavy_dir = run_dir / "_heavy"
     heavy_dir.mkdir(exist_ok=True)
 
@@ -34,13 +39,13 @@ def organize(run_dir: Path):
                 shutil.rmtree(dest)
             shutil.move(str(p), str(dest))
             p.symlink_to(dest.resolve())
-            print(f"  moved dir  {p.name}/ -> _heavy/{p.name}/")
+            logger.info(f"  moved dir  {p.name}/ -> _heavy/{p.name}/")
 
         elif p.is_file() and p.suffix in HEAVY_EXTENSIONS:
             dest = heavy_dir / p.name
             shutil.move(str(p), str(dest))
             p.symlink_to(dest.resolve())
-            print(f"  moved file {p.name} -> _heavy/{p.name}")
+            logger.info(f"  moved file {p.name} -> _heavy/{p.name}")
 
     for sub in run_dir.iterdir():
         if sub.name.startswith("_") or not sub.is_dir() or sub.is_symlink():
@@ -52,7 +57,7 @@ def organize(run_dir: Path):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(p), str(dest))
                 p.symlink_to(dest.resolve())
-                print(f"  moved file {rel} -> _heavy/{rel}")
+                logger.info(f"  moved file {rel} -> _heavy/{rel}")
 
     light_size = sum(
         f.stat().st_size
@@ -60,17 +65,14 @@ def organize(run_dir: Path):
         if f.is_file() and not f.is_symlink() and "_heavy" not in f.parts
     )
     heavy_size = sum(f.stat().st_size for f in heavy_dir.rglob("*") if f.is_file())
-    print(f"\n  Download folder: {light_size / 1e6:.1f} MB")
-    print(f"  Heavy (excluded): {heavy_size / 1e6:.1f} MB")
+    logger.info(f"\n  Download folder: {light_size / 1e6:.1f} MB")
+    logger.info(f"  Heavy (excluded): {heavy_size / 1e6:.1f} MB")
 
     _mirror_to_top_level(run_dir)
 
 
-def _mirror_to_top_level(run_dir: Path):
-    """Create top-level data/{results,logs,_heavy}/<run_name>/ symlinks.
-
-    This lets users download only data/results/ to get all run outputs.
-    """
+def _mirror_to_top_level(run_dir: Path) -> None:
+    """Create top-level data/{results,logs,_heavy}/<run_name>/ symlinks."""
     data_dir = run_dir.parent
     run_name = run_dir.name
 
@@ -84,17 +86,18 @@ def _mirror_to_top_level(run_dir: Path):
         if link.exists() or link.is_symlink():
             link.unlink()
         link.symlink_to(src.resolve())
-        print(f"  mirrored {folder_name}/{run_name}/ -> {src}")
+        logger.info(f"  mirrored {folder_name}/{run_name}/ -> {src}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <run_dir>")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if len(sys.argv) < EXPECTED_PARTS:
+        logger.info(f"Usage: {sys.argv[0]} <run_dir>")
         sys.exit(1)
     rd = Path(sys.argv[1])
     if not rd.exists():
-        print(f"Not found: {rd}")
+        logger.info(f"Not found: {rd}")
         sys.exit(1)
-    print(f"Organizing {rd}...")
+    logger.info(f"Organizing {rd}...")
     organize(rd)
-    print("Done.")
+    logger.info("Done.")

@@ -4,6 +4,7 @@ Each job is pickled, spawned as a separate Python subprocess (own CUDA context),
 and results are collected via pickle files in a temp directory.
 """
 
+import logging
 import pickle
 import subprocess
 import tempfile
@@ -13,9 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class JobResult:
+    """Result of a single subprocess job."""
+
     label: str
     success: bool
     data: Any = None
@@ -23,7 +28,7 @@ class JobResult:
     elapsed: float = 0.0
 
 
-def run_job_pool(
+def run_job_pool(  # noqa: C901, PLR0912, PLR0913, PLR0915
     jobs: list[dict],
     worker_script: str,
     build_cmd: Callable,
@@ -41,31 +46,32 @@ def run_job_pool(
     n_workers = min(len(jobs), n_workers)
     tmp_dir = Path(tempfile.mkdtemp(prefix=tmp_prefix))
 
-    data_path = str(tmp_dir / "_shared_data.pkl")
+    data_path = tmp_dir / "_shared_data.pkl"
     if data_payload is not None:
-        with open(data_path, "wb") as f:
+        with data_path.open("wb") as f:
             pickle.dump(data_payload, f)
 
     t0 = time.time()
     retry_counts: dict[int, int] = {}
 
-    def launch(idx, max_popen_retries=5):
+    def launch(idx: int, max_popen_retries: int = 5) -> tuple[subprocess.Popen, Path]:
+        """Pickle job, spawn subprocess, return (proc, output_path)."""
         job = jobs[idx]
-        job_path = str(tmp_dir / f"_job_{idx}.pkl")
-        out_path = str(tmp_dir / f"_result_{idx}.pkl")
-        with open(job_path, "wb") as f:
+        job_path = tmp_dir / f"_job_{idx}.pkl"
+        out_path = tmp_dir / f"_result_{idx}.pkl"
+        with job_path.open("wb") as f:
             pickle.dump(job, f)
-        cmd = build_cmd(worker_script, job_path, data_path, out_path)
+        cmd = build_cmd(worker_script, str(job_path), str(data_path), str(out_path))
         for attempt in range(max_popen_retries):
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                return proc, out_path
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603
+                return proc, out_path  # noqa: TRY300
             except BlockingIOError:
                 time.sleep(2**attempt)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603
         return proc, out_path
 
-    active: dict[str, tuple[int, subprocess.Popen, str]] = {}
+    active: dict[str, tuple[int, subprocess.Popen, Path]] = {}
     next_idx = 0
     for _ in range(min(n_workers, len(jobs))):
         proc, out_path = launch(next_idx)
@@ -83,9 +89,9 @@ def run_job_pool(
             idx, proc, out_path = active.pop(label)
             elapsed = time.time() - t0
 
-            if proc.returncode == 0 and Path(out_path).exists():
-                with open(out_path, "rb") as f:
-                    data = pickle.load(f)
+            if proc.returncode == 0 and out_path.exists():
+                with out_path.open("rb") as f:
+                    data = pickle.load(f)  # noqa: S301
                 jr = JobResult(label=label, success=True, data=data, elapsed=elapsed)
                 n_done += 1
                 results.append(jr)
@@ -97,10 +103,9 @@ def run_job_pool(
                     retry_counts[idx] = attempt + 1
                     retry_queue.append(idx)
                     se = proc.stderr.read().decode() if proc.stderr else ""
-                    print(
-                        f"  [{label}] failed (attempt {attempt + 1}/{max_retries + 1}), "
-                        f"retrying... stderr: {se[:200]}",
-                        flush=True,
+                    logger.warning(
+                        "  [%s] failed (attempt %d/%d), retrying... stderr: %s",
+                        label, attempt + 1, max_retries + 1, se[:200],
                     )
                 else:
                     se = proc.stderr.read().decode() if proc.stderr else ""

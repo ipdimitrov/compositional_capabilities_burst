@@ -10,14 +10,14 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from simple.interp import (
+from burst.notebook.interp import (
     _get_grad_vector,
     grad_norm_entropy,
     gradient_cosine_per_layer,
     state_dict_cpu,
     weight_drift_l2,
 )
-from simple.model import (
+from burst.notebook.model import (
     MODEL_DEFAULTS,
     cosine_lr,
     eval_accuracy,
@@ -29,8 +29,10 @@ from simple.model import (
     train_step,
 )
 
+GRAD_NORM_EPS = 1e-6
 
-def forget(
+
+def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     data: dict,
     finetune_ckpt: str | Path,
     out_dir: str | Path,
@@ -54,20 +56,7 @@ def forget(
     seed: int = 42,
     quiet: bool = False,
 ) -> dict:
-    """Run reversion phase: background-only training, measure forgetting.
-
-    Args:
-        data: dict from make_data()
-        finetune_ckpt: path to finetuned checkpoint
-        out_dir: directory for outputs
-        steps: reversion training steps
-        thresholds: reversion lifetime thresholds (fraction of peak)
-        tag: label for filenames (inherited from finetune tag if None)
-
-    Returns:
-        dict with: log, peak_burst, reversion_auc, life_times, dropoff_abs,
-                   dropoff_pct, tag
-    """
+    """Run reversion phase with background-only training and measure forgetting."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -93,15 +82,13 @@ def forget(
     )
     reset_optimizer(optimizer)  # fresh momentum for reversion phase
 
-    # reference state dicts for weight drift tracking
     sd_ft = state_dict_cpu(net)
     sd_pt = None
     if pretrain_ckpt is not None:
-        from simple.interp import load_sd
+        from burst.notebook.interp import load_sd  # noqa: PLC0415
 
         sd_pt = load_sd(pretrain_ckpt)
 
-    # measure peak burst accuracy at start of reversion
     peak_burst = eval_accuracy(net, eval_burst, prompt_len)
 
     bg_ids = list(bg_pool.keys())
@@ -154,7 +141,6 @@ def forget(
             log["loss_burst"].append(lb)
             log["lr"].append(cur_lr)
 
-            # interp metrics
             sd_now = state_dict_cpu(net)
             drift_ft = weight_drift_l2(sd_ft, sd_now)["total"]
             log["weight_drift_from_ft"].append(drift_ft)
@@ -162,21 +148,18 @@ def forget(
                 drift_pt = weight_drift_l2(sd_pt, sd_now)["total"]
                 log["weight_drift_from_pt"].append(drift_pt)
 
-            # gradient norm + cosine(burst vs bg)
             net.train()
             g_bg = _get_grad_vector(net, batch)
             log["grad_norm"].append(g_bg.norm().item())
-            # sample a burst batch from eval data for cosine
             idx = np.random.randint(len(eval_burst), size=min(batch_size, len(eval_burst)))
             burst_batch = eval_burst[idx]
             g_burst = _get_grad_vector(net, burst_batch)
             log["grad_norm_burst"].append(g_burst.norm().item())
-            import torch.nn.functional as _F
+            import torch.nn.functional as _F  # noqa: PLC0415
 
             gc = _F.cosine_similarity(g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
             log["grad_cosine_burst_bg"].append(gc)
 
-            # per-layer gradient cosine
             gc_layers = gradient_cosine_per_layer(net, burst_batch, batch)
             log["grad_cosine_per_layer"].append(gc_layers)
 
@@ -187,14 +170,13 @@ def forget(
             pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}", drift=f"{drift_ft:.3f}")
             net.train()
 
-    # -- metrics --
     accs = log["acc_burst"]
     steps_arr = log["step"]
-    _trapz = np.trapezoid
+    _trapz = getattr(np, "trapezoid", np.trapz)
     reversion_auc = float(_trapz(accs, steps_arr)) if len(accs) > 1 else 0.0
 
     life_times = {}
-    if peak_burst > 1e-6:
+    if peak_burst > GRAD_NORM_EPS:
         remaining = dict.fromkeys(thresholds, True)
         for acc_val, step_val in zip(accs, steps_arr, strict=False):
             for t in list(remaining):
@@ -210,9 +192,8 @@ def forget(
 
     end_burst = accs[-1] if accs else peak_burst
     dropoff_abs = peak_burst - end_burst
-    dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > 1e-6 else 0.0
+    dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > GRAD_NORM_EPS else 0.0
 
-    # save
     ckpt_path = out_dir / f"{tag}_reverted_ckpt.pt"
     save_model(net, ckpt_path)
     np.savez(out_dir / f"{tag}_forget_log.npz", **{k: np.array(v) for k, v in log.items()})
@@ -230,6 +211,6 @@ def forget(
     }
 
 
-def _forget_worker(kwargs):
+def _forget_worker(kwargs: dict) -> dict:
     """Pickle-able entry point for multiprocessing."""
     return forget(**kwargs)

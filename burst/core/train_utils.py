@@ -4,9 +4,15 @@ Eliminates duplication across _worker.py, probe.py, and
 scripts/probe_next_token_regimes.py.
 """
 
+from __future__ import annotations
+
 import json
 import pickle
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -25,15 +31,17 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _NET_OMEGACONF_KEYS = ("vocab_size", "context_size", "n_layer", "n_head", "n_embd")
 
 
-def _cross_entropy_logits_BTV_targets_BT(
+def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
     logits_BTV: torch.Tensor, targets_BT: torch.Tensor
 ) -> torch.Tensor:
+    """Compute cross-entropy loss after flattening batch and time dims."""
     logits_bv = rearrange(logits_BTV, "b t v -> (b t) v")
     targets_b = rearrange(targets_BT, "b t -> (b t)")
     return F.cross_entropy(logits_bv, targets_b)
 
 
 def _net_cfg(cfg: dict) -> OmegaConf:
+    """Build an OmegaConf for nanoGPT from a flat config dict."""
     return OmegaConf.create(
         {
             "compile": False,
@@ -46,10 +54,12 @@ def _net_cfg(cfg: dict) -> OmegaConf:
 
 
 def make_net_bare(cfg: dict) -> nanoGPT:
+    """Create an uncompiled nanoGPT on DEVICE."""
     return nanoGPT(_net_cfg(cfg)).to(DEVICE)
 
 
 def make_net(cfg: dict) -> nanoGPT:
+    """Create a torch.compiled nanoGPT on DEVICE."""
     net = make_net_bare(cfg)
     if DEVICE == "cuda":
         net = torch.compile(net)
@@ -57,12 +67,14 @@ def make_net(cfg: dict) -> nanoGPT:
 
 
 def load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
+    """Create a nanoGPT and load weights from a checkpoint."""
     net = nanoGPT(_net_cfg(cfg)).to(DEVICE)
     net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
     return net
 
 
 def make_optim_cfg(cfg: dict) -> OmegaConf:
+    """Build an OmegaConf for the optimizer from a flat config dict."""
     return OmegaConf.create(
         {
             "learning_rate": cfg["lr"],
@@ -75,10 +87,11 @@ def make_optim_cfg(cfg: dict) -> OmegaConf:
 
 
 def make_scaler() -> torch.amp.GradScaler:
+    """Create a GradScaler enabled only when CUDA is available."""
     return torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
 
 
-def train_step(
+def train_step(  # noqa: PLR0913
     batch_np: np.ndarray,
     net: nanoGPT,
     optimizer: torch.optim.Optimizer,
@@ -122,9 +135,9 @@ def retrain_with_callbacks(
     job: dict,
     target_pool: dict,
     bg_pool: dict,
-    on_step: callable | None = None,
+    on_step: Callable | None = None,
     max_step: int | None = None,
-):
+) -> nanoGPT:
     """Retrain a model from scratch, calling on_step(net, global_step, phase) at each step.
 
     on_step should return True to continue, False to stop early.
@@ -169,7 +182,7 @@ def retrain_with_callbacks(
     return net
 
 
-def resolve_run_paths(run_dir) -> tuple[Path, Path, Path]:
+def resolve_run_paths(run_dir: str | Path) -> tuple[Path, Path, Path]:
     """Return (config_path, logs_dir, results_dir) for both old and new layouts."""
     run_dir = Path(run_dir)
     results_dir = run_dir / "results"
@@ -185,25 +198,23 @@ def resolve_run_paths(run_dir) -> tuple[Path, Path, Path]:
     return cfg_path, ld, rd
 
 
-def load_results(run_dir):
-    """Load all_results.pkl and config.json from a run directory.
-
-    Supports both old layout (flat) and new layout (results/ + logs/).
-    """
+def load_results(run_dir: str | Path) -> tuple[list[dict], dict]:
+    """Load all_results.pkl and config.json from a run directory."""
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
 
     pkl_path = logs_dir / "all_results.pkl"
     if not pkl_path.exists():
         pkl_path = Path(run_dir) / "all_results.pkl"
 
-    with open(pkl_path, "rb") as f:
-        results = pickle.load(f)
-    with open(cfg_path) as f:
+    with pkl_path.open("rb") as f:
+        results = pickle.load(f)  # noqa: S301
+    with cfg_path.open() as f:
         cfg = json.load(f)
     return results, cfg
 
 
 def pad_to_len(arr: np.ndarray, target_len: int) -> np.ndarray:
+    """Pad or truncate the second axis of arr to target_len."""
     if arr.shape[0] == 0:
         return arr
     if arr.shape[1] >= target_len:
@@ -216,7 +227,7 @@ N_PROBE_DOCS_PER_TASK = 200
 
 
 def build_probe_docs(
-    data,
+    data: Any,
     doc_len: int,
     n_per_task: int,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -224,7 +235,8 @@ def build_probe_docs(
     other_pool = data.gen_pool(data.other_train[: min(16, len(data.other_train))], n_per_task)
     burst_pool = data.gen_pool(data.burst_train, n_per_task)
 
-    def _cat(pool):
+    def _cat(pool: dict) -> np.ndarray:
+        """Concatenate pool values and pad to doc_len."""
         if not pool:
             return np.zeros((0, doc_len), dtype=np.int64)
         out = np.concatenate(list(pool.values()))
@@ -235,7 +247,7 @@ def build_probe_docs(
 
 def compute_lr_schedule(
     cfg: dict, pretrain_steps: int | None = None, burst_steps: int | None = None
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """Compute three-phase LR schedule arrays. Returns (steps, lrs)."""
     P = pretrain_steps if pretrain_steps is not None else cfg.get("pre_burst_steps", 0)
     T = burst_steps if burst_steps is not None else cfg["total_steps"]

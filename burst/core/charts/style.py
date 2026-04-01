@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import matplotlib as mpl
 
@@ -12,6 +13,7 @@ SERIF_STACK = ["STIXGeneral", "Times New Roman", "DejaVu Serif"]
 
 
 def apply_paper_style() -> None:
+    """Set matplotlib rcParams for publication-quality figures."""
     plt.rcParams.update(
         {
             "font.family": "serif",
@@ -35,15 +37,17 @@ def apply_paper_style() -> None:
     )
 
 
-def style_axes(ax, xlabel: str, ylabel: str, title: str = "") -> None:
+def style_axes(ax: Any, xlabel: str, ylabel: str, title: str = "") -> None:
+    """Apply standard axis labels, title, and grid."""
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     if title:
         ax.set_title(title, pad=10)
-    ax.grid(True)
+    ax.grid(visible=True)
 
 
-def save_figure(fig, path: str | Path) -> None:
+def save_figure(fig: Any, path: str | Path) -> None:
+    """Save a figure to disk and close it."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
