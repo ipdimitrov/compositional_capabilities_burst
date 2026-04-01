@@ -12,11 +12,11 @@ e.g. burst_100 → 200 steps, burst_50 → 400 steps, burst_25 → 800 steps.
 
 Burst modes
 -----------
-  "current"        – original setup: steps scale inversely with concentration
+  "current"        – original setup: steps scale inversely with concentration  # noqa: RUF002
                      so total special examples are constant; batch_size fixed.
-  "constant_steps" – all schedules run BURST_BASE_STEPS; batch_size fixed.
+  "constant_steps" – all schedules run BURST_BASE_STEPS; batch_size fixed.  # noqa: RUF002
                      Only the special:other ratio in each batch differs.
-  "scaled_batch"   – all schedules run BURST_BASE_STEPS; batch_size scales
+  "scaled_batch"   – all schedules run BURST_BASE_STEPS; batch_size scales  # noqa: RUF002
                      inversely with concentration so special-per-step is constant
                      while total data per step grows for dilute schedules.
 """
@@ -79,7 +79,9 @@ UNIFORM_SCHEDULE: str = _sched_name(UNIFORM_PCT)
 
 MIXED_FRACTIONS: dict[str, float] = {_sched_name(p): p / 100.0 for p in _sorted_pcts if p != 100}
 
-SCHED_COLORS: dict[str, str] = {_sched_name(p): c for p, c in zip(_sorted_pcts, _gradient)}
+SCHED_COLORS: dict[str, str] = {
+    _sched_name(p): c for p, c in zip(_sorted_pcts, _gradient, strict=False)
+}
 
 SCHED_DISPLAY: dict[str, str] = {_sched_name(p): f"Burst {p}%" for p in _sorted_pcts}
 
@@ -121,7 +123,7 @@ def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) 
 
     All schedules see the same total special-class examples:
         burst_steps * frac = base_steps * 1.0
-    So burst_100 → base_steps, burst_50 → 2×base_steps, burst_25 → 4×base_steps.
+    So burst_100 → base_steps, burst_50 → 2×base_steps, burst_25 → 4×base_steps.  # noqa: RUF002
     """
     if schedule == "burst_100":
         return base_steps
@@ -218,9 +220,9 @@ class ExperimentConfig:
 
     def __post_init__(self):
         if self.burst_mode not in BURST_MODES:
-            raise ValueError(f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}")
+            raise ValueError(f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}")  # noqa: TRY003, EM102
         if self.n_workers == 0:
-            from burst.core.gpu import gpu_cfg
+            from burst.core.gpu import gpu_cfg  # noqa: PLC0415
 
             self.n_workers = gpu_cfg.train_workers
 
@@ -242,7 +244,7 @@ def parse_run_config(cfg: dict) -> dict:
 
     depth = cfg.get("depth") or cfg.get("task_info", {}).get("depth")
     if depth is None:
-        raise KeyError("config missing 'depth' (checked cfg.depth and cfg.task_info.depth)")
+        raise KeyError("config missing 'depth' (checked cfg.depth and cfg.task_info.depth)")  # noqa: TRY003, EM101
 
     burst_pos = cfg.get("burst_pos") or cfg.get("task_info", {}).get("burst_pos")
     if burst_pos is None:
@@ -252,7 +254,7 @@ def parse_run_config(cfg: dict) -> dict:
 
     n_a = cfg.get("n_a") or cfg.get("task_info", {}).get("n_a")
     if n_a is None:
-        raise KeyError("config missing 'n_a' (checked cfg.n_a and cfg.task_info.n_a)")
+        raise KeyError("config missing 'n_a' (checked cfg.n_a and cfg.task_info.n_a)")  # noqa: TRY003, EM101
 
     return {"depth": depth, "burst_pos": burst_pos, "n_a": n_a, "base_cfg": base_cfg}
 

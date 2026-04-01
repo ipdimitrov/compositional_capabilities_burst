@@ -9,7 +9,7 @@ Two probe types, both operating per-position on the 6 f3-output positions:
 
 Retrains each model to the target step, extracts residual-stream
 activations at every transformer layer, and produces per-regime
-accuracy curves, A−B diffs, and diff-in-diffs.
+accuracy curves, A-B diffs, and diff-in-diffs.
 
 Usage:
     python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag>
@@ -24,8 +24,9 @@ import json
 import os
 import pickle
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import matplotlib as mpl
 import numpy as np
@@ -35,7 +36,6 @@ from torch import nn
 
 mpl.use("Agg")
 from itertools import combinations
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 
@@ -451,9 +451,9 @@ def plot_ab_diffs(diffs, method, n_layers, output_dir, diffs_per_seed=None):
     ax.set_xticks(x)
     ax.set_xticklabels(layer_labels, fontsize=9)
     ax.set_xlabel("Layer", fontsize=11)
-    ax.set_ylabel("Δ accuracy (Other − Burst)", fontsize=11)
+    ax.set_ylabel("Δ accuracy (Other - Burst)", fontsize=11)
     ax.set_title(
-        f"Other−Burst Next-Token Diff — {method}\n(mean +/- 95% CI)", fontsize=13, fontweight="bold"
+        f"Other-Burst Next-Token Diff — {method}\n(mean +/- 95% CI)", fontsize=13, fontweight="bold"
     )
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.2)
@@ -559,7 +559,7 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir, step_diffs_per
     n_scheds = len(scheds)
     fig, axes = plt.subplots(1, n_scheds, figsize=(5 * n_scheds, 5), squeeze=False)
     fig.suptitle(
-        f"Other−Burst Diff — {method} (all steps, mean +/- 95% CI)", fontsize=14, fontweight="bold"
+        f"Other-Burst Diff — {method} (all steps, mean +/- 95% CI)", fontsize=14, fontweight="bold"
     )
 
     step_colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(sorted_steps)))
@@ -595,7 +595,7 @@ def plot_combined_diffs(step_diffs, method, n_layers, output_dir, step_diffs_per
         ax.set_xticks(x)
         ax.set_xticklabels(layer_labels, fontsize=8)
         ax.set_xlabel("Layer")
-        ax.set_ylabel("Δ accuracy (Other − Burst)")
+        ax.set_ylabel("Δ accuracy (Other - Burst)")
         ax.set_title(sched, fontsize=10, fontweight="bold")
         ax.set_ylim(ylim)
         ax.legend(fontsize=7)

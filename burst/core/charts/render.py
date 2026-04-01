@@ -61,7 +61,7 @@ def _plot_schedule_bars(bundle: dict, out_dir: Path) -> Path:
         axes = [axes]
 
     max_len = max(len(bars[schedule]["fractions"]) for schedule in schedules)
-    for ax, schedule in zip(axes, schedules):
+    for ax, schedule in zip(axes, schedules, strict=False):
         fracs = np.array(bars[schedule]["fractions"], dtype=float)
         xs = np.arange(len(fracs))
         ax.fill_between(xs, fracs, color=SCHED_COLORS[schedule], alpha=0.78)

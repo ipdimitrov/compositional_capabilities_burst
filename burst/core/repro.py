@@ -34,8 +34,7 @@ def set_reproducibility(seed: int, deterministic: bool) -> None:
 
 def _git_sha() -> str | None:
     try:
-        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-        return sha
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     except Exception:
         return None
 

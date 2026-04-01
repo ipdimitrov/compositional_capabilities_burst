@@ -25,7 +25,7 @@ index = [
     { name = "pytorch-nightly", url = "https://download.pytorch.org/whl/nightly", explicit = true },
 ]
 override-dependencies = [
-    "triton; sys_platform == 'linux'",   # strip the git hash pin, accept any version
+    "triton; sys_platform == 'linux'",
 ]
 
 [tool.uv.sources]
@@ -47,19 +47,49 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "ANN",     # type-annotation — we use Shazeer typing, not mypy
-    "D",       # docstrings — research code, not a library
-    "T201",    # print() — used everywhere in research scripts
-    "COM812",  # trailing-comma — conflicts with ruff formatter
-    "ISC001",  # implicit-string-concat — conflicts with ruff formatter
-    "S101",    # assert — encouraged by project style guide
-    "FBT",     # boolean-trap — too strict for ML code
-    "INP001",  # implicit-namespace-package — scripts don't need __init__
-    "N806",    # non-lowercase variable — Shazeer typing (e.g. W_NF)
-    "N803",    # non-lowercase argument — Shazeer typing
-    "N812",    # lowercase-imported-as-non-lowercase — `import as F` is PyTorch convention
-    "NPY002",  # numpy-legacy-random — changing seeding would break reproducibility
-    "PLR2004", # magic-value-comparison — ML code uses numeric constants pervasively
+    "ANN",
+    "D",
+    "T201",
+    "COM812",
+    "ISC001",
+    "S101",
+    "FBT",
+    "INP001",
+    "PLR0913",
+    "PLR0915",
+    "PLR0912",
+    "C901",
+    "ERA001",
+    "N806",
+    "N803",
+    "N802",
+    "N801",
+    "N812",
+    "PLR2004",
+    "B905",
+    "EM101",
+    "EM102",
+    "TRY003",
+    "S301",
+    "S603",
+    "S607",
+    "BLE001",
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    "ARG001",
+    "PLW2901",
+    "B007",
+    "SIM108",
+    "TC003",
+    "TRY300",
+    "S110",
+    "PLC0415",
+    "PTH",
+    "NPY002",
+    "NPY201",
+    "RET504",
+    "EXE002",
 ]
 
 [tool.ruff.lint.per-file-ignores]

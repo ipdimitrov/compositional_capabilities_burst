@@ -515,7 +515,8 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
         if "grad_norm_burst" not in log or "grad_norm_bg" not in log:
             continue
         ratio = [
-            b / (g + 1e-10) for b, g in zip(log["grad_norm_burst"], log["grad_norm_bg"])
+            b / (g + 1e-10)
+            for b, g in zip(log["grad_norm_burst"], log["grad_norm_bg"], strict=False)
         ]
         ax.plot(
             log["step"],
@@ -612,10 +613,10 @@ def plot_grad_alignment_norm(ft_results, fg_results, figsize=(14, 5)):
 
         # finetune phase
         if "grad_norm_bg" in ft_log:
-            prod_bg = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_bg"])]
+            prod_bg = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_bg"], strict=False)]
             ax_bg.plot(ft_log["step"], _smooth(prod_bg), color=color, linewidth=2, label=ft["tag"])
         if "grad_norm_burst" in ft_log:
-            prod_burst = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_burst"])]
+            prod_burst = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_burst"], strict=False)]
             ax_burst.plot(
                 ft_log["step"], _smooth(prod_burst), color=color, linewidth=2, label=ft["tag"]
             )
@@ -626,11 +627,11 @@ def plot_grad_alignment_norm(ft_results, fg_results, figsize=(14, 5)):
             fg_steps = _offset_fg_steps(ft_log, fg_log)
             cos_fg = fg_log.get("grad_cosine_burst_bg", [])
             if cos_fg and "grad_norm" in fg_log:
-                prod_bg_fg = [c * n for c, n in zip(cos_fg, fg_log["grad_norm"])]
+                prod_bg_fg = [c * n for c, n in zip(cos_fg, fg_log["grad_norm"], strict=False)]
                 ax_bg.plot(fg_steps, _smooth(prod_bg_fg), color=color, linewidth=2)
             if cos_fg and "grad_norm_burst" in fg_log and fg_log["grad_norm_burst"]:
                 prod_burst_fg = [
-                    c * n for c, n in zip(cos_fg, fg_log["grad_norm_burst"])
+                    c * n for c, n in zip(cos_fg, fg_log["grad_norm_burst"], strict=False)
                 ]
                 ax_burst.plot(fg_steps, _smooth(prod_burst_fg), color=color, linewidth=2)
 

@@ -128,7 +128,7 @@ def extract_hidden_states(net, data_np, prompt_len, batch_size=256):
     for i, block in enumerate(raw.transformer.h):
 
         def _make_hook(idx):
-            def hook_fn(module, inp, out):
+            def hook_fn(_module, _inp, out):
                 if idx not in layer_acts:
                     layer_acts[idx] = []
                 layer_acts[idx].append(out[:, prompt_len - 1, :].detach().cpu())

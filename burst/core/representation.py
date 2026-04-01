@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import pickle
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from einops import reduce
 
 from burst.core.train_utils import load_net, resolve_run_paths
 from burst.dev.probe import collect_activations_KPTN
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def build_representation_summary(
@@ -139,8 +141,5 @@ def _subsample_pool(pool: dict, n_docs: int, *, seed: int) -> np.ndarray:
 
 def _mean_ci_payload(values: np.ndarray) -> dict[str, float]:
     mean = float(np.mean(values))
-    if values.size <= 1:
-        ci = 0.0
-    else:
-        ci = float(1.96 * np.std(values) / np.sqrt(values.size))
+    ci = 0.0 if values.size <= 1 else float(1.96 * np.std(values) / np.sqrt(values.size))
     return {"mean": mean, "ci": ci}

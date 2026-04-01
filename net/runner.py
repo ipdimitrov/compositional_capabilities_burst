@@ -193,7 +193,7 @@ def evaluate(net, evalLoaders, space_pos, device_info):
     device, dt = device_info
     net.eval()
 
-    for idx, split in enumerate(("train", "all")):
+    for idx, _split in enumerate(("train", "all")):
         loader = evalLoaders[idx]
 
         sequences, total_loss, total_acc = 0.0, 0.0, 0.0
@@ -245,7 +245,7 @@ def evaluate_freegen(net, evalLoaders, seq_info, device_info, lstm=False):
     if lstm:
         net.use_hidden = True
 
-    for idx, split in enumerate(("train", "all")):
+    for idx, _split in enumerate(("train", "all")):
         loader = evalLoaders[idx]
 
         sequences, _total_loss, total_acc = 0.0, 0.0, 0.0

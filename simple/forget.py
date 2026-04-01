@@ -89,7 +89,7 @@ def forget(
         finetune_ckpt, vocab_size, context_size, n_layer=n_layer, n_embd=n_embd, n_head=n_head
     )
     optimizer = make_optimizer(
-        net, lr=lr * lr_start_frac, weight_decay=weight_decay, beta1=beta1, beta2=beta2
+        net, lr=lr * lr_start_frac, _weight_decay=weight_decay, beta1=beta1, beta2=beta2
     )
     reset_optimizer(optimizer)  # fresh momentum for reversion phase
 

@@ -399,7 +399,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
 
     peak_burst = max(burst_accs) if burst_accs else 0
     reversion_end_burst = reversion_accs[-1] if reversion_accs else peak_burst
-    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    _trapz = np.trapezoid
     reversion_auc = (
         float(_trapz(reversion_accs, reversion_steps_rel)) if len(reversion_accs) > 1 else 0.0
     )
@@ -408,7 +408,7 @@ def run(job, shared_data_path, run_dir, progress_dir):
     life_times: dict[str, int] = {}
     if peak_burst > 1e-6:
         remaining = dict.fromkeys(thresholds, True)
-        for acc_val, us in zip(reversion_accs, reversion_steps_rel):
+        for acc_val, us in zip(reversion_accs, reversion_steps_rel, strict=False):
             for t in list(remaining):
                 if acc_val <= peak_burst * t:
                     life_times[reversion_life_key(t)] = us

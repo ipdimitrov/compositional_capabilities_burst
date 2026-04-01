@@ -79,7 +79,7 @@ def pretrain(
     torch.manual_seed(seed)
 
     net = make_model(**model_cfg)
-    optimizer = make_optimizer(net, lr=lr, weight_decay=weight_decay, beta1=beta1, beta2=beta2)
+    optimizer = make_optimizer(net, lr=lr, _weight_decay=weight_decay, beta1=beta1, beta2=beta2)
 
     log = {
         "step": [],

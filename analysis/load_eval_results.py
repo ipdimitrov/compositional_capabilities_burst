@@ -46,7 +46,7 @@ metrics = [
     ("Token Accuracy (Teacher-Forced)", teacher_acc_mean, teacher_acc_std, "tab:green"),
 ]
 
-for ax, (title, mean, std, color) in zip(axes, metrics):
+for ax, (title, mean, std, color) in zip(axes, metrics, strict=False):
     ax.plot(iterations, mean, color=color, marker="o", markersize=4)
     ax.fill_between(iterations, mean - std, mean + std, alpha=0.2, color=color)
     ax.set_title(title)
@@ -119,7 +119,7 @@ fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 for ax, grid, title in zip(
     axes,
     [step_acc_grid, final_acc_grid],
-    ["Step-by-Step Accuracy", "Final Output Accuracy"],
+    ["Step-by-Step Accuracy", "Final Output Accuracy"], strict=False,
 ):
     im = ax.imshow(grid, cmap="RdYlGn", vmin=0, vmax=1, aspect="auto")
     ax.set_xticks(range(len(displacements)))

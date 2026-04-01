@@ -77,7 +77,7 @@ def load_model(
     return net
 
 
-def make_optimizer(net, lr=1e-3, weight_decay=1e-3, beta1=0.9, beta2=0.9):
+def make_optimizer(net, lr=1e-3, _weight_decay=1e-3, beta1=0.9, beta2=0.9):
     decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() >= 2]
     no_decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() < 2]
     groups = [
