@@ -46,26 +46,31 @@ run_experiment() {
 
 # ── depth=3 pos=3 (priority: run first) ──────────────────────────────────
 run_experiment 3 3 constant_steps
-run_experiment 3 3 scaled_batch
-run_experiment 3 3 current
+# run_experiment 3 3 scaled_batch
+# run_experiment 3 3 current
 
-# # ── depth=3 pos=2 (overnight) ────────────────────────────────────────────
+# ── depth=3 pos=2 (overnight) ────────────────────────────────────────────
 # run_experiment 3 2 current
-# run_experiment 3 2 constant_steps
+run_experiment 3 2 constant_steps
 # run_experiment 3 2 scaled_batch
 
-# # ── depth=3 pos=1 (overnight) ────────────────────────────────────────────
+# ── depth=3 pos=1 (overnight) ────────────────────────────────────────────
 # run_experiment 3 1 current
-# run_experiment 3 1 constant_steps
+run_experiment 3 1 constant_steps
 # run_experiment 3 1 scaled_batch
 
-# # ── depth=4 ─────────────────────────────────────────────────────────────
-# run_experiment 4 1 current
-# run_experiment 4 2 current
-# run_experiment 4 3 current
-# run_experiment 4 4 current
+# ── depth=4 ─────────────────────────────────────────────────────────────
+run_experiment 4 1 constant_steps
+run_experiment 4 2 constant_steps
+run_experiment 4 3 constant_steps
+run_experiment 4 4 constant_steps
 
-# # ── depth=5 ─────────────────────────────────────────────────────────────
-# run_experiment 5 2 current
+# ── depth=5 ─────────────────────────────────────────────────────────────
+run_experiment 5 1 constant_steps
+run_experiment 5 2 constant_steps
+run_experiment 5 3 constant_steps
+run_experiment 5 4 constant_steps
+run_experiment 5 5 constant_steps
+
 
 echo "=== all runs complete ==="

@@ -264,7 +264,7 @@ def compute_loss_basin_random_directions(
     n_seeds: int = 2,
     n_directions: int = 50,
     n_points: int = 8,
-    max_epsilon: float = 0.03,
+    max_epsilon: float = 1.0,
 ) -> dict:
     """For each schedule, sample n_directions random directions and evaluate loss along each.
 
@@ -608,6 +608,33 @@ def plot_loss_basin(data: dict, out_dir: Path):
         plt.close(fig_var)
 
 
+def plot_loss_basin_per_schedule(data: dict, out_dir: Path):
+    """Per-schedule chart: burst variance vs other variance on the same axes."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    schedules = sorted(data.keys(), key=_sched_order)
+
+    for sched in schedules:
+        d = data[sched]
+        epsilons = d["epsilons"]
+        burst_arr = np.array(d["burst_losses"]) if d["burst_losses"] else None
+        other_arr = np.array(d["other_losses"]) if d["other_losses"] else None
+        if burst_arr is None and other_arr is None:
+            continue
+
+        fig, ax = plt.subplots(figsize=(14, 7))
+        if burst_arr is not None:
+            ax.plot(epsilons, burst_arr.var(axis=0), color="#E91E63", lw=2, label="Burst data")
+        if other_arr is not None:
+            ax.plot(epsilons, other_arr.var(axis=0), color="#2196F3", lw=2, label="Other data")
+
+        _style(ax, "ε (perturbation)", "Variance of Loss",
+               f"{_label(sched)}: Variance Across Directions (burst vs other)")
+        ax.legend(fontsize=11, loc="best")
+        fig.tight_layout()
+        fig.savefig(out_dir / f"basin_variance_compare_{sched}.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+
 def plot_weight_norms(data: dict, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     schedules = sorted(data.keys(), key=_sched_order)
@@ -936,7 +963,10 @@ def main():
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--n-seeds", type=int, default=3)
     parser.add_argument("--basin-runs", type=int, default=50)
-    parser.add_argument("--basin-points", type=int, default=8)
+    parser.add_argument("--basin-points", type=int, default=5)
+    parser.add_argument("--basin-max-epsilon", type=float, default=1.0)
+    parser.add_argument("--only-basin-sharpness", action="store_true",
+                        help="Only run loss basin + sharpness (skip all other stages)")
     args = parser.parse_args()
 
     run_dir = args.run_dir
@@ -962,35 +992,39 @@ def main():
     P = rc["base_cfg"].get("pre_burst_steps", 0)
 
     t_total_start = time.time()
+    basin_time = 0.0
 
-    print("\n[1/8] Layerwise weight difference...", flush=True)
-    t0 = time.time()
-    wd_data = compute_layerwise_weight_diff(ckpt_root, all_results, n_seeds=args.n_seeds)
-    plot_layerwise_weight_diff(wd_data, out_dir / "weight_diff", P=P)
-    print(f"  Done in {time.time() - t0:.1f}s", flush=True)
+    if not args.only_basin_sharpness:
+        print("\n[1/8] Layerwise weight difference...", flush=True)
+        t0 = time.time()
+        wd_data = compute_layerwise_weight_diff(ckpt_root, all_results, n_seeds=args.n_seeds)
+        plot_layerwise_weight_diff(wd_data, out_dir / "weight_diff", P=P)
+        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
-    print("\n[2/8] Per-layer activations...", flush=True)
-    t0 = time.time()
-    act_data = compute_layerwise_activations(
-        ckpt_root, all_results, burst_docs_BL, other_docs_BL, n_seeds=args.n_seeds)
-    plot_layerwise_activations(act_data, out_dir / "activations")
-    print(f"  Done in {time.time() - t0:.1f}s", flush=True)
+        print("\n[2/8] Per-layer activations...", flush=True)
+        t0 = time.time()
+        act_data = compute_layerwise_activations(
+            ckpt_root, all_results, burst_docs_BL, other_docs_BL, n_seeds=args.n_seeds)
+        plot_layerwise_activations(act_data, out_dir / "activations")
+        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
     print(f"\n[3/8] Loss basin ({args.basin_runs} directions, {args.basin_points} points)...", flush=True)
     t0 = time.time()
     basin_data = compute_loss_basin_random_directions(
         ckpt_root, all_results, burst_docs_BL, other_docs_BL,
-        n_seeds=min(args.n_seeds, 2), n_directions=args.basin_runs,
-        n_points=args.basin_points)
+        n_seeds=args.n_seeds, n_directions=args.basin_runs,
+        n_points=args.basin_points, max_epsilon=args.basin_max_epsilon)
     plot_loss_basin(basin_data, out_dir / "loss_basin")
+    plot_loss_basin_per_schedule(basin_data, out_dir / "loss_basin")
     basin_time = time.time() - t0
     print(f"  Done in {basin_time:.1f}s", flush=True)
 
-    print("\n[4/8] Weight norm hypothesis...", flush=True)
-    t0 = time.time()
-    wn_data = compute_weight_norms(ckpt_root, all_results, n_seeds=args.n_seeds)
-    plot_weight_norms(wn_data, out_dir / "weight_norms")
-    print(f"  Done in {time.time() - t0:.1f}s", flush=True)
+    if not args.only_basin_sharpness:
+        print("\n[4/8] Weight norm hypothesis...", flush=True)
+        t0 = time.time()
+        wn_data = compute_weight_norms(ckpt_root, all_results, n_seeds=args.n_seeds)
+        plot_weight_norms(wn_data, out_dir / "weight_norms")
+        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
     print("\n[5/8] Sharpness (from basin_metrics)...", flush=True)
     t0 = time.time()
@@ -1004,22 +1038,23 @@ def main():
         ls_data = {}
     print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
-    print("\n[6/8] Gradient norms and cosim...", flush=True)
-    t0 = time.time()
-    from burst.pres_charts import load_grad_sim_data
-    gs_records = load_grad_sim_data(run_dir)
-    if gs_records:
-        plot_grad_norms_and_cosim(gs_records, out_dir / "grad_norms", P=P)
-    print(f"  Done in {time.time() - t0:.1f}s", flush=True)
+    if not args.only_basin_sharpness:
+        print("\n[6/8] Gradient norms and cosim...", flush=True)
+        t0 = time.time()
+        from burst.pres_charts import load_grad_sim_data
+        gs_records = load_grad_sim_data(run_dir)
+        if gs_records:
+            plot_grad_norms_and_cosim(gs_records, out_dir / "grad_norms", P=P)
+        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
-    print("\n[7/8] Grad rank investigation...", flush=True)
-    t0 = time.time()
-    rank_info = investigate_grad_rank(run_dir)
-    if rank_info.get("issues"):
-        print(f"  Issues found: {rank_info['issues'][:5]}", flush=True)
-    if gs_records:
-        plot_grad_rank(gs_records, out_dir / "grad_rank")
-    print(f"  Done in {time.time() - t0:.1f}s", flush=True)
+        print("\n[7/8] Grad rank investigation...", flush=True)
+        t0 = time.time()
+        rank_info = investigate_grad_rank(run_dir)
+        if rank_info.get("issues"):
+            print(f"  Issues found: {rank_info['issues'][:5]}", flush=True)
+        if gs_records:
+            plot_grad_rank(gs_records, out_dir / "grad_rank")
+        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
     print("\n[8/8] Saving results...", flush=True)
     summary = {
@@ -1028,8 +1063,7 @@ def main():
         "basin_runs": args.basin_runs,
         "basin_points": args.basin_points,
         "n_seeds": args.n_seeds,
-        "weight_norm_data": {s: v for s, v in wn_data.items()},
-        "grad_rank_issues": rank_info.get("issues", []),
+        "only_basin_sharpness": args.only_basin_sharpness,
     }
     with open(out_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2, default=str)
