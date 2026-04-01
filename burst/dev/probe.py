@@ -14,33 +14,37 @@ Usage:
     python burst/probe.py data/burst_d<depth>_<run_tag> --n-workers 38
 """
 
-import sys
-import os
-import argparse
-import pickle
-import json
+from __future__ import annotations
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import argparse
+import json
+import pickle
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+sys.path.insert(0, str(Path(__file__).parent / ".." / ".."))
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from pathlib import Path
+from torch import nn
 
-from synthetic.init import set_seed
-from net.nanogpt import nanoGPT
+from burst.config import DATA_SEED, parse_run_config
+from burst.core.gpu import gpu_cfg
+from burst.core.parallel import run_job_pool
 from burst.core.train.experiment import DepthNData, build_data
 from burst.core.train_utils import (
     DEVICE,
+    N_PROBE_DOCS_PER_TASK,
+    build_probe_docs,
     load_net,
     retrain_with_callbacks,
-    build_probe_docs,
-    N_PROBE_DOCS_PER_TASK,
 )
-from burst.config import DATA_SEED, parse_run_config
-from burst.core.parallel import run_job_pool
-from burst.core.gpu import gpu_cfg
+from synthetic.init import set_seed
+
+if TYPE_CHECKING:
+    from net.nanogpt import nanoGPT
 
 PROBE_SEED = 1337
 
@@ -63,6 +67,7 @@ COLLECT_BATCH_SIZE = 512
 
 
 def get_token_position_labels(doc_len: int, seq_len: int, depth: int) -> list[str]:
+    """Build human-readable labels for each token position in a document."""
     labels = ["S"]
     labels += [f"F{depth - i}" for i in range(depth)]
     labels += ["sp0"]
@@ -74,7 +79,7 @@ def get_token_position_labels(doc_len: int, seq_len: int, depth: int) -> list[st
 
 
 @torch.no_grad()
-def collect_activations_KPTN(
+def collect_activations_KPTN(  # noqa: N802
     net: nanoGPT,
     docs_BL: np.ndarray,
 ) -> list[torch.Tensor]:
@@ -163,12 +168,11 @@ def fit_probes_at_checkpoint(
     Returns dict with:
         'train_acc_KT': (K, T) array — val-split accuracy on train compositions
     """
-    np.random.seed(PROBE_SEED)
-
+    rng = np.random.default_rng(PROBE_SEED)
     n_other = min(len(other_docs_BL), max_samples)
     n_burst = min(len(burst_docs_BL), max_samples)
-    idx_other = np.random.choice(len(other_docs_BL), n_other, replace=False)
-    idx_burst = np.random.choice(len(burst_docs_BL), n_burst, replace=False)
+    idx_other = rng.choice(len(other_docs_BL), n_other, replace=False)
+    idx_burst = rng.choice(len(burst_docs_BL), n_burst, replace=False)
     combined_BL = np.concatenate([other_docs_BL[idx_other], burst_docs_BL[idx_burst]], axis=0)
 
     acts_K_PTN = collect_activations_KPTN(net, combined_BL)
@@ -189,7 +193,7 @@ def fit_probes_at_checkpoint(
     return {"train_acc_KT": train_acc_KT}
 
 
-def probe_from_checkpoints(
+def probe_from_checkpoints(  # noqa: PLR0913
     job: dict,
     ckpt_dir: Path,
     other_docs_BL: np.ndarray,
@@ -210,7 +214,7 @@ def probe_from_checkpoints(
     for step in checkpoint_steps:
         if step not in available_ckpts:
             continue
-        print(f"    Loading ckpt step {step}...", flush=True)
+        print(f"    Loading ckpt step {step}...", flush=True)  # noqa: T201
         net = load_net(cfg, available_ckpts[step])
         probe_results[step] = fit_probes_at_checkpoint(
             net, other_docs_BL, burst_docs_BL, probe_max_samples
@@ -226,7 +230,7 @@ def probe_from_checkpoints(
     }
 
 
-def retrain_and_probe(
+def retrain_and_probe(  # noqa: PLR0913
     job: dict,
     target_pool: dict,
     bg_pool: dict,
@@ -239,9 +243,9 @@ def retrain_and_probe(
     checkpoint_set = set(checkpoint_steps)
     probe_results = {}
 
-    def on_step(net, global_step, phase):
+    def on_step(net: nanoGPT, global_step: int, _phase: str) -> None:
         if global_step in checkpoint_set:
-            print(f"    Probing step {global_step} ({phase})...", flush=True)
+            print(f"    Probing step {global_step}...", flush=True)  # noqa: T201
             probe_results[global_step] = fit_probes_at_checkpoint(
                 net, other_docs_BL, burst_docs_BL, probe_max_samples
             )
@@ -263,7 +267,7 @@ def _default_checkpoint_steps(total_steps: int, reversion_steps: int, every: int
     return sorted(steps)
 
 
-def _worker_main():
+def _worker_main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-path", required=True)
     parser.add_argument("--data-path", required=True)
@@ -272,10 +276,10 @@ def _worker_main():
     parser.add_argument("--probe-max-samples", type=int, required=True)
     wargs = parser.parse_args()
 
-    with open(wargs.job_path, "rb") as f:
-        job = pickle.load(f)
-    with open(wargs.data_path, "rb") as f:
-        tp, bp, other_docs, burst_docs = pickle.load(f)
+    with Path(wargs.job_path).open("rb") as f:
+        job = pickle.load(f)  # noqa: S301
+    with Path(wargs.data_path).open("rb") as f:
+        tp, bp, other_docs, burst_docs = pickle.load(f)  # noqa: S301
 
     ckpt_dir = job.get("ckpt_dir")
     if ckpt_dir and Path(ckpt_dir).exists():
@@ -292,11 +296,14 @@ def _worker_main():
             job, tp, bp, other_docs, burst_docs, wargs.checkpoint_steps, wargs.probe_max_samples
         )
 
-    with open(wargs.output_path, "wb") as f:
+    with Path(wargs.output_path).open("wb") as f:
         pickle.dump(result, f)
 
 
-def main():
+def main() -> None:  # noqa: PLR0915
+    """Run linear probes across training checkpoints."""
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
+
     parser = argparse.ArgumentParser(
         description="Linear probes for Other-vs-Burst representation analysis"
     )
@@ -314,71 +321,86 @@ def main():
         help="Max samples per class for activation collection",
     )
     parser.add_argument(
-        "--seed-override", type=int, default=None, help="Run only this seed across all schedules"
+        "--seed-override", type=int, default=None,
+        help="Run only this seed across all schedules",
     )
     parser.add_argument("--n-workers", type=int, default=None)
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    from burst.core.train_utils import resolve_run_paths
-
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
-    with open(cfg_path) as f:
+    with cfg_path.open() as f:
         cfg = json.load(f)
 
     rc = parse_run_config(cfg)
-    bcfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
+    bcfg = rc["base_cfg"]
+    depth, burst_pos, n_a = rc["depth"], rc["burst_pos"], rc["n_a"]
     total_steps = bcfg["total_steps"]
     reversion_steps = bcfg["reversion_steps"]
 
     checkpoint_steps = _default_checkpoint_steps(
         total_steps, reversion_steps, args.checkpoint_every
     )
-    print(
+    print(  # noqa: T201
         f"Checkpoint steps ({len(checkpoint_steps)}): "
         f"{checkpoint_steps[:8]}...{checkpoint_steps[-3:]}"
     )
 
-    print(f"Rebuilding data (seed={DATA_SEED})...")
+    print(f"Rebuilding data (seed={DATA_SEED})...")  # noqa: T201
     tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
-    print(
+    print(  # noqa: T201
         f"  Other tasks: {ti['n_other_train']}  "
         f"Burst tasks: {ti['n_burst_train']}  "
         f"doc_len: {ti['doc_len']}"
     )
 
     set_seed(DATA_SEED)
-    d = DepthNData(bcfg["n_alphabets"], bcfg["seq_len"], n_a, depth, burst_pos, DATA_SEED)
+    d = DepthNData(
+        bcfg["n_alphabets"], bcfg["seq_len"], n_a, depth, burst_pos, DATA_SEED,
+    )
     doc_len = ti["doc_len"]
     other_docs, burst_docs = build_probe_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
-    print(f"  Probe data: Other={other_docs.shape[0]} Burst={burst_docs.shape[0]}")
+    print(  # noqa: T201
+        f"  Probe data: Other={other_docs.shape[0]} Burst={burst_docs.shape[0]}",
+    )
 
     token_labels = get_token_position_labels(doc_len, bcfg["seq_len"], depth)
-    print(f"  Token positions ({len(token_labels)}): {token_labels[:6]}...{token_labels[-3:]}")
+    print(  # noqa: T201
+        f"  Token positions ({len(token_labels)}): "
+        f"{token_labels[:6]}...{token_labels[-3:]}",
+    )
 
     ckpt_root = logs_dir / "checkpoints"
     use_checkpoints = ckpt_root.exists()
     if use_checkpoints:
-        print(f"  Found checkpoints at {ckpt_root}, will load instead of retraining")
+        print(  # noqa: T201
+            f"  Found checkpoints at {ckpt_root}, will load instead of retraining",
+        )
     else:
-        print("  No checkpoints found, will retrain from scratch")
+        print("  No checkpoints found, will retrain from scratch")  # noqa: T201
 
     jobs_cfg = cfg["jobs"]
     if args.jobs:
         jobs_cfg = [j for j in jobs_cfg if j["label"] in args.jobs]
     if args.seed_override is not None:
-        jobs_cfg = [j for j in jobs_cfg if j["seed"] == args.seed_override]
+        jobs_cfg = [
+            j for j in jobs_cfg if j["seed"] == args.seed_override
+        ]
 
     n_workers = min(len(jobs_cfg), args.n_workers or gpu_cfg.probe_workers)
-    print(f"\n{gpu_cfg.summary()}")
-    print(f"Probing {len(jobs_cfg)} jobs on {DEVICE}, workers: {n_workers}")
-    print(f"Model: {bcfg['n_layer']}L/{bcfg['n_embd']}d/{bcfg['n_head']}H")
-    print(f"Mode: {'checkpoint-loading' if use_checkpoints else 'retrain'}\n")
+    print(f"\n{gpu_cfg.summary()}")  # noqa: T201
+    print(  # noqa: T201
+        f"Probing {len(jobs_cfg)} jobs on {DEVICE}, workers: {n_workers}",
+    )
+    n_layer, n_embd, n_head = bcfg["n_layer"], bcfg["n_embd"], bcfg["n_head"]
+    print(f"Model: {n_layer}L/{n_embd}d/{n_head}H")  # noqa: T201
+    mode = "checkpoint-loading" if use_checkpoints else "retrain"
+    print(f"Mode: {mode}\n")  # noqa: T201
 
     probe_dir = run_dir / "probes"
     probe_dir.mkdir(exist_ok=True)
 
-    jobs = []
+    jobs: list[dict] = []
     for jcfg in jobs_cfg:
         label, seed, schedule = jcfg["label"], jcfg["seed"], jcfg["schedule"]
         job_entry = {
@@ -398,50 +420,50 @@ def main():
 
     ckpt_args = [str(s) for s in checkpoint_steps]
 
-    def build_cmd(script, job_path, data_path, output_path):
-        return (
-            [
-                sys.executable,
-                script,
-                "--worker",
-                "--job-path",
-                job_path,
-                "--data-path",
-                data_path,
-                "--output-path",
-                output_path,
-                "--checkpoint-steps",
-            ]
-            + ckpt_args
-            + ["--probe-max-samples", str(args.probe_max_samples)]
-        )
+    def build_cmd(
+        script: str, job_path: str, data_path: str, output_path: str,
+    ) -> list[str]:
+        return [
+            sys.executable, script, "--worker",
+            "--job-path", job_path,
+            "--data-path", data_path,
+            "--output-path", output_path,
+            "--checkpoint-steps", *ckpt_args,
+            "--probe-max-samples", str(args.probe_max_samples),
+        ]
 
-    all_probe_results = []
+    all_probe_results: list[dict] = []
 
-    def on_done(jr, n_done, n_total):
-        if jr.success:
-            result = jr.data
+    def on_done(jr: object, _n_done: int, _n_total: int) -> None:
+        if jr.success:  # type: ignore[attr-defined]
+            result = jr.data  # type: ignore[attr-defined]
             result["checkpoint_steps"] = checkpoint_steps
             result["token_labels"] = token_labels
             result["n_layers"] = bcfg["n_layer"]
             result["total_steps"] = total_steps
             result["reversion_steps"] = reversion_steps
-            with open(probe_dir / f"{result['label']}_probe.pkl", "wb") as f:
+            pkl = probe_dir / f"{result['label']}_probe.pkl"
+            with pkl.open("wb") as f:
                 pickle.dump(result, f)
             all_probe_results.append(result)
-            pkl_path = probe_dir / f"{result['label']}_probe.pkl"
-            print(
-                f"  [{n_done}/{n_total}] {jr.label:30s} -> {pkl_path} ({jr.elapsed:.0f}s)",
+            lbl = jr.label  # type: ignore[attr-defined]
+            elapsed = jr.elapsed  # type: ignore[attr-defined]
+            print(  # noqa: T201
+                f"  [{_n_done}/{_n_total}] {lbl:30s} -> {pkl} ({elapsed:.0f}s)",
                 flush=True,
             )
         else:
-            print(f"  FAIL [{n_done}/{n_total}]: {jr.label}", flush=True)
-            if jr.error:
-                print(f"    {jr.error}", flush=True)
+            print(  # noqa: T201
+                f"  FAIL [{_n_done}/{_n_total}]: "
+                f"{jr.label}",  # type: ignore[attr-defined]
+                flush=True,
+            )
+            if jr.error:  # type: ignore[attr-defined]
+                print(f"    {jr.error}", flush=True)  # noqa: T201
 
     run_job_pool(
         jobs=jobs,
-        worker_script=os.path.abspath(__file__),
+        worker_script=str(Path(__file__).resolve()),
         build_cmd=build_cmd,
         on_done=on_done,
         n_workers=n_workers,
@@ -450,7 +472,7 @@ def main():
         tmp_prefix="probe_lr_",
     )
 
-    with open(probe_dir / "all_probes.pkl", "wb") as f:
+    with (probe_dir / "all_probes.pkl").open("wb") as f:
         pickle.dump(all_probe_results, f)
 
     meta = {
@@ -463,11 +485,11 @@ def main():
         "probe_seed": PROBE_SEED,
         "jobs": [j["label"] for j in jobs_cfg],
     }
-    with open(probe_dir / "probe_meta.json", "w") as f:
+    with (probe_dir / "probe_meta.json").open("w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nAll probes saved to {probe_dir}")
-    print(f"Plot: python burst/plot_probes.py {run_dir}")
+    print(f"\nAll probes saved to {probe_dir}")  # noqa: T201
+    print(f"Plot: python burst/plot_probes.py {run_dir}")  # noqa: T201
 
 
 if __name__ == "__main__":

@@ -9,28 +9,30 @@ Usage:
   python burst/pres_pdf.py <run_dir> --full   # also run unified/basin/extended analysis
 """
 
-import sys
+import argparse
+import base64
+import json
 import os
 import pickle
-import json
-import base64
-import traceback
-import argparse
+import sys
 import time
+import traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-import numpy as np
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+
+from burst.config import TrainConfig, parse_run_config, reversion_life_key, reversion_life_label
 from burst.dev.pres_charts import (
     SCHED_SHORT,
-    _ordered,
     _group,
+    _group_gs,
+    _ordered,
     generate_all,
     load_grad_sim_data,
-    _group_gs,
 )
-from burst.config import TrainConfig, reversion_life_key, reversion_life_label, parse_run_config
 
 
 def _img_tag(path, max_width=900) -> str:
@@ -116,10 +118,10 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         return [(p.stem.replace("_", " ").title(), p) for p in sorted(d.glob("*.png"))]
 
     try:
-        from burst.dev.unified_analysis import analyse_run as ua_analyse, make_dashboard
+        from burst.dev.unified_analysis import analyse_run as ua_analyse
+        from burst.dev.unified_analysis import make_dashboard
 
-        t0 = time.time()
-        print("  [unified_analysis] running...", flush=True)
+        time.time()
         r = ua_analyse(
             run_dir,
             n_seeds=n_seeds,
@@ -167,12 +169,8 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         tmp.mkdir(parents=True, exist_ok=True)
         make_dashboard(combined, tmp)
         out["unified"] = _pngs(tmp / "charts")
-        print(
-            f"  [unified_analysis] done in {time.time() - t0:.1f}s ({len(out['unified'])} charts)",
-            flush=True,
-        )
     except Exception:
-        print(f"  WARNING: unified_analysis failed:\n{traceback.format_exc()}", flush=True)
+        pass
 
     try:
         from burst.dev.unified_analysis import make_extended_metrics_dashboard
@@ -181,29 +179,25 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         tmp.mkdir(parents=True, exist_ok=True)
         make_extended_metrics_dashboard([run_dir], tmp)
         out["extended"] = _pngs(tmp / "charts")
-        print(f"  [extended_metrics] {len(out['extended'])} charts", flush=True)
     except Exception:
-        print(f"  WARNING: extended metrics failed:\n{traceback.format_exc()}", flush=True)
+        pass
 
     try:
         from burst.dev.basin_metrics import (
             analyse_run as bm_analyse,
+        )
+        from burst.dev.basin_metrics import (
             make_dashboard as bm_dashboard,
         )
 
-        t0 = time.time()
-        print("  [basin_metrics] running...", flush=True)
+        time.time()
         r = bm_analyse(run_dir, n_seeds=n_seeds, skip_surface=False)
         tmp = results_dir / "_basin_tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         bm_dashboard({run_dir.name: r}, tmp)
         out["basin"] = _pngs(tmp / "charts")
-        print(
-            f"  [basin_metrics] done in {time.time() - t0:.1f}s ({len(out['basin'])} charts)",
-            flush=True,
-        )
     except Exception:
-        print(f"  WARNING: basin_metrics failed:\n{traceback.format_exc()}", flush=True)
+        pass
 
     return out
 
@@ -468,7 +462,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     parts: list[str] = []
 
-    def _try(fn, label="section"):
+    def _try(fn, label="section") -> None:
         try:
             fn()
         except Exception:
@@ -537,7 +531,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
     except (KeyError, IndexError):
         ae = {s: float("nan") for s in sc}
 
-    def _research_q():
+    def _research_q() -> None:
         parts.append(_section("Research Question", anchor="research-q"))
         parts.append(
             "<p>How does the training schedule for introducing novel compositional knowledge affect a Transformer's ability to (a) acquire that knowledge and (b) retain it when the novel data is removed?</p>"  # noqa: E501
@@ -548,7 +542,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_research_q, "Research Question")
 
-    def _setup():
+    def _setup() -> None:
         parts.append(_section("Experimental Setup", anchor="setup"))
         parts.append(
             f"<h3>Task: Depth-{depth} Bijection Composition (burst at position {burst_pos})</h3>"
@@ -570,7 +564,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_setup, "Experimental Setup")
 
-    def _protocol():
+    def _protocol() -> None:
         parts.append(_section("Training Protocol", anchor="protocol"))
         if P > 0:
             parts.append(f"<h3>All-but-special (0-{P - 1})</h3>")
@@ -584,7 +578,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_protocol, "Training Protocol")
 
-    def _result1():
+    def _result1() -> None:
         parts.append(_section("Result: Peak Special Class Accuracy", anchor="result-peak"))
         parts.append(_chart(cp.get("peak_bars")))
         parts.append('<div class="hbox">H1: All schedules achieve peak special class ~ 1.0</div>')
@@ -605,14 +599,14 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_result1, "Result 1")
 
-    def _result2():
+    def _result2() -> None:
         parts.append(_section("Result: Special Class Accuracy Over Time", anchor="result-curves"))
         parts.append(_chart(cp.get("overlay_burst")))
         parts.append(_chart(cp.get("overlay_burst_aligned_end")))
 
     _try(_result2, "Result 2")
 
-    def _result3():
+    def _result3() -> None:
         parts.append(_section("Result: Forgetting Dynamics", anchor="result-forgetting"))
         parts.append(_chart(cp.get("reversion_zoom")))
         order_str = " &gt; ".join(
@@ -622,11 +616,11 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_result3, "Result 3")
 
-    def _result4():
+    def _result4() -> None:
         parts.append(_section("Result: Reversion AUC", anchor="result-auc"))
         parts.append(_chart(cp.get("auc_bars")))
         life_bars = cp.get("life_bars", {})
-        for thresh_idx, t in enumerate(thresholds):
+        for _thresh_idx, t in enumerate(thresholds):
             if t not in life_bars:
                 continue
             label = reversion_life_label(t)
@@ -635,7 +629,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_result4, "Result 4")
 
-    def _result6():
+    def _result6() -> None:
         parts.append(_section("Result: Schedule Ordering", anchor="result-ordering"))
         parts.append(_chart(cp.get("auc_diff"), 700))
         order = sorted(av, key=av.get, reverse=True)
@@ -649,7 +643,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_result6, "Result 6")
 
-    def _result7():
+    def _result7() -> None:
         parts.append(_section("Result: Other Classes Preservation", anchor="result-other"))
         parts.append(_chart(cp.get("overlay_other")))
         parts.append(_chart(cp.get("overlay_other_aligned_end")))
@@ -662,20 +656,20 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_result7, "Result 7")
 
-    def _summary():
+    def _summary() -> None:
         parts.append(_section("Summary Statistics", anchor="summary-stats"))
         parts.append(_chart(cp.get("summary_table"), 1000))
 
     _try(_summary, "Summary Statistics")
 
-    def _per_sched():
+    def _per_sched() -> None:
         parts.append(_section("Per-Schedule Detail", anchor="per-sched"))
         for path in cp.get("per_sched") or []:
             parts.append(_chart(path))
 
     _try(_per_sched, "Per-Schedule Detail")
 
-    def _grad_sim():
+    def _grad_sim() -> None:
         has_gs = any(
             cp.get(k)
             for k in [
@@ -720,7 +714,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_grad_sim, "Gradient Cosine Similarity")
 
-    def _layer_grad_sim():
+    def _layer_grad_sim() -> None:
         has_layer = any(
             cp.get(k)
             for k in [
@@ -762,7 +756,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_layer_grad_sim, "Per-Layer Gradient Cosine Similarity")
 
-    def _pairwise_evo():
+    def _pairwise_evo() -> None:
         has_pw = (
             cp.get("pairwise_evo_by_metric")
             or cp.get("pairwise_evo_per_schedule")
@@ -788,7 +782,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_pairwise_evo, "Pairwise Gradient Similarity")
 
-    def _probes():
+    def _probes() -> None:
         has_probes = (
             cp.get("probe_dynamics") or cp.get("probe_heatmaps") or cp.get("probe_layer_schedule")
         )
@@ -808,7 +802,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     _try(_probes, "Probes")
 
-    def _adl():
+    def _adl() -> None:
         has_adl = any(
             cp.get(k)
             for k in [
@@ -843,7 +837,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
     # Unified / Extended / Basin analysis charts
     if analysis_charts:
 
-        def _analysis_section(key, title, anchor):
+        def _analysis_section(key, title, anchor) -> None:
             pairs = analysis_charts.get(key, [])
             if not pairs:
                 return
@@ -863,7 +857,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
             lambda: _analysis_section("basin", "Basin Geometry Metrics", "basin"), "Basin Geometry"
         )
 
-    def _conclusions():
+    def _conclusions() -> None:
         parts.append(_section("Conclusions", anchor="conclusions"))
         parts.append("<ul>")
         for b, t in [
@@ -893,7 +887,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build combined HTML + TXT report for a burst experiment run."
     )
@@ -908,7 +902,6 @@ def main():
 
     rd = args.run_dir or sorted(Path("data").glob("burst_d*"))[-1]
     rd = Path(rd)
-    print(f"Loading from {rd}...")
     from burst.core.train_utils import resolve_run_paths
 
     cfg_path, logs_dir, _ = resolve_run_paths(rd)
@@ -940,29 +933,21 @@ def main():
                     "log": {"step": [], "loss": [], "acc_burst": [], "acc_other": []},
                 }
             )
-        print(f"  (no all_results.pkl — built {len(results)} stub records from config.json)")
 
-    print(f"  {len(results)} results\nGenerating charts...")
     cp = generate_all(rd, results, cfg)
 
     analysis_charts = None
     if args.full:
-        print("Running analysis (unified + extended + basin)...")
         analysis_charts = _collect_analysis_charts(rd, n_seeds=args.n_seeds)
 
     gs_records = load_grad_sim_data(rd)
 
-    print("Building HTML report...")
-    out = build(rd, results, cfg, cp, analysis_charts=analysis_charts)
-    print(f"  HTML: {out}")
+    build(rd, results, cfg, cp, analysis_charts=analysis_charts)
 
-    print("Building TXT report...")
     txt = _build_txt(rd, results, cfg, cp, gs_records, analysis_charts=analysis_charts)
     txt_path = rd / "results" / "burst_report.txt"
     txt_path.write_text(txt)
-    print(f"  TXT: {txt_path}")
 
-    print("Done!")
 
 
 if __name__ == "__main__":

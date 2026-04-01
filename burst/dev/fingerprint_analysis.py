@@ -3,13 +3,13 @@
 Adapted from the "Narrow Fine-Tuning Targets" paper's methodology to our
 burst-learning setup.  Two complementary analyses:
 
-1. **Logit Lens on Checkpoint Deltas** — For each (layer, position), compute
-   δ̄ = E_x[h^post(x) - h^pre(x)] on other-class inputs, project through
+1. **Logit Lens on Checkpoint Deltas** -- For each (layer, position), compute
+   d_bar = E_x[h^post(x) - h^pre(x)] on other-class inputs, project through
    the unembedding matrix (with and without ln_f), and check whether the
    top-k tokens are burst-relevant.  This reveals whether the burst phase
    leaves a readable "fingerprint" in activation space even on non-burst data.
 
-2. **Activation Steering** — Add α·δ̄ to the residual stream at layer ℓ
+2. **Activation Steering** -- Add a*d_bar to the residual stream at layer l
    during autoregressive generation on other-class prompts.  If the steered
    model starts producing burst-class outputs, the burst knowledge is stored
    as an additive direction (wrapper), not a conditional circuit (deep).
@@ -27,31 +27,36 @@ Dimension key:
     V: vocab_size
 """
 
-import sys
-import os
-import argparse
-import pickle
-import json
-import time
+from __future__ import annotations
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import argparse
+import json
+import pickle
+import sys
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pathlib import Path
 
-from net.nanogpt import nanoGPT
 from burst.config import (
-    SCHEDULE_ORDER,
     SCHED_COLORS,
+    SCHEDULE_ORDER,
     parse_run_config,
 )
 from burst.core.train_utils import load_net
-from burst.dev.probe import collect_activations_KPTN
 from burst.dev.plot_utils import save_png
+from burst.dev.probe import collect_activations_KPTN
+
+if TYPE_CHECKING:
+    from net.nanogpt import nanoGPT
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_rng = np.random.default_rng()
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +72,7 @@ def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     func_start = alphabet_start + n_alphabets
     burst_func_id = func_start + n_a * depth + 1
     value_ids = list(range(alphabet_start, alphabet_start + n_alphabets))
-    return [i for i in [burst_func_id] + value_ids if i < vocab_size]
+    return [i for i in [burst_func_id, *value_ids] if i < vocab_size]
 
 
 def _sched_order(s: str) -> int:
@@ -85,7 +90,7 @@ def _color(s: str) -> str:
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    B, L = docs_t.shape
+    _B, L = docs_t.shape
     target_B6 = docs_t[:, -6:]
     generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
@@ -97,7 +102,7 @@ def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
 
 
 @torch.no_grad()
-def compute_delta_KTN(
+def compute_delta_KTN(  # noqa: N802
     net_post: nanoGPT,
     net_pre: nanoGPT,
     docs_BL: np.ndarray,
@@ -108,7 +113,7 @@ def compute_delta_KTN(
     Returns (K, T, N) on CPU.
     """
     n = min(n_samples, docs_BL.shape[0])
-    idx = np.random.choice(docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(docs_BL.shape[0], n, replace=False)
     docs = docs_BL[idx]
     acts_post = collect_activations_KPTN(net_post, docs)
     acts_pre = collect_activations_KPTN(net_pre, docs)
@@ -122,9 +127,9 @@ def logit_lens_on_delta(
     delta_KTN: torch.Tensor,
     burst_token_ids: list[int],
     top_k: int = 20,
-    use_ln: bool = True,
+    use_ln: bool = True,  # noqa: FBT001, FBT002
 ) -> dict:
-    """Project δ̄ through [ln_f +] W_U and measure burst-token presence in top-k.
+    """Project d_bar through [ln_f +] W_U and measure burst-token presence in top-k.
 
     When use_ln=True (default), applies the model's final LayerNorm before
     unembedding — this is the "standard" Logit Lens.  When False, does a raw
@@ -136,6 +141,7 @@ def logit_lens_on_delta(
         mean_rank_KT: (K, T) — mean rank of burst tokens in the logit ordering
         top_tokens_KT: (K, T, top_k) — actual top-k token ids
         softmax_entropy_KT: (K, T) — entropy of the softmax distribution
+
     """
     K, T, N = delta_KTN.shape
     delta_dev = delta_KTN.float().to(DEVICE)
@@ -187,8 +193,7 @@ def logit_lens_compare_methods(
     burst_token_ids: list[int],
     top_k: int = 20,
 ) -> dict:
-    """Run Logit Lens with and without LayerNorm, plus the "logit difference"
-    baseline (project h_ft and h_base separately, then subtract logits).
+    """Run Logit Lens with and without LayerNorm, plus the logit difference baseline.
 
     Returns a dict with keys 'with_ln', 'without_ln' each containing the
     logit_lens_on_delta output.
@@ -204,7 +209,7 @@ def logit_lens_compare_methods(
 
 
 @torch.no_grad()
-def steering_experiment(
+def steering_experiment(  # noqa: PLR0913
     net: nanoGPT,
     delta_KTN: torch.Tensor,
     other_docs_BL: np.ndarray,
@@ -214,14 +219,14 @@ def steering_experiment(
     alphas: list[float] | None = None,
     n_samples: int = 128,
 ) -> dict:
-    """Steer the model by adding α·δ̄ to the residual stream at `steer_layer`.
+    """Steer the model by adding a*d_bar to the residual stream at `steer_layer`.
 
-    For each α, measures:
+    For each alpha, measures:
       - burst_acc: accuracy on burst-class outputs (does the model start applying b*?)
       - other_acc: accuracy on other-class outputs (does normal computation survive?)
 
-    The δ̄ is first normalised to match the mean activation norm at that layer
-    (same idea as the paper's norm-matching step), then scaled by α.
+    The d_bar is first normalised to match the mean activation norm at that layer
+    (same idea as the paper's norm-matching step), then scaled by alpha.
 
     Returns dict with alphas, burst_accs, other_accs, and metadata.
     """
@@ -231,14 +236,14 @@ def steering_experiment(
     net.eval()
     n_other = min(n_samples, other_docs_BL.shape[0])
     n_burst = min(n_samples, burst_docs_BL.shape[0])
-    other_idx = np.random.choice(other_docs_BL.shape[0], n_other, replace=False)
-    burst_idx = np.random.choice(burst_docs_BL.shape[0], n_burst, replace=False)
+    other_idx = _rng.choice(other_docs_BL.shape[0], n_other, replace=False)
+    burst_idx = _rng.choice(burst_docs_BL.shape[0], n_burst, replace=False)
     other_docs = other_docs_BL[other_idx]
     burst_docs = burst_docs_BL[burst_idx]
 
     delta_TN = delta_KTN[steer_layer].to(DEVICE).float()
     delta_norm = delta_TN.norm()
-    if delta_norm < 1e-8:
+    if delta_norm < 1e-8:  # noqa: PLR2004
         return {
             "alphas": alphas,
             "burst_acc_on_other": [0.0] * len(alphas),
@@ -255,14 +260,19 @@ def steering_experiment(
     for alpha in alphas:
         scaled_delta_TN = alpha * delta_TN
 
-        def _steer_hook(module, input, output):
+        def _steer_hook(
+            _module: torch.nn.Module,
+            _input: tuple,
+            output: torch.Tensor | tuple,
+            _scaled: torch.Tensor = scaled_delta_TN,
+        ) -> torch.Tensor | tuple:
             if isinstance(output, tuple):
                 x_raw, rest = output[0], output[1:]
             else:
                 x_raw, rest = output, None
             x = x_raw.float()
-            T_use = min(x.shape[1], scaled_delta_TN.shape[0])
-            x[:, :T_use] += scaled_delta_TN[:T_use].unsqueeze(0)
+            T_use = min(x.shape[1], _scaled.shape[0])
+            x[:, :T_use] += _scaled[:T_use].unsqueeze(0)
             x = x.to(x_raw.dtype)
             if rest is not None:
                 return (x, *rest)
@@ -320,14 +330,14 @@ def _measure_burst_acc_on_other(
     gen_outputs = generated[:, -6:]
 
     burst_outputs = burst_t[:, -6:]
-    burst_output_set = set(tuple(row.tolist()) for row in burst_outputs)
+    burst_output_set = {tuple(row.tolist()) for row in burst_outputs}
 
     matches = sum(1 for row in gen_outputs if tuple(row.tolist()) in burst_output_set)
     return matches / B_other
 
 
 @torch.no_grad()
-def steering_sweep_layers(
+def steering_sweep_layers(  # noqa: PLR0913
     net: nanoGPT,
     delta_KTN: torch.Tensor,
     other_docs_BL: np.ndarray,
@@ -336,7 +346,7 @@ def steering_sweep_layers(
     alpha: float = 5.0,
     n_samples: int = 128,
 ) -> dict:
-    """Sweep steering across all layers at a fixed α to find which layer is most steerable."""
+    """Sweep steering across all layers at a fixed alpha to find which layer is most steerable."""
     K = delta_KTN.shape[0]
     burst_accs = []
     other_accs = []
@@ -371,7 +381,7 @@ def steering_sweep_layers(
 # ---------------------------------------------------------------------------
 
 
-def analyse_run(
+def analyse_run(  # noqa: C901, PLR0915
     run_dir: Path,
     n_seeds: int = 3,
     n_samples: int = 256,
@@ -379,14 +389,14 @@ def analyse_run(
     steering_alphas: list[float] | None = None,
 ) -> dict:
     """Run Logit Lens + Steering analysis on a single run directory."""
-    print(f"\n{'=' * 60}", flush=True)
-    print(f"Fingerprint analysis: {run_dir.name}", flush=True)
-    print(f"{'=' * 60}", flush=True)
+    print(f"\n{'=' * 60}", flush=True)  # noqa: T201
+    print(f"Fingerprint analysis: {run_dir.name}", flush=True)  # noqa: T201
+    print(f"{'=' * 60}", flush=True)  # noqa: T201
 
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
-    with open(cfg_path) as f:
+    with cfg_path.open() as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
@@ -395,18 +405,18 @@ def analyse_run(
     depth = rc["depth"]
     T = base_cfg["total_steps"]
 
-    with open(logs_dir / "_data.pkl", "rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+    with (logs_dir / "_data.pkl").open("rb") as f:
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
-    with open(logs_dir / "all_results.pkl", "rb") as f:
-        all_results = pickle.load(f)
+    with (logs_dir / "all_results.pkl").open("rb") as f:
+        all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
-    schedules_present = sorted(set(r["schedule"] for r in all_results))
+    schedules_present = sorted({r["schedule"] for r in all_results})
 
     jobs_by_schedule: dict[str, list[dict]] = {}
     for r in all_results:
@@ -442,7 +452,7 @@ def analyse_run(
 
             ckpt_files = {int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")}
             available = sorted(ckpt_files.keys())
-            if len(available) < 2:
+            if len(available) < 2:  # noqa: PLR2004
                 continue
 
             cfg = r["config"]
@@ -451,7 +461,7 @@ def analyse_run(
             pre_step = available[0]
             peak_step = min(available, key=lambda x: abs(x - (T - 1)))
 
-            print(f"  [{sched}] {label}: pre={pre_step}, peak={peak_step}", flush=True)
+            print(f"  [{sched}] {label}: pre={pre_step}, peak={peak_step}", flush=True)  # noqa: T201
 
             net_pre = load_net(cfg, str(ckpt_files[pre_step]))
             net_peak = load_net(cfg, str(ckpt_files[peak_step]))
@@ -465,7 +475,7 @@ def analyse_run(
                 ll_mean_rank_agg[method].append(ll_result[method]["mean_rank_KT"])
                 ll_entropy_agg[method].append(ll_result[method]["entropy_KT"])
 
-            print(
+            print(  # noqa: T201
                 f"    Logit Lens readability (with LN): "
                 f"mean={ll_result['with_ln']['readability_KT'].mean():.3f}",
                 flush=True,
@@ -486,7 +496,7 @@ def analyse_run(
             )
             steer_agg.append(steer_result)
 
-            # --- Layer sweep at α=5 ---
+            # --- Layer sweep at alpha=5 ---
             sweep = steering_sweep_layers(
                 net_peak,
                 delta_KTN,
@@ -503,7 +513,7 @@ def analyse_run(
         if not ll_readability_agg["with_ln"]:
             continue
 
-        def _mean_over_seeds(arrs):
+        def _mean_over_seeds(arrs: list[np.ndarray]) -> list:
             return np.mean(arrs, axis=0).tolist()
 
         analysis["logit_lens"][sched] = {
@@ -598,7 +608,7 @@ _METRIC_DESCRIPTIONS = {
     },
     "steering_alpha_sweep": {
         "what": (
-            "Effect of adding α·δ̄ to the residual stream during generation. "
+            "Effect of adding alpha*d_bar to the residual stream during generation. "
             "Burst acc on other = does the model start applying b* on non-burst prompts? "
             "Other acc on other = does normal computation survive?"
         ),
@@ -609,7 +619,7 @@ _METRIC_DESCRIPTIONS = {
     },
     "steering_layer_sweep": {
         "what": (
-            "Which layer is most steerable?  At a fixed α, sweep across all layers "
+            "Which layer is most steerable?  At a fixed alpha, sweep across all layers "
             "and measure burst accuracy on other-class prompts."
         ),
         "high": "Steering at this layer strongly induces burst behaviour.",
@@ -627,16 +637,17 @@ _METRIC_DESCRIPTIONS = {
 }
 
 
-def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
+    """Build an interactive HTML dashboard from fingerprint analyses."""
+    import plotly.graph_objects as go  # noqa: PLC0415
+    from plotly.subplots import make_subplots  # noqa: PLC0415
 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
     all_figs: list[tuple[str, str, go.Figure]] = []
 
-    def _add_fig(key: str, fig: go.Figure, title: str | None = None):
+    def _add_fig(key: str, fig: go.Figure, title: str | None = None) -> None:
         t = title or fig.layout.title.text if fig.layout.title else key
         if isinstance(t, dict):
             t = t.get("text", key)
@@ -673,9 +684,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                         colorscale="YlOrRd",
                         zmin=0,
                         zmax=1,
-                        colorbar=dict(
-                            title="Readability", len=1 / len(schedules), y=1 - i / len(schedules)
-                        ),
+                        colorbar={
+                            "title": "Readability",
+                            "len": 1 / len(schedules),
+                            "y": 1 - i / len(schedules),
+                        },
                         showscale=(i == 0),
                     ),
                     row=i + 1,
@@ -706,7 +719,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
             continue
 
         fig = go.Figure()
-        for method, offset, name in [("with_ln", -0.15, "With LN"), ("without_ln", 0.15, "Raw")]:
+        for method, _offset, name in [("with_ln", -0.15, "With LN"), ("without_ln", 0.15, "Raw")]:
             fig.add_trace(
                 go.Bar(
                     x=schedules,
@@ -743,7 +756,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         fig = make_subplots(
             rows=len(schedules),
             cols=1,
-            subplot_titles=[s for s in schedules],
+            subplot_titles=list(schedules),
             vertical_spacing=0.05,
             shared_xaxes=True,
         )
@@ -757,9 +770,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=list(range(T)),
                     y=[f"L{k}" for k in range(K)],
                     colorscale="Viridis_r",
-                    colorbar=dict(
-                        title="Mean Rank", len=1 / len(schedules), y=1 - i / len(schedules)
-                    ),
+                    colorbar={
+                        "title": "Mean Rank",
+                        "len": 1 / len(schedules),
+                        "y": 1 - i / len(schedules),
+                    },
                     showscale=(i == 0),
                 ),
                 row=i + 1,
@@ -788,7 +803,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         fig = make_subplots(
             rows=len(schedules),
             cols=1,
-            subplot_titles=[s for s in schedules],
+            subplot_titles=list(schedules),
             vertical_spacing=0.05,
             shared_xaxes=True,
         )
@@ -802,9 +817,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=list(range(T)),
                     y=[f"L{k}" for k in range(K)],
                     colorscale="Blues",
-                    colorbar=dict(
-                        title="Entropy", len=1 / len(schedules), y=1 - i / len(schedules)
-                    ),
+                    colorbar={
+                        "title": "Entropy",
+                        "len": 1 / len(schedules),
+                        "y": 1 - i / len(schedules),
+                    },
                     showscale=(i == 0),
                 ),
                 row=i + 1,
@@ -821,7 +838,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         _add_fig(f"logit_lens_entropy_{run_name}", fig, f"Logit Lens Entropy — {run_name}")
 
     # ------------------------------------------------------------------
-    # Chart 5: Steering α sweep (per schedule)
+    # Chart 5: Steering alpha sweep (per schedule)
     # ------------------------------------------------------------------
     for analysis in analyses:
         run_name = analysis["run_name"]
@@ -848,7 +865,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=d["alphas"],
                     y=d["mean_burst_acc_on_other"],
                     name=sched,
-                    line=dict(color=c, width=2),
+                    line={"color": c, "width": 2},
                     mode="lines+markers",
                     legendgroup=sched,
                     showlegend=True,
@@ -861,7 +878,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=d["alphas"],
                     y=d["mean_other_acc_on_other"],
                     name=sched,
-                    line=dict(color=c, width=2, dash="dash"),
+                    line={"color": c, "width": 2, "dash": "dash"},
                     mode="lines+markers",
                     legendgroup=sched,
                     showlegend=False,
@@ -874,7 +891,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=d["alphas"],
                     y=d["mean_burst_acc_on_burst"],
                     name=sched,
-                    line=dict(color=c, width=2, dash="dot"),
+                    line={"color": c, "width": 2, "dash": "dot"},
                     mode="lines+markers",
                     legendgroup=sched,
                     showlegend=False,
@@ -883,17 +900,17 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 col=3,
             )
 
-        fig.update_xaxes(title_text="α (steering strength)", type="log")
+        fig.update_xaxes(title_text="alpha (steering strength)", type="log")
         fig.update_layout(
             title=(
-                f"Activation Steering: α Sweep at Layer {st[schedules[0]]['steer_layer']} "
+                f"Activation Steering: alpha Sweep at Layer {st[schedules[0]]['steer_layer']} "
                 f"— {run_name}"
             ),
             template="plotly_white",
             height=500,
             legend_title="Schedule",
         )
-        _add_fig(f"steering_alpha_sweep_{run_name}", fig, f"Steering α Sweep — {run_name}")
+        _add_fig(f"steering_alpha_sweep_{run_name}", fig, f"Steering alpha Sweep -- {run_name}")
 
     # ------------------------------------------------------------------
     # Chart 6: Steering layer sweep
@@ -922,7 +939,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=layer_labels,
                     y=d["mean_burst_acc"],
                     name=sched,
-                    line=dict(color=c, width=2),
+                    line={"color": c, "width": 2},
                     mode="lines+markers",
                     legendgroup=sched,
                     showlegend=True,
@@ -935,7 +952,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=layer_labels,
                     y=d["mean_other_acc"],
                     name=sched,
-                    line=dict(color=c, width=2, dash="dash"),
+                    line={"color": c, "width": 2, "dash": "dash"},
                     mode="lines+markers",
                     legendgroup=sched,
                     showlegend=False,
@@ -946,7 +963,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
 
         alpha_used = sls[schedules[0]]["alpha"]
         fig.update_layout(
-            title=f"Steering Layer Sweep (α={alpha_used}) — {run_name}",
+            title=f"Steering Layer Sweep (alpha={alpha_used}) -- {run_name}",
             template="plotly_white",
             height=500,
             legend_title="Schedule",
@@ -999,8 +1016,8 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 x=burst_pcts,
                 y=readabilities,
                 mode="markers+lines",
-                marker=dict(color=colors, size=10),
-                line=dict(color="gray", width=1, dash="dot"),
+                marker={"color": colors, "size": 10},
+                line={"color": "gray", "width": 1, "dash": "dot"},
                 showlegend=False,
             ),
             row=1,
@@ -1011,8 +1028,8 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 x=burst_pcts,
                 y=ranks,
                 mode="markers+lines",
-                marker=dict(color=colors, size=10),
-                line=dict(color="gray", width=1, dash="dot"),
+                marker={"color": colors, "size": 10},
+                line={"color": "gray", "width": 1, "dash": "dot"},
                 showlegend=False,
             ),
             row=1,
@@ -1023,8 +1040,8 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 x=burst_pcts,
                 y=max_steers,
                 mode="markers+lines",
-                marker=dict(color=colors, size=10),
-                line=dict(color="gray", width=1, dash="dot"),
+                marker={"color": colors, "size": 10},
+                line={"color": "gray", "width": 1, "dash": "dot"},
                 showlegend=False,
             ),
             row=1,
@@ -1125,7 +1142,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
   other-class inputs, project it through the unembedding matrix W<sub>U</sub>, and check if
   the top tokens are burst-relevant. If yes → the burst knowledge is a global bias (wrapper).
   If no → it's stored in conditional circuits (deep).<br><br>
-  <strong>Activation Steering:</strong> We add α·δ̄ to the residual stream during generation
+  <strong>Activation Steering:</strong> We add alpha*d_bar to the residual stream during generation
   on other-class prompts. If the model starts producing burst outputs → the knowledge is an
   additive direction. If not → it's conditional.<br><br>
   <strong>Key insight:</strong> Higher burstiness (burst_100) should show stronger fingerprints
@@ -1138,7 +1155,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
 """
     ]
 
-    for i, (key, title, _) in enumerate(all_figs):
+    for i, (_key, title, _) in enumerate(all_figs):
         anchor = f"chart_{i}"
         html_parts.append(f'  <a href="#{anchor}">{i + 1}. {title}</a>\n')
 
@@ -1179,10 +1196,10 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
     html_parts.append("</body></html>")
 
     html_path = out_dir / "dashboard.html"
-    with open(html_path, "w") as f:
+    with html_path.open("w") as f:
         f.write("".join(html_parts))
-    print(f"\nDashboard saved: {html_path}", flush=True)
-    print(f"Charts saved: {charts_dir}", flush=True)
+    print(f"\nDashboard saved: {html_path}", flush=True)  # noqa: T201
+    print(f"Charts saved: {charts_dir}", flush=True)  # noqa: T201
 
 
 # ---------------------------------------------------------------------------
@@ -1202,7 +1219,8 @@ def _find_all_run_dirs(data_root: Path) -> list[Path]:
     return [p for p in candidates if _is_valid_run_dir(p)]
 
 
-def main():
+def main() -> None:
+    """Run fingerprint analysis from the command line."""
     parser = argparse.ArgumentParser(
         description="Finetuning fingerprint analysis: Logit Lens + Activation Steering.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1219,11 +1237,11 @@ def main():
     if args.all:
         run_dirs = _find_all_run_dirs(args.data_root)
         if not run_dirs:
-            print(f"No valid run directories found under {args.data_root}", flush=True)
+            print(f"No valid run directories found under {args.data_root}", flush=True)  # noqa: T201
             return
-        print(f"Found {len(run_dirs)} valid run directories:", flush=True)
+        print(f"Found {len(run_dirs)} valid run directories:", flush=True)  # noqa: T201
         for d in run_dirs:
-            print(f"  {d}", flush=True)
+            print(f"  {d}", flush=True)  # noqa: T201
     elif args.run_dirs:
         run_dirs = [Path(d) for d in args.run_dirs]
     else:
@@ -1242,16 +1260,16 @@ def main():
             top_k=args.top_k,
         )
         analyses.append(analysis)
-        print(f"  Completed {run_dir.name} in {time.time() - t0:.1f}s", flush=True)
+        print(f"  Completed {run_dir.name} in {time.time() - t0:.1f}s", flush=True)  # noqa: T201
 
     results_path = out_dir / "results.pkl"
-    with open(results_path, "wb") as f:
+    with results_path.open("wb") as f:
         pickle.dump(analyses, f)
-    print(f"\nResults saved: {results_path}", flush=True)
+    print(f"\nResults saved: {results_path}", flush=True)  # noqa: T201
 
-    print("\nGenerating dashboard...", flush=True)
+    print("\nGenerating dashboard...", flush=True)  # noqa: T201
     make_dashboard(analyses, out_dir)
-    print("\nDone.", flush=True)
+    print("\nDone.", flush=True)  # noqa: T201
 
 
 if __name__ == "__main__":

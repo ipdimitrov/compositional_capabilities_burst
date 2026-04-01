@@ -20,34 +20,37 @@ Dimension key:
     P: n_params (total parameters, flattened)
 """
 
-import sys
-import os
 import argparse
-import pickle
 import json
+import os
+import pickle
+import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+import matplotlib as mpl
 import numpy as np
 import torch
 import torch.nn.functional as F
-import matplotlib
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from pathlib import Path
+mpl.use("Agg")
 from collections import defaultdict
-from burst.core.train_utils import load_net, resolve_run_paths
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+
 from burst.config import (
-    SCHEDULE_ORDER,
     SCHED_COLORS,
     SCHED_DISPLAY,
+    SCHEDULE_ORDER,
     parse_run_config,
 )
 from burst.core.metrics.gradients import _layer_groups
+from burst.core.train_utils import load_net, resolve_run_paths
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_rng = np.random.default_rng()
 
 
 def _sched_order(s: str) -> int:
@@ -178,8 +181,8 @@ def compute_layerwise_activations(
 
     n_burst = min(n_eval, burst_docs_BL.shape[0])
     n_other = min(n_eval, other_docs_BL.shape[0])
-    burst_idx = np.random.choice(burst_docs_BL.shape[0], n_burst, replace=False)
-    other_idx = np.random.choice(other_docs_BL.shape[0], n_other, replace=False)
+    burst_idx = _rng.choice(burst_docs_BL.shape[0], n_burst, replace=False)
+    other_idx = _rng.choice(other_docs_BL.shape[0], n_other, replace=False)
     burst_eval = burst_docs_BL[burst_idx]
     other_eval = other_docs_BL[other_idx]
 
@@ -216,11 +219,8 @@ def compute_layerwise_activations(
                 activations = {}
 
                 def make_hook(name):
-                    def hook_fn(module, input, output):
-                        if isinstance(output, tuple):
-                            out = output[0]
-                        else:
-                            out = output
+                    def hook_fn(module, input, output) -> None:
+                        out = output[0] if isinstance(output, tuple) else output
                         activations[name] = out.detach().float().norm(dim=-1).mean().item()
 
                     return hook_fn
@@ -270,7 +270,7 @@ def _cross_entropy_loss(net, docs_BL: np.ndarray) -> float:
         return float("nan")
     net.eval()
     n = min(256, docs_BL.shape[0])
-    idx = np.random.choice(docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(docs_BL.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_BL[idx], dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
@@ -303,8 +303,8 @@ def compute_loss_basin_random_directions(
 
     n_burst = min(128, burst_docs_BL.shape[0])
     n_other = min(128, other_docs_BL.shape[0])
-    burst_idx = np.random.choice(burst_docs_BL.shape[0], n_burst, replace=False)
-    other_idx = np.random.choice(other_docs_BL.shape[0], n_other, replace=False)
+    burst_idx = _rng.choice(burst_docs_BL.shape[0], n_burst, replace=False)
+    other_idx = _rng.choice(other_docs_BL.shape[0], n_other, replace=False)
     burst_eval = burst_docs_BL[burst_idx]
     other_eval = other_docs_BL[other_idx]
 
@@ -341,7 +341,7 @@ def compute_loss_basin_random_directions(
 
             net = load_net(cfg, str(files[peak_step]))
 
-            for d_idx in range(n_directions):
+            for _d_idx in range(n_directions):
                 direction = {k: torch.randn_like(v) for k, v in base_sd.items()}
                 dir_flat = torch.cat([v.view(-1) for v in direction.values()])
                 dir_norm = dir_flat.norm()
@@ -362,7 +362,6 @@ def compute_loss_basin_random_directions(
                 all_direction_losses_other.append(other_losses)
 
             seeds_done += 1
-            print(f"  {label}: {n_directions} directions done", flush=True)
             del net
 
         results[sched] = {
@@ -489,7 +488,7 @@ def investigate_grad_rank(run_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _style(ax, xl="", yl="", t=""):
+def _style(ax, xl="", yl="", t="") -> None:
     ax.set_xlabel(xl, fontsize=11, fontweight="bold")
     ax.set_ylabel(yl, fontsize=11, fontweight="bold")
     if t:
@@ -500,7 +499,7 @@ def _style(ax, xl="", yl="", t=""):
     ax.spines["right"].set_visible(False)
 
 
-def plot_layerwise_weight_diff(data: dict, out_dir: Path, P: int = 0):
+def plot_layerwise_weight_diff(data: dict, out_dir: Path, P: int = 0) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     schedules = sorted(data.keys(), key=_sched_order)
 
@@ -551,7 +550,7 @@ def plot_layerwise_weight_diff(data: dict, out_dir: Path, P: int = 0):
         plt.close(fig)
 
 
-def plot_layerwise_activations(data: dict, out_dir: Path):
+def plot_layerwise_activations(data: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     schedules = sorted(data.keys(), key=_sched_order)
 
@@ -613,7 +612,7 @@ def plot_layerwise_activations(data: dict, out_dir: Path):
             plt.close(fig)
 
 
-def plot_loss_basin(data: dict, out_dir: Path):
+def plot_loss_basin(data: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     schedules = sorted(data.keys(), key=_sched_order)
 
@@ -661,7 +660,7 @@ def plot_loss_basin(data: dict, out_dir: Path):
         plt.close(fig_var)
 
 
-def plot_loss_basin_per_schedule(data: dict, out_dir: Path):
+def plot_loss_basin_per_schedule(data: dict, out_dir: Path) -> None:
     """Per-schedule chart: burst variance vs other variance on the same axes."""
     out_dir.mkdir(parents=True, exist_ok=True)
     schedules = sorted(data.keys(), key=_sched_order)
@@ -692,7 +691,7 @@ def plot_loss_basin_per_schedule(data: dict, out_dir: Path):
         plt.close(fig)
 
 
-def plot_weight_norms(data: dict, out_dir: Path):
+def plot_weight_norms(data: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     schedules = sorted(data.keys(), key=_sched_order)
 
@@ -771,7 +770,7 @@ def plot_weight_norms(data: dict, out_dir: Path):
         plt.close(fig)
 
 
-def plot_grad_norms_and_cosim(gs_records: list, out_dir: Path, P: int = 0):
+def plot_grad_norms_and_cosim(gs_records: list, out_dir: Path, P: int = 0) -> None:
     """Plot gradient norms (L1, L2, Linf) over time and per layer, correlated with cosim."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -808,7 +807,7 @@ def plot_grad_norms_and_cosim(gs_records: list, out_dir: Path, P: int = 0):
             if not all_steps:
                 continue
             steps_ref = all_steps[0]
-            interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_vals)]
+            interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_vals, strict=False)]
             arr = np.array(interp_vals)
             m = arr.mean(axis=0)
             n_s = len(arr)
@@ -876,7 +875,7 @@ def plot_grad_norms_and_cosim(gs_records: list, out_dir: Path, P: int = 0):
         if not all_steps:
             continue
         steps_ref = all_steps[0]
-        interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_cosims)]
+        interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_cosims, strict=False)]
         arr = np.array(interp_vals)
         m = arr.mean(axis=0)
         n_s = len(arr)
@@ -933,7 +932,7 @@ def plot_grad_norms_and_cosim(gs_records: list, out_dir: Path, P: int = 0):
         plt.close(fig)
 
 
-def plot_grad_rank(gs_records: list, out_dir: Path):
+def plot_grad_rank(gs_records: list, out_dir: Path) -> None:
     """Re-plot grad rank from existing data, investigating issues."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1011,7 +1010,7 @@ def plot_grad_rank(gs_records: list, out_dir: Path):
         if not all_steps:
             continue
         steps_ref = all_steps[0]
-        interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_mean_ranks)]
+        interp_vals = [np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_mean_ranks, strict=False)]
         arr = np.array(interp_vals)
         m = arr.mean(axis=0)
         ax.plot(steps_ref, m, color=_color(sched), lw=2, label=_label(sched))
@@ -1023,7 +1022,7 @@ def plot_grad_rank(gs_records: list, out_dir: Path):
     plt.close(fig)
 
 
-def plot_sharpness(loss_surface_data: dict, out_dir: Path):
+def plot_sharpness(loss_surface_data: dict, out_dir: Path) -> None:
     """Plot sharpness bars for all burst settings."""
     out_dir.mkdir(parents=True, exist_ok=True)
     if not loss_surface_data:
@@ -1064,7 +1063,7 @@ def plot_sharpness(loss_surface_data: dict, out_dir: Path):
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--n-seeds", type=int, default=3)
@@ -1104,24 +1103,16 @@ def main():
     basin_time = 0.0
 
     if not args.only_basin_sharpness:
-        print("\n[1/8] Layerwise weight difference...", flush=True)
         t0 = time.time()
         wd_data = compute_layerwise_weight_diff(ckpt_root, all_results, n_seeds=args.n_seeds)
         plot_layerwise_weight_diff(wd_data, out_dir / "weight_diff", P=P)
-        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
-        print("\n[2/8] Per-layer activations...", flush=True)
         t0 = time.time()
         act_data = compute_layerwise_activations(
             ckpt_root, all_results, burst_docs_BL, other_docs_BL, n_seeds=args.n_seeds
         )
         plot_layerwise_activations(act_data, out_dir / "activations")
-        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
-    print(
-        f"\n[3/8] Loss basin ({args.basin_runs} directions, {args.basin_points} points)...",
-        flush=True,
-    )
     t0 = time.time()
     basin_data = compute_loss_basin_random_directions(
         ckpt_root,
@@ -1136,16 +1127,12 @@ def main():
     plot_loss_basin(basin_data, out_dir / "loss_basin")
     plot_loss_basin_per_schedule(basin_data, out_dir / "loss_basin")
     basin_time = time.time() - t0
-    print(f"  Done in {basin_time:.1f}s", flush=True)
 
     if not args.only_basin_sharpness:
-        print("\n[4/8] Weight norm hypothesis...", flush=True)
         t0 = time.time()
         wn_data = compute_weight_norms(ckpt_root, all_results, n_seeds=args.n_seeds)
         plot_weight_norms(wn_data, out_dir / "weight_norms")
-        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
-    print("\n[5/8] Sharpness (from basin_metrics)...", flush=True)
     t0 = time.time()
     try:
         from burst.dev.basin_metrics import analyse_run as bm_analyse
@@ -1153,31 +1140,24 @@ def main():
         bm_result = bm_analyse(run_dir, n_seeds=args.n_seeds, skip_surface=False)
         ls_data = bm_result.get("loss_surface", {})
         plot_sharpness(ls_data, out_dir / "sharpness")
-    except Exception as e:
-        print(f"  WARNING: sharpness failed: {e}", flush=True)
+    except Exception:
         ls_data = {}
-    print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
     if not args.only_basin_sharpness:
-        print("\n[6/8] Gradient norms and cosim...", flush=True)
         t0 = time.time()
         from burst.dev.pres_charts import load_grad_sim_data
 
         gs_records = load_grad_sim_data(run_dir)
         if gs_records:
             plot_grad_norms_and_cosim(gs_records, out_dir / "grad_norms", P=P)
-        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
-        print("\n[7/8] Grad rank investigation...", flush=True)
         t0 = time.time()
         rank_info = investigate_grad_rank(run_dir)
         if rank_info.get("issues"):
-            print(f"  Issues found: {rank_info['issues'][:5]}", flush=True)
+            pass
         if gs_records:
             plot_grad_rank(gs_records, out_dir / "grad_rank")
-        print(f"  Done in {time.time() - t0:.1f}s", flush=True)
 
-    print("\n[8/8] Saving results...", flush=True)
     summary = {
         "basin_time_seconds": basin_time,
         "total_time_seconds": time.time() - t_total_start,
@@ -1189,15 +1169,11 @@ def main():
     with open(out_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2, default=str)
 
-    total_time = time.time() - t_total_start
-    print(f"\nAll done in {total_time:.1f}s ({total_time / 60:.1f} min)", flush=True)
-    print(f"Basin took {basin_time:.1f}s for {args.basin_runs} directions", flush=True)
+    time.time() - t_total_start
 
     if basin_time < 300:
-        suggested = min(10000, max(1000, int(args.basin_runs * 300 / max(basin_time, 1))))
-        print(f"Basin was fast — consider scaling to {suggested} directions", flush=True)
+        min(10000, max(1000, int(args.basin_runs * 300 / max(basin_time, 1))))
 
-    print(f"\nResults saved to: {out_dir}", flush=True)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+"""Load YAML configs via OmegaConf and set deterministic RNG seeds across libraries."""
+
 import logging
 import random
 from pathlib import Path
@@ -16,7 +18,14 @@ def set_seed(seed: int = 0) -> None:
     true_seed = int(rng.integers(2**30))
 
     random.seed(true_seed)
-    np.random.seed(true_seed)
+    np.random.seed(true_seed)  # noqa: NPY002
+
+    import synthetic.functions as _syn_fn
+    import synthetic.generator as _syn_gen
+
+    _shared = np.random.default_rng(true_seed)
+    _syn_fn._rng = _shared
+    _syn_gen._rng = _shared
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.manual_seed(true_seed)

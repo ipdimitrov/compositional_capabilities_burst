@@ -1,3 +1,5 @@
+"""Training and evaluation utilities: optimizers, sanity checks, logging, and model I/O."""
+
 import inspect
 import logging
 import math
@@ -57,11 +59,14 @@ def configure_optimizers(net: torch.nn.Module, optim_cfg: DictConfig) -> torch.o
     num_decay_params = sum(p.numel() for p in decay_params)
     num_nodecay_params = sum(p.numel() for p in nodecay_params)
     logger.info(
-        f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
+        "num decayed parameter tensors: %s, with %s parameters",
+        len(decay_params),
+        "{:,}".format(num_decay_params),
     )
     logger.info(
-        f"num non-decayed parameter tensors: {len(nodecay_params)}, "
-        f"with {num_nodecay_params:,} parameters"
+        "num non-decayed parameter tensors: %s, with %s parameters",
+        len(nodecay_params),
+        "{:,}".format(num_nodecay_params),
     )
 
     fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
@@ -73,7 +78,7 @@ def configure_optimizers(net: torch.nn.Module, optim_cfg: DictConfig) -> torch.o
         betas=(optim_cfg.beta1, optim_cfg.beta2),
         **extra_args,
     )
-    logger.info(f"using fused AdamW: {use_fused}")
+    logger.info("using fused AdamW: %s", use_fused)
 
     return optimizer
 
@@ -347,7 +352,7 @@ def save_model(
 
 def log_train(it: int, lr: float, train_loss: list[float]) -> list[float]:
     """Log training iteration metrics and return an empty loss buffer."""
-    logger.info(f"train -- iter: {it}, lr: {lr:.6f}, loss: {np.mean(train_loss):.4f}")
+    logger.info("train -- iter: %s, lr: %.6f, loss: %.4f", it, lr, np.mean(train_loss))
     return []
 
 
@@ -359,8 +364,18 @@ def log_eval(
 ) -> None:
     """Log evaluation metrics for loss and accuracy."""
     logger.info("----\nIteration: %s", it)
-    logger.info(f"Acc (train/all): {eval_info['train_acc']:.3f}/{eval_info['all_acc']:.3f}")
-    logger.info(f"loss (train/all): {eval_info['train_loss']:.4f}/{eval_info['all_loss']:.4f}")
+    logger.info(
+        "Acc (train/all): %.3f/%.3f", eval_info["train_acc"], eval_info["all_acc"]
+    )
+    logger.info(
+        "loss (train/all): %.4f/%.4f",
+        eval_info["train_loss"],
+        eval_info["all_loss"],
+    )
 
     if eval_info2 is not None:
-        logger.info(f"acc (train/all): {eval_info2['train_acc']:.4f}/{eval_info2['all_acc']:.4f}")
+        logger.info(
+            "acc (train/all): %.4f/%.4f",
+            eval_info2["train_acc"],
+            eval_info2["all_acc"],
+        )

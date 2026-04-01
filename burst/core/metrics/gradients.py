@@ -38,7 +38,6 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from einops import rearrange  # noqa: E402
-from omegaconf import OmegaConf  # noqa: E402
 
 from burst.config import (  # noqa: E402
     DEFAULT_DETERMINISTIC,
@@ -49,16 +48,20 @@ from burst.config import (  # noqa: E402
     parse_run_config,
 )
 from burst.core.gpu import gpu_cfg  # noqa: E402
-from burst.core.parallel import run_job_pool  # noqa: E402
+from burst.core.parallel import JobResult, run_job_pool  # noqa: E402
 from burst.core.repro import set_reproducibility, write_repro_manifest  # noqa: E402
+from burst.core.train_utils import (  # noqa: E402
+    DEVICE,
+    _cross_entropy_logits_BTV_targets_BT,
+    load_net,
+)
 from net.nanogpt import nanoGPT  # noqa: E402
 
 warnings.filterwarnings("ignore", message=".*Full backward hook.*no inputs require gradients.*")
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MATRIX_NDIM = 2
 NEAR_ZERO = 1e-12
 MIN_VECTORS_FOR_SIMILARITY = 2
+_rng = np.random.default_rng()
 
 # ---------------------------------------------------------------------------
 # Feature flags — comment out any key to skip that metric entirely.
@@ -81,14 +84,6 @@ GRAD_METRICS: dict[str, bool] = {
 # Higher = more accurate but slower (each adds one backward pass).
 N_SNR_EXAMPLES: int = 16
 
-
-def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
-    logits_BTV: torch.Tensor, targets_BT: torch.Tensor
-) -> torch.Tensor:
-    """Compute cross-entropy loss from logits and targets."""
-    logits_bv = rearrange(logits_BTV, "b t v -> (b t) v")
-    targets_b = rearrange(targets_BT, "b t -> (b t)")
-    return F.cross_entropy(logits_bv, targets_b)
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +147,7 @@ def _grad_vecs_per_layer(
 ) -> dict[str, torch.Tensor]:
     """Run one backward pass and extract per-layer gradient vectors."""
     n = min(n_samples, docs_np.shape[0])
-    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    idx = _rng.choice(docs_np.shape[0], n, replace=False)
     tokens_BL = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp_BT, tgt_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
@@ -175,7 +170,7 @@ def _grad_vecs_per_layer(
 def _grad_vec_for_docs(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> torch.Tensor:
     """Compute a flat gradient vector from a random subset of docs."""
     n = min(n_samples, docs_np.shape[0])
-    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    idx = _rng.choice(docs_np.shape[0], n, replace=False)
     tokens_BL = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp_BT, tgt_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
@@ -252,7 +247,7 @@ def _grad_snr_per_layer(
     from torch.func import functional_call, grad, vmap  # noqa: PLC0415
 
     n = min(n_examples, docs_np.shape[0])
-    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    idx = _rng.choice(docs_np.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp_EL = dat[:, :-1]
     tgt_EL = dat[:, 1:]
@@ -385,13 +380,17 @@ def _token_pos_grad_norms(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> 
     input token position.
     """
     n = min(n_samples, docs_np.shape[0])
-    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    idx = _rng.choice(docs_np.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
 
     emb_grad: list[torch.Tensor] = []
 
-    def _hook(_module: Any, _grad_input: Any, grad_output: tuple[torch.Tensor, ...]) -> None:
+    def _hook(
+        _module: torch.nn.Module,
+        _grad_input: tuple[torch.Tensor, ...],
+        grad_output: tuple[torch.Tensor, ...],
+    ) -> None:
         """Capture embedding gradient from backward hook."""
         emb_grad.append(grad_output[0].detach().float())
 
@@ -428,7 +427,7 @@ def _grad_attribution(
 
     """
     n = min(n_samples, docs_np.shape[0])
-    idx = np.random.choice(docs_np.shape[0], n, replace=False)
+    idx = _rng.choice(docs_np.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
 
@@ -634,22 +633,7 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
     doc_len = job.get("doc_len", cfg.get("context_size", 80))
     gs_bs = args.grad_sim_batch_size
 
-    net = nanoGPT(
-        OmegaConf.create(
-            {
-                "compile": False,
-                "vocab_size": cfg["vocab_size"],
-                "context_size": cfg["context_size"],
-                "n_layer": cfg["n_layer"],
-                "n_head": cfg["n_head"],
-                "n_embd": cfg["n_embd"],
-                "dropout": 0.0,
-                "bias": False,
-                "mlp": True,
-            }
-        )
-    ).to(DEVICE)
-    net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
+    net = load_net(cfg, str(ckpt_path))
 
     burst_docs_all = np.concatenate(list(target_pool.values())) if target_pool else None
     other_docs_all = np.concatenate(list(bg_pool.values())) if bg_pool else None
@@ -940,7 +924,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             str(gs_bs),
         ]
 
-    def on_done(jr: Any, n_done: int, n_total: int) -> None:
+    def on_done(jr: JobResult, n_done: int, n_total: int) -> None:
         """Log completion status of a gradient worker job."""
         status = "ok" if jr.success else f"FAIL: {jr.error[:80]}"
         logger.info("  [%d/%d] %s: %s", n_done, n_total, jr.label, status)

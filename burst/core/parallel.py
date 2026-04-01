@@ -34,7 +34,7 @@ def run_job_pool(  # noqa: C901, PLR0912, PLR0913, PLR0915
     build_cmd: Callable,
     on_done: Callable | None,
     n_workers: int,
-    data_payload: Any,
+    data_payload: object,
     poll_interval: float,
     tmp_prefix: str,
     max_retries: int = 2,

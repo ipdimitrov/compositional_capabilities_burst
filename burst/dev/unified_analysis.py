@@ -1,4 +1,4 @@
-"""Unified burstiness analysis dashboard.
+r"""Unified burstiness analysis dashboard.
 
 Merges deep_analysis (5 metrics) and new_metrics (10 metrics) into one
 script, adds Frankenstein layer-swap analysis, evaluates on both burst
@@ -20,11 +20,11 @@ Dimension key:
     V: vocab_size
 """
 
-import sys
-import os
 import argparse
-import pickle
 import json
+import os
+import pickle
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,25 +33,28 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+import contextlib
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pathlib import Path
 from omegaconf import OmegaConf
 
-from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, update_cosine_warmup_lr
-from burst.core.train_utils import make_net_bare
 from burst.config import (
     PHASE_BURST,
     PHASE_REVERSION,
-    SCHEDULE_ORDER,
     SCHED_COLORS,
+    SCHEDULE_ORDER,
     parse_run_config,
 )
+from burst.core.train_utils import make_net_bare
 from burst.dev.plot_utils import save_png as _save_png
+from net.nanogpt import nanoGPT
+from net.runner import configure_optimizers, update_cosine_warmup_lr
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_rng = np.random.default_rng()
 SCHEDULES_ORDERED = SCHEDULE_ORDER
 SCHEDULE_COLORS = SCHED_COLORS
 
@@ -82,7 +85,7 @@ class SeedCheckpoints:
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    B, L = docs_t.shape
+    _B, L = docs_t.shape
     target_B6 = docs_t[:, -6:]
     generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
@@ -121,7 +124,7 @@ def _batch_eval_hybrids(
 
     burst_t = torch.as_tensor(burst_sub, dtype=torch.long, device=DEVICE)
     other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
-    B_burst, L = burst_t.shape
+    _B_burst, L = burst_t.shape
     other_t.shape[0]
     burst_target = burst_t[:, -6:]
     other_target = other_t[:, -6:]
@@ -138,7 +141,7 @@ def _batch_eval_hybrids(
         nets = [make_net_bare(cfg) for _ in range(n_chunk)]
         streams = [torch.cuda.Stream() for _ in range(n_chunk)]
 
-        for i, (net, sd, stream) in enumerate(zip(nets, chunk, streams)):
+        for i, (net, sd, stream) in enumerate(zip(nets, chunk, streams, strict=False)):
             with torch.cuda.stream(stream):
                 net.load_state_dict(sd)
                 net.eval()
@@ -148,14 +151,14 @@ def _batch_eval_hybrids(
         burst_accs = [0.0] * n_chunk
         other_accs = [0.0] * n_chunk
 
-        for i, (net, stream) in enumerate(zip(nets, streams)):
+        for i, (net, stream) in enumerate(zip(nets, streams, strict=False)):
             with torch.cuda.stream(stream):
                 gen = net.generate(burst_prompt, n_new)
                 burst_accs[i] = (gen[:, -6:] == burst_target).all(dim=1).float().mean().item()
 
         torch.cuda.synchronize()
 
-        for i, (net, stream) in enumerate(zip(nets, streams)):
+        for i, (net, stream) in enumerate(zip(nets, streams, strict=False)):
             with torch.cuda.stream(stream):
                 gen = net.generate(other_prompt, n_new)
                 other_accs[i] = (gen[:, -6:] == other_target).all(dim=1).float().mean().item()
@@ -213,7 +216,7 @@ def _get_key_steps(files: dict[int, Path], r: dict):
 def _subsample_docs(docs_BL: np.ndarray, n: int = 256) -> np.ndarray:
     if docs_BL.shape[0] <= n:
         return docs_BL
-    idx = np.random.choice(docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(docs_BL.shape[0], n, replace=False)
     return docs_BL[idx]
 
 
@@ -291,12 +294,6 @@ def _preload_seeds(
                     str(files[rev_step]), map_location="cpu", weights_only=True
                 ).items()
             }
-            print(
-                f"  [{label}] pre_step={pre_step} peak_step={peak_step} rev_step={rev_step} "
-                f"(P={r.get('pre_burst_steps', 0)}, T={r['config']['total_steps']}, "
-                f"burst_end={r.get('burst_end_step', '?')})",
-                flush=True,
-            )
 
             sd_pre = {k: v.to(DEVICE) for k, v in sd_pre_cpu.items()}
             sd_peak = {k: v.to(DEVICE) for k, v in sd_peak_cpu.items()}
@@ -338,9 +335,7 @@ def _build_hybrid_sd(
     hybrid = {}
     for key in sd_bottom:
         if (
-            key.startswith("transformer.wte.")
-            or key.startswith("transformer.wpe.")
-            or key.startswith("transformer.drop.")
+            key.startswith(("transformer.wte.", "transformer.wpe.", "transformer.drop."))
         ):
             hybrid[key] = sd_bottom[key]
         elif key.startswith("transformer.h."):
@@ -349,9 +344,7 @@ def _build_hybrid_sd(
                 hybrid[key] = sd_bottom[key]
             else:
                 hybrid[key] = sd_top[key]
-        elif key.startswith("transformer.ln_f."):
-            hybrid[key] = sd_top[key]
-        elif key.startswith("LM_head."):
+        elif key.startswith(("transformer.ln_f.", "LM_head.")):
             hybrid[key] = sd_top[key]
         else:
             hybrid[key] = sd_bottom[key]
@@ -389,12 +382,11 @@ def compute_frankenstein(
                 "post_bottom_burst": [],
                 "post_bottom_other": [],
             }
-            for direction, (b_acc, o_acc) in zip(directions, evals):
+            for direction, (b_acc, o_acc) in zip(directions, evals, strict=False):
                 seed_data[f"{direction}_burst"].append(b_acc)
                 seed_data[f"{direction}_other"].append(o_acc)
 
             per_seed.append(seed_data)
-            print(f"  {sc.label}: frankenstein done", flush=True)
 
         results[sched] = {"cut_points": cut_points, "per_seed": per_seed}
 
@@ -425,7 +417,7 @@ def compute_cross_burst_frankenstein(
             continue
 
         per_seed: list[dict] = []
-        for sc_a, sc_b in zip(seeds_a, seeds_b):
+        for sc_a, sc_b in zip(seeds_a, seeds_b, strict=False):
             if len(per_seed) >= n_seeds:
                 break
 
@@ -445,12 +437,11 @@ def compute_cross_burst_frankenstein(
                 "b_bottom_burst": [],
                 "b_bottom_other": [],
             }
-            for direction, (b_acc, o_acc) in zip(directions, evals):
+            for direction, (b_acc, o_acc) in zip(directions, evals, strict=False):
                 seed_data[f"{direction}_burst"].append(b_acc)
                 seed_data[f"{direction}_other"].append(o_acc)
 
             per_seed.append(seed_data)
-            print(f"  {sc_a.label} x {sc_b.label}: cross-frankenstein done", flush=True)
 
         pair_key = f"{sched_a}_x_{sched_b}"
         results[pair_key] = {
@@ -535,14 +526,6 @@ def compute_lmc_dual(
                     "barrier_peak_rev_other": _barrier(peak_rev_other),
                 }
             )
-            print(
-                (
-                    f"  {sc.label}: LMC barriers "
-                    f"pre↔peak burst={per_seed[-1]['barrier_pre_peak_burst']:.4f}, "
-                    f"peak↔rev burst={per_seed[-1]['barrier_peak_rev_burst']:.4f}"
-                ),
-                flush=True,
-            )
 
         results[sched] = {"alphas": alphas, "per_seed": per_seed}
 
@@ -611,11 +594,6 @@ def compute_ema_dual(
                     "cliff_rev_peak_burst": _cliff_alpha(rev_peak_burst),
                 }
             )
-            print(
-                f"  {sc.label}: EMA cliff pre↔peak={per_seed[-1]['cliff_pre_peak_burst']:.3f}, "
-                f"rev↔peak={per_seed[-1]['cliff_rev_peak_burst']:.3f}",
-                flush=True,
-            )
 
         results[sched] = {"alphas": alphas, "per_seed": per_seed}
 
@@ -663,10 +641,6 @@ def compute_pruning_dual(
                 other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
 
             per_seed.append({"burst_accs": burst_accs, "other_accs": other_accs})
-            print(
-                f"  {sc.label}: pruning burst@0%={burst_accs[0]:.3f}, other@0%={other_accs[0]:.3f}",
-                flush=True,
-            )
 
         results[sched] = {"sparsities": sparsities, "per_seed": per_seed}
 
@@ -703,7 +677,6 @@ def compute_weight_drift_per_layer(
                 per_layer[gname] = group_norm_sq**0.5
                 total += group_norm_sq
             per_seed.append({"per_layer": per_layer, "total": total**0.5})
-            print(f"  {sc.label}: total_drift={total**0.5:.4f}", flush=True)
         results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
     return results
 
@@ -747,7 +720,6 @@ def compute_effective_rank_per_layer(
                     eff_rank = 0.0
                 per_layer[gname] = eff_rank
             per_seed.append({"per_layer": per_layer})
-            print(f"  {sc.label}: eff_rank done", flush=True)
         results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
     return results
 
@@ -792,7 +764,6 @@ def compute_cka_per_layer(
                 per_layer[layer_name] = _linear_cka(X, Y)
 
             per_seed.append({"per_layer": per_layer})
-            print(f"  {sc.label}: CKA done", flush=True)
         results[sched] = {
             "per_seed": per_seed,
             "layer_names": list(pre_acts.keys()) if per_seed else [],
@@ -810,7 +781,7 @@ def _collect_layer_acts(
     hooks = []
 
     def _make_hook(name):
-        def hook_fn(module, input, output):
+        def hook_fn(module, input, output) -> None:
             if isinstance(output, tuple):
                 output = output[0]
             acts[name] = output.detach().float().mean(dim=1).cpu()
@@ -902,11 +873,6 @@ def compute_directional_pruning(
                 other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
 
             per_seed.append({"burst_accs": burst_accs, "other_accs": other_accs})
-            print(
-                f"  {sc.label}: dir_pruning burst@k=0={burst_accs[0]:.3f}, "
-                f"burst@k=5={burst_accs[svd_ks.index(5)] if 5 in svd_ks else '?':.3f}",
-                flush=True,
-            )
 
         results[sched] = {"svd_ks": svd_ks, "per_seed": per_seed}
     return results
@@ -943,10 +909,6 @@ def compute_transfer_dual(
             other_acc = _free_gen_acc(net, other_sub, prompt_len)
 
             per_seed.append({"burst_acc": burst_acc, "other_acc": other_acc})
-            print(
-                f"  {sc_src.label} → {sc_tgt.label}: burst={burst_acc:.3f}, other={other_acc:.3f}",
-                flush=True,
-            )
 
         results[sched] = {"per_seed": per_seed}
 
@@ -992,13 +954,13 @@ def compute_relearning_dual(
             scaler = torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
 
             n = min(256, burst_docs_BL.shape[0])
-            docs_fine = burst_docs_BL[np.random.choice(burst_docs_BL.shape[0], n, replace=False)]
+            docs_fine = burst_docs_BL[_rng.choice(burst_docs_BL.shape[0], n, replace=False)]
 
             burst_accs, other_accs, steps_log = [], [], []
             net.train()
             it = 0
             for step in range(relearn_steps):
-                batch_idx = np.random.choice(n, min(cfg["batch_size"], n), replace=True)
+                batch_idx = _rng.choice(n, min(cfg["batch_size"], n), replace=True)
                 batch = torch.as_tensor(docs_fine[batch_idx], dtype=torch.long, device=DEVICE)
                 inp, tgt = batch[:, :-1], batch[:, 1:]
                 it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, relearn_steps)
@@ -1021,10 +983,6 @@ def compute_relearning_dual(
 
             per_seed.append(
                 {"steps": steps_log, "burst_accs": burst_accs, "other_accs": other_accs}
-            )
-            print(
-                f"  {sc.label}: relearn burst={burst_accs[-1]:.3f}, other={other_accs[-1]:.3f}",
-                flush=True,
             )
 
         results[sched] = {"per_seed": per_seed}
@@ -1096,7 +1054,6 @@ def compute_trajectory_dim(
 
             per_seed.append(dim)
             seeds_done += 1
-            print(f"  {label}: trajectory_dim={dim}", flush=True)
 
         results[sched] = {"per_seed": per_seed}
 
@@ -1162,14 +1119,14 @@ def compute_forgetting_decomposition(all_results: list[dict]) -> dict:
             T = r["config"]["total_steps"]
 
             burst_end = r.get("burst_end_step", r.get("pre_burst_steps", 0) + T)
-            rev_steps = [s - burst_end for s, p in zip(steps, phases) if p == PHASE_REVERSION]
-            rev_accs = [a for a, p in zip(accs, phases) if p == PHASE_REVERSION]
+            rev_steps = [s - burst_end for s, p in zip(steps, phases, strict=False) if p == PHASE_REVERSION]
+            rev_accs = [a for a, p in zip(accs, phases, strict=False) if p == PHASE_REVERSION]
             if len(rev_accs) < 2:
                 continue
 
             early_mask = [s <= 50 for s in rev_steps]
-            early_s = [s for s, m in zip(rev_steps, early_mask) if m]
-            early_a = [a for a, m in zip(rev_accs, early_mask) if m]
+            early_s = [s for s, m in zip(rev_steps, early_mask, strict=False) if m]
+            early_a = [a for a, m in zip(rev_accs, early_mask, strict=False) if m]
             slope = float(np.polyfit(early_s, early_a, 1)[0]) if len(early_s) >= 2 else float("nan")
 
             cutoff = int(len(rev_accs) * 0.8)
@@ -1206,7 +1163,7 @@ def compute_grad_temporal(all_results: list[dict]) -> dict:
             phases = gsl.get("phase", [])
             T = r["config"]["total_steps"]
             burst_end = r.get("burst_end_step", r.get("pre_burst_steps", 0) + T)
-            for s, sim, ph in zip(steps, sims, phases):
+            for s, sim, ph in zip(steps, sims, phases, strict=False):
                 if ph == PHASE_REVERSION:
                     step_sims.setdefault(s - burst_end, []).append(sim)
 
@@ -1240,7 +1197,7 @@ def compute_layer_interference(all_results: list[dict]) -> dict:
             if not layer_names and gsl.get("layer_names"):
                 layer_names = gsl["layer_names"]
             for ln, vals in per_layer.items():
-                burst_vals = [v for v, p in zip(vals, phases) if p == PHASE_BURST]
+                burst_vals = [v for v, p in zip(vals, phases, strict=False) if p == PHASE_BURST]
                 if burst_vals:
                     layer_sims.setdefault(ln, []).append(float(np.mean(burst_vals)))
                     layer_end_sims.setdefault(ln, []).append(float(burst_vals[-1]))
@@ -1291,7 +1248,7 @@ def _aggregate_layer_metric(
             if not layer_names and gsl.get("layer_names"):
                 layer_names = gsl["layer_names"]
             for ln, vals in per_layer.items():
-                filtered = [v for v, p in zip(vals, phases) if p == phase_filter]
+                filtered = [v for v, p in zip(vals, phases, strict=False) if p == phase_filter]
                 if filtered:
                     arr = np.asarray(filtered)
                     valid = arr[~np.isnan(arr)]
@@ -1355,7 +1312,7 @@ def compute_token_pos_grad(all_results: list[dict]) -> dict:
             gsl = r.get("grad_sim_log", {})
             norms_list = gsl.get("token_pos_grad_norms", [])
             phases = gsl.get("phase", [])
-            for norms, phase in zip(norms_list, phases):
+            for norms, phase in zip(norms_list, phases, strict=False):
                 if phase == PHASE_BURST and norms:
                     all_norms.append(norms)
 
@@ -1395,8 +1352,8 @@ def compute_grad_attribution(all_results: list[dict]) -> dict:
             fin_fracs = attr.get("final_frac", [])
             phases = gsl.get("phase", [])
 
-            burst_int = [v for v, p in zip(int_fracs, phases) if p == PHASE_BURST]
-            burst_fin = [v for v, p in zip(fin_fracs, phases) if p == PHASE_BURST]
+            burst_int = [v for v, p in zip(int_fracs, phases, strict=False) if p == PHASE_BURST]
+            burst_fin = [v for v, p in zip(fin_fracs, phases, strict=False) if p == PHASE_BURST]
 
             if burst_int:
                 seed_intermediate.append(float(np.nanmean(burst_int)))
@@ -1502,7 +1459,6 @@ def compute_forgetting_grad_alignment(
                 }
             )
             net.zero_grad()
-            print(f"  {sc.label}: grad_align global={global_cos:.6f}", flush=True)
 
         results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
 
@@ -1667,9 +1623,9 @@ def compute_sharpness(
                 for pn in pnames:
                     param_to_group[pn] = gname
 
-            burst_layers: dict[str, float] = {g: 0.0 for g in layer_group_names}
-            other_layers: dict[str, float] = {g: 0.0 for g in layer_group_names}
-            layer_delta_norms: dict[str, float] = {g: 0.0 for g in layer_group_names}
+            burst_layers: dict[str, float] = dict.fromkeys(layer_group_names, 0.0)
+            other_layers: dict[str, float] = dict.fromkeys(layer_group_names, 0.0)
+            layer_delta_norms: dict[str, float] = dict.fromkeys(layer_group_names, 0.0)
 
             for k, d in delta.items():
                 g = param_to_group.get(k)
@@ -1697,12 +1653,6 @@ def compute_sharpness(
                     "other_layers": other_layers,
                 }
             )
-            print(
-                f"  {sc.label}: critical sharpness burst={burst_critical:.4f} "
-                f"(η_c={eta_c_burst:.6f}), other={other_critical:.4f} "
-                f"(η_c={eta_c_other:.6f})",
-                flush=True,
-            )
 
         results[sched] = {"per_seed": per_seed, "layer_group_names": layer_group_names}
 
@@ -1719,8 +1669,8 @@ def _bar_with_seeds(
     schedules: list[str],
     per_seed_values: dict[str, list[float]],
     name: str = "",
-    row: int = None,
-    col: int = None,
+    row: int | None = None,
+    col: int | None = None,
 ) -> None:
     import plotly.graph_objects as go
 
@@ -1737,14 +1687,14 @@ def _bar_with_seeds(
             means.append(float("nan"))
             ci95s.append(0)
 
-    bar_kwargs = dict(
-        x=schedules,
-        y=means,
-        marker_color=[_color(s) for s in schedules],
-        error_y=dict(type="data", array=ci95s, visible=True),
-        name=name,
-        showlegend=bool(name),
-    )
+    bar_kwargs = {
+        "x": schedules,
+        "y": means,
+        "marker_color": [_color(s) for s in schedules],
+        "error_y": {"type": "data", "array": ci95s, "visible": True},
+        "name": name,
+        "showlegend": bool(name),
+    }
     if row is not None:
         fig.add_trace(go.Bar(**bar_kwargs), row=row, col=col)
     else:
@@ -1754,15 +1704,15 @@ def _bar_with_seeds(
         vals = per_seed_values.get(s, [])
         if not vals:
             continue
-        jitter = np.random.uniform(-0.15, 0.15, len(vals))
-        scatter_kwargs = dict(
-            x=[s_idx + j for j in jitter],
-            y=vals,
-            mode="markers",
-            marker=dict(color="rgba(50,50,50,0.5)", size=6),
-            showlegend=False,
-            hovertext=[f"seed {i}" for i in range(len(vals))],
-        )
+        jitter = _rng.uniform(-0.15, 0.15, len(vals))
+        scatter_kwargs = {
+            "x": [s_idx + j for j in jitter],
+            "y": vals,
+            "mode": "markers",
+            "marker": {"color": "rgba(50,50,50,0.5)", "size": 6},
+            "showlegend": False,
+            "hovertext": [f"seed {i}" for i in range(len(vals))],
+        }
         if row is not None:
             fig.add_trace(go.Scatter(**scatter_kwargs), row=row, col=col)
         else:
@@ -1778,7 +1728,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
 
     all_figs: list[tuple[str, str, go.Figure]] = []
 
-    def _add(key: str, title: str, fig: go.Figure):
+    def _add(key: str, title: str, fig: go.Figure) -> None:
         all_figs.append((key, title, fig))
         _save_png(fig, str(charts_dir / f"{key}.png"))
 
@@ -1811,13 +1761,13 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 other_mean = [
                     float(np.mean([s[other_key][i] for s in ps])) for i in range(len(alphas))
                 ]
-                diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
                 fig.add_trace(
                     go.Scatter(
                         x=alphas,
                         y=burst_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=True,
                     ),
@@ -1829,7 +1779,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         x=alphas,
                         y=other_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=False,
                     ),
@@ -1841,7 +1791,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         x=alphas,
                         y=diff_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                     )
                 )
@@ -1906,13 +1856,13 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 other_mean = [
                     float(np.mean([s[other_key][i] for s in ps])) for i in range(len(alphas))
                 ]
-                diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
                 fig.add_trace(
                     go.Scatter(
                         x=alphas,
                         y=burst_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=True,
                     ),
@@ -1924,7 +1874,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         x=alphas,
                         y=other_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=False,
                     ),
@@ -1936,7 +1886,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         x=alphas,
                         y=diff_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                     )
                 )
@@ -2013,13 +1963,13 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 other_mean = [
                     float(np.mean([s[other_key][i] for s in ps])) for i in range(len(cut_points))
                 ]
-                diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
                 fig.add_trace(
                     go.Scatter(
                         x=cut_labels,
                         y=burst_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=True,
                     ),
@@ -2031,7 +1981,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         x=cut_labels,
                         y=other_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=False,
                     ),
@@ -2043,7 +1993,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         x=cut_labels,
                         y=diff_mean,
                         name=sched,
-                        line=dict(color=_color(sched), width=2),
+                        line={"color": _color(sched), "width": 2},
                         mode="lines+markers",
                     )
                 )
@@ -2091,13 +2041,13 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             pre_top_burst = [
                 float(np.mean([s["post_bottom_burst"][i] for s in ps])) for i in range(n_cuts)
             ]
-            loc_gap = [pt - pb for pt, pb in zip(post_top_burst, pre_top_burst)]
+            loc_gap = [pt - pb for pt, pb in zip(post_top_burst, pre_top_burst, strict=False)]
             fig_gap.add_trace(
                 go.Scatter(
                     x=cut_labels,
                     y=loc_gap,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2119,7 +2069,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             go.Bar(
                 x=list(deepest_gaps.keys()),
                 y=list(deepest_gaps.values()),
-                marker_color=[_color(s) for s in deepest_gaps.keys()],
+                marker_color=[_color(s) for s in deepest_gaps],
             )
         )
         fig_bar.add_hline(y=0, line_dash="dash", line_color="gray")
@@ -2163,15 +2113,15 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             b_other = [
                 float(np.mean([s["b_bottom_other"][i] for s in ps])) for i in range(len(cut_points))
             ]
-            a_diff = [b - o for b, o in zip(a_burst, a_other)]
-            b_diff = [b - o for b, o in zip(b_burst, b_other)]
+            a_diff = [b - o for b, o in zip(a_burst, a_other, strict=False)]
+            b_diff = [b - o for b, o in zip(b_burst, b_other, strict=False)]
 
             fig.add_trace(
                 go.Scatter(
                     x=cut_labels,
                     y=a_burst,
                     name=f"{sa} bottom",
-                    line=dict(color=_color(sa), width=2),
+                    line={"color": _color(sa), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -2182,7 +2132,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=cut_labels,
                     y=b_burst,
                     name=f"{sb} bottom",
-                    line=dict(color=_color(sb), width=2),
+                    line={"color": _color(sb), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -2193,7 +2143,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=cut_labels,
                     y=a_other,
                     name=f"{sa} bottom",
-                    line=dict(color=_color(sa), width=2, dash="dash"),
+                    line={"color": _color(sa), "width": 2, "dash": "dash"},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -2205,7 +2155,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=cut_labels,
                     y=b_other,
                     name=f"{sb} bottom",
-                    line=dict(color=_color(sb), width=2, dash="dash"),
+                    line={"color": _color(sb), "width": 2, "dash": "dash"},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -2217,7 +2167,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=cut_labels,
                     y=a_diff,
                     name=f"{sa} bottom",
-                    line=dict(color=_color(sa), width=2),
+                    line={"color": _color(sa), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2226,7 +2176,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=cut_labels,
                     y=b_diff,
                     name=f"{sb} bottom",
-                    line=dict(color=_color(sb), width=2),
+                    line={"color": _color(sb), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2296,13 +2246,13 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             other_mean = [
                 float(np.mean([s["other_accs"][i] for s in ps])) for i in range(len(sparsities))
             ]
-            diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
+            diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
             fig.add_trace(
                 go.Scatter(
                     x=[s * 100 for s in sparsities],
                     y=burst_mean,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -2313,7 +2263,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=[s * 100 for s in sparsities],
                     y=other_mean,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -2325,7 +2275,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=[s * 100 for s in sparsities],
                     y=diff_mean,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2370,13 +2320,13 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             other_mean = [
                 float(np.mean([s["other_accs"][i] for s in ps])) for i in range(len(steps))
             ]
-            diff_mean = [b - o for b, o in zip(burst_mean, other_mean)]
+            diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
             fig.add_trace(
                 go.Scatter(
                     x=steps,
                     y=burst_mean,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -2387,7 +2337,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=steps,
                     y=other_mean,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -2399,7 +2349,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=steps,
                     y=diff_mean,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2422,7 +2372,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         )
         _add(f"relearning_delta_{rn}", f"Relearning Δ ({rn})", fig_delta)
 
-        _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+        _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapezoid
         auc_vals = {}
         for sched in schedules:
             ps = rl[sched]["per_seed"]
@@ -2506,7 +2456,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=d["steps"],
                     y=d["mean_sims"],
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines",
                 )
             )
@@ -2545,7 +2495,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 y=schedules,
                 colorscale="RdBu",
                 zmid=0,
-                colorbar=dict(title="Cosine Sim"),
+                colorbar={"title": "Cosine Sim"},
             )
         )
         fig.update_layout(
@@ -2570,7 +2520,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 y=schedules,
                 colorscale="RdBu",
                 zmid=0,
-                colorbar=dict(title="Cosine Sim"),
+                colorbar={"title": "Cosine Sim"},
             )
         )
         fig_end.update_layout(
@@ -2685,7 +2635,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=layer_group_names,
                     y=schedules,
                     colorscale="YlOrRd",
-                    colorbar=dict(title="λ_c fraction"),
+                    colorbar={"title": "λ_c fraction"},
                 )
             )
             fig.update_layout(
@@ -2734,7 +2684,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 y=schedules,
                 colorscale="RdBu_r",
                 zmid=0,
-                colorbar=dict(title="Δ λ_c"),
+                colorbar={"title": "Δ λ_c"},
             )
         )
         fig_hm_diff.update_layout(
@@ -2774,8 +2724,8 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     else:
                         means.append(float("nan"))
                         ci95.append(0.0)
-                upper = [m + c if not np.isnan(m) else float("nan") for m, c in zip(means, ci95)]
-                lower = [m - c if not np.isnan(m) else float("nan") for m, c in zip(means, ci95)]
+                upper = [m + c if not np.isnan(m) else float("nan") for m, c in zip(means, ci95, strict=False)]
+                lower = [m - c if not np.isnan(m) else float("nan") for m, c in zip(means, ci95, strict=False)]
                 col = _color(sched)
                 fig.add_trace(
                     go.Scatter(
@@ -2784,7 +2734,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         fill="toself",
                         fillcolor=col,
                         opacity=0.15,
-                        line=dict(width=0),
+                        line={"width": 0},
                         showlegend=False,
                         hoverinfo="skip",
                     )
@@ -2794,7 +2744,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         x=layer_group_names,
                         y=means,
                         name=sched,
-                        line=dict(color=col, width=2),
+                        line={"color": col, "width": 2},
                         mode="lines+markers",
                     )
                 )
@@ -2838,10 +2788,10 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     diff_means.append(float("nan"))
                     ci95_diff.append(0.0)
             upper_d = [
-                m + c if not np.isnan(m) else float("nan") for m, c in zip(diff_means, ci95_diff)
+                m + c if not np.isnan(m) else float("nan") for m, c in zip(diff_means, ci95_diff, strict=False)
             ]
             lower_d = [
-                m - c if not np.isnan(m) else float("nan") for m, c in zip(diff_means, ci95_diff)
+                m - c if not np.isnan(m) else float("nan") for m, c in zip(diff_means, ci95_diff, strict=False)
             ]
             col = _color(sched)
             fig_diff.add_trace(
@@ -2851,7 +2801,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     fill="toself",
                     fillcolor=col,
                     opacity=0.15,
-                    line=dict(width=0),
+                    line={"width": 0},
                     showlegend=False,
                     hoverinfo="skip",
                 )
@@ -2861,7 +2811,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=layer_group_names,
                     y=diff_means,
                     name=sched,
-                    line=dict(color=col, width=2),
+                    line={"color": col, "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2906,7 +2856,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                         y=vals,
                         name=f"pos{bp}",
                         mode="lines+markers",
-                        line=dict(width=2),
+                        line={"width": 2},
                     )
                 )
             fig.update_layout(
@@ -2944,7 +2894,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 y=schedules,
                 colorscale="RdBu_r",
                 zmid=1.0,
-                colorbar=dict(title="||g_burst|| / ||g_other||"),
+                colorbar={"title": "||g_burst|| / ||g_other||"},
             )
         )
         fig.update_layout(
@@ -2983,7 +2933,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 x=layer_names,
                 y=schedules,
                 colorscale="Viridis",
-                colorbar=dict(title="Effective Rank"),
+                colorbar={"title": "Effective Rank"},
             )
         )
         fig.update_layout(
@@ -3022,7 +2972,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 x=layer_names,
                 y=schedules,
                 colorscale="YlOrRd",
-                colorbar=dict(title="SNR"),
+                colorbar={"title": "SNR"},
             )
         )
         fig.update_layout(
@@ -3062,7 +3012,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 y=schedules,
                 colorscale="RdBu_r",
                 zmid=0.5,
-                colorbar=dict(title="Conflict Rate"),
+                colorbar={"title": "Conflict Rate"},
             )
         )
         fig.update_layout(
@@ -3099,7 +3049,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=positions,
                     y=norms,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -3207,7 +3157,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     y=schedules,
                     colorscale="RdBu",
                     zmid=0,
-                    colorbar=dict(title="Cosine Sim"),
+                    colorbar={"title": "Cosine Sim"},
                 )
             )
             fig_heat.update_layout(
@@ -3245,7 +3195,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 x=layer_group_names,
                 y=schedules,
                 colorscale="YlOrRd",
-                colorbar=dict(title="||ΔW||_F"),
+                colorbar={"title": "||ΔW||_F"},
             )
         )
         fig.update_layout(
@@ -3285,7 +3235,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 x=layer_group_names,
                 y=schedules,
                 colorscale="Viridis",
-                colorbar=dict(title="Effective Rank"),
+                colorbar={"title": "Effective Rank"},
             )
         )
         fig.update_layout(
@@ -3324,7 +3274,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 colorscale="RdYlGn",
                 zmin=0,
                 zmax=1,
-                colorbar=dict(title="CKA"),
+                colorbar={"title": "CKA"},
             )
         )
         fig.update_layout(
@@ -3364,7 +3314,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=svd_ks,
                     y=burst_mean,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -3375,7 +3325,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     x=svd_ks,
                     y=other_mean,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -3429,11 +3379,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
 """
     ]
 
-    for i, (key, title, _) in enumerate(all_figs):
+    for i, (_key, title, _) in enumerate(all_figs):
         html_parts.append(f'  <a href="#chart_{i}">{i + 1}. {title}</a>\n')
     html_parts.append("</div>\n")
 
-    for i, (key, title, fig) in enumerate(all_figs):
+    for i, (_key, title, fig) in enumerate(all_figs):
         html_parts.append(f'<div class="chart-container" id="chart_{i}">\n')
         html_parts.append(f"<h2>{i + 1}. {title}</h2>\n")
         html_parts.append(fig.to_html(full_html=False, include_plotlyjs=(i == 0)))
@@ -3444,8 +3394,6 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
     html_path = out_dir / "dashboard.html"
     with open(html_path, "w") as f:
         f.write("".join(html_parts))
-    print(f"\nDashboard saved: {html_path}", flush=True)
-    print(f"Charts saved: {charts_dir}", flush=True)
 
     from burst.dev.plot_utils import write_text_report
 
@@ -3467,7 +3415,6 @@ def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:
         T: burst phase steps
         U: reversion steps
     """
-
     sched_groups: dict[str, list[dict]] = {}
     for r in results:
         sched_groups.setdefault(r["schedule"], []).append(r)
@@ -3635,19 +3582,19 @@ def _ext_bar_fig(
         go.Bar(
             x=schedules,
             y=means,
-            error_y=dict(type="data", array=cis, visible=True),
+            error_y={"type": "data", "array": cis, "visible": True},
             marker_color=[colors.get(s, "#888") for s in schedules],
             name="Mean ± 95% CI",
         )
     )
-    for i, (s, vals) in enumerate(zip(schedules, all_vals)):
+    for i, (s, vals) in enumerate(zip(schedules, all_vals, strict=False)):
         np.random.default_rng(42 + i).uniform(-0.2, 0.2, len(vals))
         fig.add_trace(
             go.Scatter(
                 x=[s] * len(vals),
                 y=vals.tolist(),
                 mode="markers",
-                marker=dict(color="black", size=5, opacity=0.5),
+                marker={"color": "black", "size": 5, "opacity": 0.5},
                 showlegend=(i == 0),
                 name="Seeds",
             )
@@ -3686,7 +3633,7 @@ def _ext_curve_burst_aligned(
         x = (steps[:min_len] - steps[0]).tolist()
         c = colors.get(s, "#888")
         fig.add_trace(
-            go.Scatter(x=x, y=mean_c.tolist(), mode="lines", name=s, line=dict(color=c, width=2))
+            go.Scatter(x=x, y=mean_c.tolist(), mode="lines", name=s, line={"color": c, "width": 2})
         )
         fig.add_trace(
             go.Scatter(
@@ -3695,7 +3642,7 @@ def _ext_curve_burst_aligned(
                 fill="toself",
                 fillcolor=c,
                 opacity=0.15,
-                line=dict(width=0),
+                line={"width": 0},
                 showlegend=False,
             )
         )
@@ -3747,7 +3694,7 @@ def _ext_curve_reversal_aligned(
             x = (b_steps[:min_len] - b_steps[-1]).tolist()
             fig.add_trace(
                 go.Scatter(
-                    x=x, y=mean_c.tolist(), mode="lines", name=s, line=dict(color=c, width=2)
+                    x=x, y=mean_c.tolist(), mode="lines", name=s, line={"color": c, "width": 2}
                 )
             )
             fig.add_trace(
@@ -3757,7 +3704,7 @@ def _ext_curve_reversal_aligned(
                     fill="toself",
                     fillcolor=c,
                     opacity=0.12,
-                    line=dict(width=0),
+                    line={"width": 0},
                     showlegend=False,
                 )
             )
@@ -3778,7 +3725,7 @@ def _ext_curve_reversal_aligned(
                     y=mean_c.tolist(),
                     mode="lines",
                     showlegend=False,
-                    line=dict(color=c, width=2, dash="dot"),
+                    line={"color": c, "width": 2, "dash": "dot"},
                 )
             )
             fig.add_trace(
@@ -3788,7 +3735,7 @@ def _ext_curve_reversal_aligned(
                     fill="toself",
                     fillcolor=c,
                     opacity=0.12,
-                    line=dict(width=0),
+                    line={"width": 0},
                     showlegend=False,
                 )
             )
@@ -3804,7 +3751,7 @@ def _ext_curve_reversal_aligned(
     return fig
 
 
-def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path):
+def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None:
     """Generate extended metrics dashboard with 11 new metrics and dual-alignment charts.
 
     Saves:
@@ -3813,7 +3760,8 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path):
     """
     import plotly.graph_objects as go
     import plotly.io as pio
-    from burst.config import ordered_schedules, SCHED_COLORS
+
+    from burst.config import SCHED_COLORS, ordered_schedules
     from burst.core.train_utils import load_results
 
     charts_dir = out_dir / "charts"
@@ -3824,11 +3772,10 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path):
         try:
             results, _ = load_results(run_dir)
             all_results_combined.extend(results)
-        except Exception as e:
-            print(f"  Warning: could not load {run_dir}: {e}", flush=True)
+        except Exception:
+            pass
 
     if not all_results_combined:
-        print("  No results found for extended metrics.", flush=True)
         return
 
     metrics = _compute_extended_metrics(all_results_combined)
@@ -3847,11 +3794,9 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path):
 
     all_figs: list[tuple[str, str, Any]] = []
 
-    def _try_save_png(fig, name):
-        try:
+    def _try_save_png(fig, name) -> None:
+        with contextlib.suppress(Exception):
             pio.write_image(fig, str(charts_dir / name), width=1200, height=500)
-        except Exception:
-            pass
 
     for key, title, ylabel in scalar_metrics:
         fig = _ext_bar_fig(schedules, key, title, ylabel, metrics, colors)
@@ -3936,8 +3881,6 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path):
     html_path = out_dir / "extended_metrics.html"
     with open(html_path, "w") as f:
         f.write("".join(html_parts))
-    print(f"Extended metrics dashboard saved: {html_path}", flush=True)
-    print(f"PNG charts saved: {charts_dir}", flush=True)
 
     from burst.dev.plot_utils import write_text_report
 
@@ -3986,9 +3929,6 @@ def analyse_run(
     xfrank_seeds: int = 10,
     subsample_n: int = 256,
 ) -> dict:
-    print(f"\n{'=' * 60}", flush=True)
-    print(f"Analysing: {run_dir.name}", flush=True)
-    print(f"{'=' * 60}", flush=True)
 
     config_path, data_path, all_results_path, ckpt_root = _resolve_unified_paths(run_dir)
 
@@ -4017,39 +3957,30 @@ def analyse_run(
     result = {"run_name": run_name, "burst_pos": rc["burst_pos"], "n_layer": n_layer}
 
     if ANALYSIS_METRICS.get("forgetting_decomposition", True):
-        print("\n[1/18] Data-only: forgetting decomposition...", flush=True)
         result["forgetting_decomposition"] = compute_forgetting_decomposition(all_results)
 
     if ANALYSIS_METRICS.get("grad_temporal", True):
-        print("\n[2/18] Data-only: gradient temporal dynamics...", flush=True)
         result["grad_temporal"] = compute_grad_temporal(all_results)
 
     if ANALYSIS_METRICS.get("layer_interference", True):
-        print("\n[3/18] Data-only: layer interference...", flush=True)
         result["layer_interference"] = compute_layer_interference(all_results)
 
     if ANALYSIS_METRICS.get("grad_norm_ratio", True):
-        print("\n[12/18] Data-only: gradient norm ratio per layer...", flush=True)
         result["grad_norm_ratio"] = compute_grad_norm_ratio(all_results)
 
     if ANALYSIS_METRICS.get("grad_rank", True):
-        print("\n[13/18] Data-only: gradient effective rank per layer...", flush=True)
         result["grad_rank"] = compute_grad_rank(all_results)
 
     if ANALYSIS_METRICS.get("grad_snr", True):
-        print("\n[14/18] Data-only: gradient SNR per layer...", flush=True)
         result["grad_snr"] = compute_grad_snr(all_results)
 
     if ANALYSIS_METRICS.get("conflict_rate", True):
-        print("\n[15/18] Data-only: gradient conflict rate per layer...", flush=True)
         result["conflict_rate"] = compute_conflict_rate(all_results)
 
     if ANALYSIS_METRICS.get("token_pos_grad", True):
-        print("\n[16/18] Data-only: per-token-position gradient norms...", flush=True)
         result["token_pos_grad"] = compute_token_pos_grad(all_results)
 
     if ANALYSIS_METRICS.get("grad_attribution", True):
-        print("\n[17/18] Data-only: gradient attribution to composition steps...", flush=True)
         result["grad_attribution"] = compute_grad_attribution(all_results)
 
     need_ckpts = any(
@@ -4073,52 +4004,41 @@ def analyse_run(
     )
 
     if not ckpt_root.exists():
-        print("  No checkpoints — skipping checkpoint-based metrics.", flush=True)
         return result
 
     if not need_ckpts:
         return result
 
     max_seeds = max(n_seeds, frank_seeds, xfrank_seeds)
-    print(
-        f"\n[preload] Loading checkpoints for up to {max_seeds} seeds per schedule...", flush=True
-    )
-    t_preload = time.time()
+    time.time()
     preloaded = _preload_seeds(ckpt_root, all_results, max_seeds)
-    print(f"  Preloaded in {time.time() - t_preload:.1f}s", flush=True)
 
     if ANALYSIS_METRICS.get("ema_dual", True):
-        print("\n[4/18] EMA interpolation (dual-class)...", flush=True)
         result["ema_dual"] = compute_ema_dual(
             preloaded, burst_sub, other_sub, prompt_len, n_seeds=n_seeds
         )
 
     if ANALYSIS_METRICS.get("lmc_dual", True):
-        print("\n[5/18] LMC (dual-class)...", flush=True)
         result["lmc_dual"] = compute_lmc_dual(
             preloaded, burst_sub, other_sub, prompt_len, n_seeds=n_seeds
         )
 
     if ANALYSIS_METRICS.get("frankenstein", True):
-        print("\n[6/18] Frankenstein layer-swap...", flush=True)
         result["frankenstein"] = compute_frankenstein(
             preloaded, burst_sub, other_sub, prompt_len, n_layer=n_layer, n_seeds=frank_seeds
         )
 
     if ANALYSIS_METRICS.get("cross_frankenstein", True):
-        print("\n[7/18] Cross-burst Frankenstein...", flush=True)
         result["cross_frankenstein"] = compute_cross_burst_frankenstein(
             preloaded, burst_sub, other_sub, prompt_len, n_layer=n_layer, n_seeds=xfrank_seeds
         )
 
     if ANALYSIS_METRICS.get("transfer_dual", True):
-        print("\n[8/18] Task vector transfer (dual-class)...", flush=True)
         result["transfer_dual"] = compute_transfer_dual(
             preloaded, burst_sub, other_sub, prompt_len, n_seeds=n_seeds
         )
 
     if ANALYSIS_METRICS.get("pruning_dual", True):
-        print("\n[9/18] Pruning robustness (dual-class)...", flush=True)
         result["pruning_dual"] = compute_pruning_dual(
             preloaded,
             burst_sub,
@@ -4131,7 +4051,6 @@ def analyse_run(
     if ANALYSIS_METRICS.get("trajectory_dim", True) or ANALYSIS_METRICS.get(
         "relearning_dual", True
     ):
-        print("\n[10/18] Forgetting trajectory dim + relearning...", flush=True)
         if ANALYSIS_METRICS.get("trajectory_dim", True):
             result["trajectory_dim"] = compute_trajectory_dim(
                 ckpt_root, all_results, n_seeds=n_seeds
@@ -4148,39 +4067,31 @@ def analyse_run(
             )
 
     if ANALYSIS_METRICS.get("sharpness", True):
-        print(
-            "\n[11/18] Critical sharpness λ_c = 2/η_c via forward-pass line search...", flush=True
-        )
         result["sharpness"] = compute_sharpness(
             preloaded, burst_sub, other_sub, n_layer=n_layer, n_seeds=n_seeds
         )
 
     if ANALYSIS_METRICS.get("forgetting_grad_alignment", True):
-        print("\n[18/18] Forgetting gradient alignment at peak burst...", flush=True)
         result["forgetting_grad_alignment"] = compute_forgetting_grad_alignment(
             preloaded, other_sub, n_layer=n_layer, n_seeds=n_seeds
         )
 
     if ANALYSIS_METRICS.get("weight_drift_per_layer", True):
-        print("\n[19/24] Per-layer weight drift decomposition...", flush=True)
         result["weight_drift_per_layer"] = compute_weight_drift_per_layer(
             preloaded, n_layer=n_layer, n_seeds=n_seeds
         )
 
     if ANALYSIS_METRICS.get("effective_rank_per_layer", True):
-        print("\n[20/24] Effective rank of ΔW per layer...", flush=True)
         result["effective_rank_per_layer"] = compute_effective_rank_per_layer(
             preloaded, n_layer=n_layer, n_seeds=n_seeds
         )
 
     if ANALYSIS_METRICS.get("cka_per_layer", True):
-        print("\n[21/24] CKA between pre and post checkpoints per layer...", flush=True)
         result["cka_per_layer"] = compute_cka_per_layer(
             preloaded, burst_sub, n_layer=n_layer, n_seeds=n_seeds
         )
 
     if ANALYSIS_METRICS.get("directional_pruning", True):
-        print("\n[22/24] Directional pruning (top-k SVD of ΔW)...", flush=True)
         result["directional_pruning"] = compute_directional_pruning(
             preloaded, burst_sub, other_sub, prompt_len, n_seeds=n_seeds
         )
@@ -4188,7 +4099,7 @@ def analyse_run(
     return result
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Unified burstiness analysis dashboard.")
     parser.add_argument("run_dirs", nargs="+", type=Path)
     default_out = Path(f"data/{datetime.now().strftime('%Y%m%d-%H%M%S')}_unified_analysis")
@@ -4206,7 +4117,7 @@ def main():
     per_run_results = []
     for run_dir in args.run_dirs:
         run_dir = Path(run_dir)
-        t0 = time.time()
+        time.time()
         r = analyse_run(
             run_dir,
             n_seeds=args.n_seeds,
@@ -4217,7 +4128,6 @@ def main():
             subsample_n=args.subsample_n,
         )
         per_run_results.append(r)
-        print(f"  Completed {run_dir.name} in {time.time() - t0:.1f}s", flush=True)
 
     run_names = [r["run_name"] for r in per_run_results]
     burst_positions = {r["run_name"]: r["burst_pos"] for r in per_run_results}
@@ -4259,15 +4169,11 @@ def main():
     results_path = args.out_dir / "results.pkl"
     with open(results_path, "wb") as f:
         pickle.dump(combined, f)
-    print(f"\nResults saved: {results_path}", flush=True)
 
-    print("\nGenerating dashboard...", flush=True)
     make_dashboard(combined, args.out_dir)
 
-    print("\nGenerating extended metrics dashboard...", flush=True)
     make_extended_metrics_dashboard(args.run_dirs, args.out_dir)
 
-    print("\nDone.", flush=True)
 
 
 if __name__ == "__main__":

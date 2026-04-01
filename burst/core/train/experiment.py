@@ -44,15 +44,11 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from einops import rearrange
-from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from burst.config import (
@@ -75,29 +71,26 @@ from burst.config import (
 from burst.core.data import pad_pools_to_same_length
 from burst.core.gpu import gpu_cfg
 from burst.core.repro import set_reproducibility, write_repro_manifest
-from net.nanogpt import nanoGPT
+from burst.core.train_utils import (
+    DEVICE,
+    _cross_entropy_logits_BTV_targets_BT,
+    make_net,
+    make_optim_cfg,
+    make_scaler,
+)
 from net.runner import configure_optimizers, update_phase_lr
 from synthetic.init import set_seed
 
 logger = logging.getLogger(__name__)
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PRETRAIN_ACC_THRESHOLD = 0.99
-
-
-def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
-    logits_BTV: torch.Tensor, targets_BT: torch.Tensor
-) -> torch.Tensor:
-    """Compute cross-entropy loss after flattening batch and time dims."""
-    logits_bv = rearrange(logits_BTV, "b t v -> (b t) v")
-    targets_b = rearrange(targets_BT, "b t -> (b t)")
-    return F.cross_entropy(logits_bv, targets_b)
+_rng = np.random.default_rng()
 
 
 class NpEncoder(json.JSONEncoder):
     """JSON encoder that handles numpy types."""
 
-    def default(self, obj: Any) -> Any:
+    def default(self, obj: object) -> int | float | bool | list:
         """Serialise numpy scalars, arrays, and tuples to JSON-compatible types."""
         if isinstance(obj, (np.integer,)):
             return int(obj)
@@ -198,7 +191,7 @@ class DepthNData:
     def _make_doc(self, task: tuple[int, ...]) -> np.ndarray:
         """Generate a single tokenised document for a task composition."""
         fns = task[1:]
-        inp = np.random.choice(self.n_alph, size=self.seq_len, replace=True)
+        inp = _rng.choice(self.n_alph, size=self.seq_len, replace=True)
         sp = np.array([self.token_idx[" "]])
 
         cur = inp.copy()
@@ -291,35 +284,9 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
     from burst.core.train.worker import eval_free_gen, eval_loss  # noqa: PLC0415
 
     set_seed(seed)
-    net = nanoGPT(
-        OmegaConf.create(
-            {
-                "compile": False,
-                "vocab_size": cfg["vocab_size"],
-                "context_size": cfg["context_size"],
-                "n_layer": cfg["n_layer"],
-                "n_head": cfg["n_head"],
-                "n_embd": cfg["n_embd"],
-                "dropout": 0.0,
-                "bias": False,
-                "mlp": True,
-            }
-        )
-    ).to(DEVICE)
-    if DEVICE == "cuda":
-        net = torch.compile(net)
-
-    optim_cfg = OmegaConf.create(
-        {
-            "learning_rate": cfg["lr"],
-            "weight_decay": cfg["weight_decay"],
-            "beta1": cfg["beta1"],
-            "beta2": cfg["beta2"],
-            "grad_clip": cfg["grad_clip"],
-        }
-    )
-    optimizer = configure_optimizers(net, optim_cfg)
-    scaler = torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
+    net = make_net(cfg)
+    optimizer = configure_optimizers(net, make_optim_cfg(cfg))
+    scaler = make_scaler()
 
     P = pretrain_steps
     warmup = cfg["warmup_iters"]
@@ -344,9 +311,9 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
         for i, tid in enumerate(bg_ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = np.random.randint(len(bg_pool[tid]), size=k)
+                idx = _rng.integers(len(bg_pool[tid]), size=k)
                 parts.append(bg_pool[tid][idx])
-        batch_np = np.concatenate(parts)[np.random.permutation(bs)]
+        batch_np = np.concatenate(parts)[_rng.permutation(bs)]
 
         dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
@@ -388,7 +355,7 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
         if (s + 1) % 100 == 0 or s == pretrain_steps - 1:
             prefix = f"{progress_prefix} " if progress_prefix else ""
             logger.info(
-                f"{prefix}pretrain step {s + 1}/{pretrain_steps}  loss={loss.item():.4f}"
+                "%spretrain step %d/%d  loss=%.4f", prefix, s + 1, pretrain_steps, loss.item()
             )
 
     if save_checkpoint:
@@ -397,7 +364,7 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
             raise ValueError(msg)
         raw = getattr(net, "_orig_mod", net)
         torch.save(raw.state_dict(), ckpt_path)
-        logger.info(f"  Pretrain checkpoint saved: {ckpt_path}")
+        logger.info("  Pretrain checkpoint saved: %s", ckpt_path)
     return log
 
 
@@ -459,13 +426,13 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     progress_dir = logs_dir / "_progress"
     progress_dir.mkdir(exist_ok=True)
 
-    logger.info(f"Output: {run_dir}\nDevice: {DEVICE}")
+    logger.info("Output: %s\nDevice: %s", run_dir, DEVICE)
     if DEVICE == "cuda":
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info("GPU: %s", torch.cuda.get_device_name(0))
 
     n_a = args.n_a
     logger.info(
-        f"\nBuilding data (depth={exp.depth}, burst_pos={exp.burst_pos}, n_a={n_a})..."
+        "\nBuilding data (depth=%d, burst_pos=%d, n_a=%d)...", exp.depth, exp.burst_pos, n_a
     )
     tp, bp, ed, pl, cfg_out, ti = build_data(
         base_cfg,
@@ -475,9 +442,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         data_seed=args.seed,
     )
     logger.info(
-        f"  Other classes: {ti['n_other_train']}  "
-        f"Burst class: {ti['n_burst_train']}  "
-        f"doc_len: {ti['doc_len']}  prompt: {ti['prompt_len']}"
+        "  Other classes: %s  Burst class: %s  doc_len: %s  prompt: %s",
+        ti["n_other_train"], ti["n_burst_train"], ti["doc_len"], ti["prompt_len"],
     )
 
     data_path = logs_dir / "_data.pkl"
@@ -496,8 +462,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     while True:
         pretrain_attempt += 1
         logger.info(
-            f"\nPretraining shared checkpoint ({P} steps on all-but-special)"
-            f" — attempt {pretrain_attempt}..."
+            "\nPretraining shared checkpoint (%d steps on all-but-special) — attempt %d...",
+            P, pretrain_attempt,
         )
         pretrain_log = run_pretrain(
             pretrain_cfg,
@@ -511,9 +477,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         )
         peak_acc_other = max(pretrain_log.get("acc_other", [0.0]))
         if peak_acc_other >= PRETRAIN_ACC_THRESHOLD:
-            logger.info(f"  Pretrain OK: peak acc_other={peak_acc_other:.4f}")
+            logger.info("  Pretrain OK: peak acc_other=%.4f", peak_acc_other)
             break
-        logger.info(f"  Pretrain acc_other={peak_acc_other:.4f} < 0.99, retrying...")
+        logger.info("  Pretrain acc_other=%.4f < 0.99, retrying...", peak_acc_other)
     with (logs_dir / "pretrain_log.pkl").open("wb") as f:
         pickle.dump(pretrain_log, f)
 
@@ -603,21 +569,22 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     n_procs = min(len(jobs), exp.n_workers)
     jobs_per_proc = max(1, (len(jobs) + n_procs - 1) // n_procs)
-    logger.info(f"  {gpu_cfg.summary()}")
-    logger.info(f"  Layout: {n_procs} processes x ~{jobs_per_proc} jobs/proc")
+    logger.info("  %s", gpu_cfg.summary())
+    logger.info("  Layout: %d processes x ~%d jobs/proc", n_procs, jobs_per_proc)
 
     tc = exp.train
-    logger.info(f"\nModel: {tc.n_layer}L/{tc.n_embd}d/{tc.n_head}H")
-    logger.info(f"Burst mode: {burst_mode}")
+    logger.info("\nModel: %dL/%dd/%dH", tc.n_layer, tc.n_embd, tc.n_head)
+    logger.info("Burst mode: %s", burst_mode)
     logger.info(
-        f"Jobs: {len(jobs)}, parallel processes: {n_procs}, jobs/process: ~{jobs_per_proc}"
+        "Jobs: %d, parallel processes: %d, jobs/process: ~%d", len(jobs), n_procs, jobs_per_proc
     )
-    logger.info(f"Schedules: {exp.schedules}")
+    logger.info("Schedules: %s", exp.schedules)
     for sched in exp.schedules:
         T_s = burst_steps_for_mode(sched, burst_mode, BURST_BASE_STEPS)
         bs_s = batch_size_for_mode(sched, burst_mode, base_cfg["batch_size"])
         logger.info(
-            f"  {sched}: burst_steps={T_s}  batch_size={bs_s}  reversion={tc.reversion_steps}"
+            "  %s: burst_steps=%d  batch_size=%d  reversion=%d",
+            sched, T_s, bs_s, tc.reversion_steps,
         )
     logger.info("")
 
@@ -718,7 +685,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     pbar.update(pbar.total - pbar.n)
     pbar.close()
     total_time = time.time() - t0
-    logger.info(f"\nAll {n_done} jobs done in {total_time:.0f}s ({total_time / 60:.1f} min)")
+    logger.info("\nAll %d jobs done in %.0fs (%.1f min)", n_done, total_time, total_time / 60)
 
     all_results = []
     for job in jobs:
@@ -736,10 +703,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     for f in logs_dir.glob("_chunk_*.pkl"):
         f.unlink()
 
-    logger.info(f"Results: {run_dir} ({len(all_results)} ok)")
-    logger.info(f"repro_manifest: {manifest_path}")
-    logger.info(f"\nNext: uv run python -m burst.core gradients {run_dir}")
-    logger.info(f"Next: uv run python -m burst.core pipeline {run_dir}")
+    logger.info("Results: %s (%d ok)", run_dir, len(all_results))
+    logger.info("repro_manifest: %s", manifest_path)
+    logger.info("\nNext: uv run python -m burst.core gradients %s", run_dir)
+    logger.info("Next: uv run python -m burst.core pipeline %s", run_dir)
 
 
 if __name__ == "__main__":

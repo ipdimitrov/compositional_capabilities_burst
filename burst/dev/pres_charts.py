@@ -119,7 +119,7 @@ def schedule_bars(pdir, results, cfg):
         total_s = P + T_s + U
         fracs = np.zeros(total_s)
         for s in range(T_s):
-            np.random.seed(107 * 10000 + s)
+            np.random.seed(107 * 10000 + s)  # noqa: NPY002
             fracs[P + s] = n_target_for_step(s, T_s, sched, p, bs) / bs
         ax.fill_between(range(total_s), fracs, color=PALETTE[sched], alpha=0.7)
         if P > 0:

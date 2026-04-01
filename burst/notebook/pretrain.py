@@ -23,6 +23,8 @@ from burst.notebook.model import (
 
 logger = logging.getLogger(__name__)
 
+_rng = np.random.default_rng()
+
 
 def pretrain(  # noqa: PLR0913, PLR0915
     data: dict,
@@ -64,7 +66,8 @@ def pretrain(  # noqa: PLR0913, PLR0915
         "n_head": n_head,
     }
 
-    np.random.seed(seed)
+    global _rng
+    _rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
     net = make_model(**model_cfg)
@@ -93,9 +96,9 @@ def pretrain(  # noqa: PLR0913, PLR0915
         for i, tid in enumerate(bg_ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = np.random.randint(len(bg_pool[tid]), size=k)
+                idx = _rng.integers(len(bg_pool[tid]), size=k)
                 parts.append(bg_pool[tid][idx])
-        batch = np.concatenate(parts)[np.random.permutation(batch_size)]
+        batch = np.concatenate(parts)[_rng.permutation(batch_size)]
 
         cur_lr = lr * min(1.0, (s + 1) / warmup) if warmup > 0 else lr
         loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)

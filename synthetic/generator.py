@@ -1,3 +1,5 @@
+"""Synthetic corpus generation, tokenization, vocab, and train/eval DataLoaders."""
+
 import functools
 import itertools
 import json
@@ -13,6 +15,8 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from synthetic.functions import BaseFunction
+
+_rng = np.random.default_rng()
 
 
 class SyntheticData:
@@ -73,13 +77,13 @@ class SyntheticData:
 
     def sample_task(self, split: str = "train") -> tuple:
         """Sample a random task from the given split."""
-        idx = np.random.randint(0, self.nsplit_tasks[split])
+        idx = int(_rng.integers(0, self.nsplit_tasks[split]))
         return self.functions[split][idx]
 
     def sample_token(self) -> np.ndarray:
         """Sample tokens from the alphabet."""
         alph = np.arange(self.n_alphabets)
-        return np.random.choice(alph, size=self.cfg.seq_len, replace=self.cfg.with_replacement)
+        return _rng.choice(alph, size=self.cfg.seq_len, replace=self.cfg.with_replacement)
 
     def decode(self, token_idx: np.ndarray) -> str:
         """Decode token indices to a subscript-formatted string."""

@@ -22,42 +22,44 @@ Dimension key:
     P: n_params (total flattened parameters)
 """
 
-import sys
-import os
-import argparse
-import pickle
-import json
+from __future__ import annotations
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import argparse
+import json
+import pickle
+import sys
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pathlib import Path
 
-from burst.core.train_utils import load_net, resolve_run_paths
-from burst.config import SCHEDULE_ORDER, SCHED_COLORS, parse_run_config
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from burst.config import SCHED_COLORS, SCHEDULE_ORDER, parse_run_config
 from burst.core.metrics.gradients import _layer_groups
+from burst.core.train_utils import load_net, resolve_run_paths
 from burst.dev.plot_utils import save_png as _save_png
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_rng = np.random.default_rng()
 
 
-def _sched_order(s):
+def _sched_order(s: str) -> int:
     return SCHEDULE_ORDER.index(s) if s in SCHEDULE_ORDER else 99
 
 
-def _ckpt_files(d):
+def _ckpt_files(d: Path) -> dict[int, Path]:
     return {int(p.stem.split("_")[1]): p for p in d.glob("step_*.pt")}
 
 
 def compute_diagonal_fisher(
-    net,
+    net: torch.nn.Module,
     other_docs_BL: np.ndarray,
     n_batches: int,
     batch_size: int = 128,
 ) -> dict[str, torch.Tensor]:
-    """Empirical diagonal Fisher on other-class data.
+    """Compute empirical diagonal Fisher on other-class data.
 
     F_hat_i = (1/M) * sum_{m=1}^{M} (d log p(x_m) / d theta_i)^2
 
@@ -72,7 +74,7 @@ def compute_diagonal_fisher(
     actual = min(n_batches, max(1, n_docs // batch_size))
 
     for _ in range(actual):
-        idx = np.random.choice(n_docs, min(batch_size, n_docs), replace=False)
+        idx = _rng.choice(n_docs, min(batch_size, n_docs), replace=False)
         dat = torch.as_tensor(other_docs_BL[idx], dtype=torch.long, device=DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
         net.zero_grad(set_to_none=True)
@@ -96,7 +98,7 @@ def compute_fisher_displacement(
     post_params: dict[str, torch.Tensor],
     layer_groups: list[tuple[str, list[str]]],
 ) -> dict:
-    """D = sum_i F_i * (theta_post - theta_pre)^2, total and per-layer."""
+    """Compute D = sum_i F_i * (theta_post - theta_pre)^2, total and per-layer."""
     per_layer_D: dict[str, float] = {}
     for layer_name, pnames in layer_groups:
         layer_D = sum(
@@ -108,44 +110,43 @@ def compute_fisher_displacement(
     return {"total_D": sum(per_layer_D.values()), "per_layer_D": per_layer_D}
 
 
-def run_ewc_analysis(
+def run_ewc_analysis(  # noqa: C901, PLR0915
     run_dir: Path,
     n_fisher_batches: int = 200,
     n_seeds: int = 3,
     fisher_batch_size: int = 128,
 ) -> dict:
-    """Full EWC analysis for a run directory. Returns per-schedule mean D and per-layer D."""
+    """Run full EWC analysis for a run directory."""
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
-    with open(cfg_path) as f:
+    with cfg_path.open() as f:
         run_cfg = json.load(f)
     rc = parse_run_config(run_cfg)
     base_cfg = rc["base_cfg"]
 
-    with open(logs_dir / "_data.pkl", "rb") as f:
-        _, bg_pool, _, _, _ = pickle.load(f)
-    with open(logs_dir / "all_results.pkl", "rb") as f:
-        all_results = pickle.load(f)
+    with (logs_dir / "_data.pkl").open("rb") as f:
+        _, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+    with (logs_dir / "all_results.pkl").open("rb") as f:
+        all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
     if not ckpt_root.exists():
-        print(f"  No checkpoints in {run_dir} — skipping EWC.", flush=True)
+        print(f"  No checkpoints in {run_dir} — skipping EWC.", flush=True)  # noqa: T201
         return {}
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
 
-    # Determine Fisher reference checkpoint (pretrain > first available)
     pretrain_ckpt = logs_dir / "pretrain_ckpt.pt"
     if pretrain_ckpt.exists():
         fisher_ckpt = str(pretrain_ckpt)
-        print("  Computing Fisher at pretrain checkpoint...", flush=True)
+        print("  Computing Fisher at pretrain checkpoint...", flush=True)  # noqa: T201
     else:
         first_label = run_cfg["jobs"][0]["label"]
         first_files = _ckpt_files(ckpt_root / first_label)
         if not first_files:
-            print("  No checkpoints found — skipping EWC.", flush=True)
+            print("  No checkpoints found — skipping EWC.", flush=True)  # noqa: T201
             return {}
         fisher_ckpt = str(first_files[min(first_files)])
-        print("  pretrain_ckpt.pt not found — using first checkpoint.", flush=True)
+        print("  pretrain_ckpt.pt not found — using first checkpoint.", flush=True)  # noqa: T201
 
     net_fisher = load_net(base_cfg, fisher_ckpt)
     fisher = compute_diagonal_fisher(net_fisher, other_docs_BL, n_fisher_batches, fisher_batch_size)
@@ -153,7 +154,6 @@ def run_ewc_analysis(
     del net_fisher
     torch.cuda.empty_cache()
 
-    # Flatten checkpoint params once per file (CPU, float32)
     def _flat(path: str) -> dict[str, torch.Tensor]:
         return {
             k: v.float().view(-1)
@@ -182,7 +182,8 @@ def run_ewc_analysis(
 
             T = r["config"]["total_steps"]
             available = sorted(files)
-            pre_step, post_step = available[0], min(available, key=lambda x: abs(x - (T - 1)))
+            pre_step = available[0]
+            post_step = min(available, key=lambda x: abs(x - (T - 1)))
 
             disp = compute_fisher_displacement(
                 fisher, _flat(str(files[pre_step])), _flat(str(files[post_step])), layer_groups
@@ -191,7 +192,7 @@ def run_ewc_analysis(
             for ln, d in disp["per_layer_D"].items():
                 layer_Ds.setdefault(ln, []).append(d)
             seeds_done += 1
-            print(f"  {label}: total_D={disp['total_D']:.4e}", flush=True)
+            print(f"  {label}: total_D={disp['total_D']:.4e}", flush=True)  # noqa: T201
 
         per_schedule[sched] = {
             "total_Ds": total_Ds,
@@ -212,7 +213,8 @@ def run_ewc_analysis(
 
 
 def make_ewc_plots(result: dict, out_dir: Path) -> None:
-    import plotly.graph_objects as go
+    """Generate EWC displacement plots."""
+    import plotly.graph_objects as go  # noqa: PLC0415
 
     out_dir.mkdir(parents=True, exist_ok=True)
     per_schedule = result.get("per_schedule", {})
@@ -224,17 +226,18 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
     colors = [SCHED_COLORS.get(s, "#888888") for s in schedules]
     layer_names = next(iter(per_schedule.values()), {}).get("layer_names", [])
 
-    def _save(fig, name):
+    def _save(fig: object, name: str) -> None:
         _save_png(fig, str(out_dir / name))
 
-    # Bar: total D with error bars
     fig = go.Figure(
         go.Bar(
             x=schedules,
             y=[per_schedule[s]["mean_total_D"] for s in schedules],
-            error_y=dict(
-                type="data", array=[per_schedule[s]["std_total_D"] for s in schedules], visible=True
-            ),
+            error_y={
+                "type": "data",
+                "array": [per_schedule[s]["std_total_D"] for s in schedules],
+                "visible": True,
+            },
             marker_color=colors,
         )
     )
@@ -249,7 +252,6 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
     _save(fig, "ewc_total_displacement.png")
 
     if layer_names:
-        # Heatmap: per-layer D
         fig = go.Figure(
             go.Heatmap(
                 z=[
@@ -262,7 +264,7 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
                 x=layer_names,
                 y=schedules,
                 colorscale="Reds",
-                colorbar=dict(title="D_layer"),
+                colorbar={"title": "D_layer"},
             )
         )
         fig.update_layout(
@@ -275,7 +277,6 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
         )
         _save(fig, "ewc_per_layer_displacement.png")
 
-        # Stacked bar: per-layer contribution
         fig = go.Figure()
         for ln in layer_names:
             fig.add_trace(
@@ -297,10 +298,11 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
         )
         _save(fig, "ewc_stacked_by_layer.png")
 
-    print(f"  EWC plots saved to {out_dir}", flush=True)
+    print(f"  EWC plots saved to {out_dir}", flush=True)  # noqa: T201
 
 
-def main():
+def main() -> None:
+    """Run EWC analysis from command line."""
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--n-fisher-batches", type=int, default=200)
@@ -310,20 +312,20 @@ def main():
     args = parser.parse_args()
 
     out_dir = args.out_dir or (args.run_dir / "results" / "ewc_metrics")
-    print(f"EWC analysis: {args.run_dir}", flush=True)
+    print(f"EWC analysis: {args.run_dir}", flush=True)  # noqa: T201
     result = run_ewc_analysis(
         args.run_dir, args.n_fisher_batches, args.n_seeds, args.fisher_batch_size
     )
 
     if not result:
-        print("No results — exiting.", flush=True)
+        print("No results — exiting.", flush=True)  # noqa: T201
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / "ewc_results.pkl", "wb") as f:
+    with (out_dir / "ewc_results.pkl").open("wb") as f:
         pickle.dump(result, f)
     make_ewc_plots(result, out_dir)
-    print(f"EWC done. Results: {out_dir}", flush=True)
+    print(f"EWC done. Results: {out_dir}", flush=True)  # noqa: T201
 
 
 if __name__ == "__main__":

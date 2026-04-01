@@ -1,3 +1,5 @@
+"""Bijection function families and train/test split strategies."""
+
 import functools
 import itertools
 import logging
@@ -7,6 +9,8 @@ import numpy as np
 from omegaconf import DictConfig
 
 logger = logging.getLogger(__name__)
+
+_rng = np.random.default_rng()
 
 
 class BaseFunction:
@@ -50,7 +54,7 @@ class CreateFunctions:
 
                     functions = [np.arange(ln)]
                     functions.extend(
-                        np.random.permutation(ln) for _ in range(n_functions)
+                        _rng.permutation(ln) for _ in range(n_functions)
                     )
                     all_functions.append(functions)
 
@@ -60,7 +64,7 @@ class CreateFunctions:
                 for _ in range(depth):
                     functions = [np.arange(self.n_alphabets)]
                     functions.extend(
-                        np.random.permutation(self.n_alphabets)
+                        _rng.permutation(self.n_alphabets)
                         for _ in range(n_functions)
                     )
                     all_functions.append(functions)
@@ -68,7 +72,7 @@ class CreateFunctions:
             else:
                 functions = [np.arange(self.n_alphabets)]
                 functions.extend(
-                    np.random.permutation(self.n_alphabets)
+                    _rng.permutation(self.n_alphabets)
                     for _ in range(n_functions)
                 )
                 for _ in range(depth):
@@ -117,8 +121,9 @@ class CreateFunctions:
         reduced_functions = np.array(function_info["composition_reduced"])
         if not self.function_properties.permute:
             logger.info(
-                f"Number of unique/total functions: "
-                f"{len(np.unique(reduced_functions, axis=0))}/{len(reduced_functions)}"
+                "Number of unique/total functions: %s/%s",
+                len(np.unique(reduced_functions, axis=0)),
+                len(reduced_functions),
             )
 
             for key, val in function_info.items():
@@ -151,8 +156,8 @@ class CreateFunctions:
 
             traintask_ids = list(base_ids) + list(additional_tasks)
 
-            logger.info(f"Number of base  tasks: {len(base_ids)}")
-            logger.info(f"Number of train tasks: {len(traintask_ids)}")
+            logger.info("Number of base  tasks: %s", len(base_ids))
+            logger.info("Number of train tasks: %s", len(traintask_ids))
 
         elif self.function_properties.split.strategy == "random":
             traintask_ids = random.sample(
@@ -176,8 +181,8 @@ class CreateFunctions:
                 sub_taskids, self.function_properties.split.n_compositions
             )
 
-            logger.info(f"Number of possible functions: {len(sub_taskids)}")
-            logger.info(f"Number of train tasks: {len(traintask_ids)}")
+            logger.info("Number of possible functions: %s", len(sub_taskids))
+            logger.info("Number of train tasks: %s", len(traintask_ids))
 
         elif self.function_properties.split.strategy == "randombase_combo":
             base_ids = [tuple((d0, 0) for d0 in range(depth))] + [
@@ -237,7 +242,7 @@ class CreateFunctions:
             )
             traintask_ids = list(base_ids) + list(additional_tasks)
 
-            logger.info(f"Number of train tasks: {len(traintask_ids)}")
+            logger.info("Number of train tasks: %s", len(traintask_ids))
 
         train_fns = []
 

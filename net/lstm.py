@@ -1,3 +1,5 @@
+"""Autoregressive LSTM language model with embeddings and a vocab projection head."""
+
 import torch
 from omegaconf import DictConfig
 from torch import nn

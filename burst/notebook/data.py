@@ -10,7 +10,6 @@ import numpy as np
 
 from burst.config import CLASS_BURST, CLASS_OTHER, DATA_SEED, N_A
 from burst.core.data import pad_pools_to_same_length
-from burst.core.train.experiment import DepthNData
 
 N_ALPH = 10
 SEQ_LEN = 6
@@ -19,6 +18,8 @@ BURST_POS = 3
 N_BURST = 4
 N_DOCS = 100
 N_EVAL = 100
+
+_rng = np.random.default_rng()
 
 
 def _cat(pool: dict[tuple, np.ndarray], fallback_cols: int = 1) -> np.ndarray:
@@ -87,11 +88,12 @@ def make_data(
             fns.insert(burst_pos - 1, bf)
             burst_tasks.append((CLASS_BURST, *tuple(fns)))
 
+    global _rng
+    _rng = np.random.default_rng(seed)
+
     def _make_doc(task: tuple) -> np.ndarray:
         fns = task[1:]
-        inp = np.random.choice(
-            len([k for k in token_idx if k.startswith("X")]), size=seq_len, replace=True
-        )
+        inp = _rng.integers(0, n_alph, size=seq_len)
         sp = np.array([token_idx[" "]])
         cur = inp.copy()
         outs = []
@@ -106,7 +108,6 @@ def make_data(
     def _gen_pool(tasks: list[tuple], n: int) -> dict[tuple, np.ndarray]:
         return {t: np.array([_make_doc(t) for _ in range(n)]) for t in tasks}
 
-    np.random.seed(seed)
     bg_pool = _gen_pool(other_tasks, n_docs)
     target_pool = _gen_pool(burst_tasks, n_docs)
     eval_other_pool = _gen_pool(other_tasks[: min(8, len(other_tasks))], n_eval)

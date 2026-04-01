@@ -1,3 +1,5 @@
+"""Load in-order evaluation pickles and plot token, strict, and teacher accuracy over steps."""
+
 # %%
 import pickle
 from pathlib import Path

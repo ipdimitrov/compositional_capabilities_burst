@@ -1,14 +1,20 @@
+"""Render publication-quality charts from bundled experiment data."""
+
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import matplotlib as mpl
 import numpy as np
 
 mpl.use("Agg")
 import matplotlib.pyplot as plt
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
 
 from burst.config import SCHED_COLORS, SCHED_DISPLAY, reversion_life_label
 from burst.core.charts.style import apply_paper_style, save_figure, style_axes
@@ -489,7 +495,7 @@ def _fmt_ci(metric: dict, digits: int = 3) -> str:
     return f"{mean:.{digits}f} ± {ci:.{digits}f}"
 
 
-def _save(fig: Any, path: Path) -> Path:
+def _save(fig: Figure, path: Path) -> Path:
     """Save a figure and return its path."""
     save_figure(fig, path)
     return path
@@ -536,7 +542,7 @@ def _max_burst_steps(bundle: dict) -> int:
     return max_burst
 
 
-def _annotate_global_phase_boundaries(ax: Any, burst_end: float, total_steps: float) -> None:
+def _annotate_global_phase_boundaries(ax: Axes, burst_end: float, total_steps: float) -> None:
     """Draw vertical phase boundary lines and labels on an axes."""
     ax.axvline(burst_end, color="black", ls="--", lw=1.15, alpha=0.6)
     ymax = ax.get_ylim()[1]

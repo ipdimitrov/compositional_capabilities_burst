@@ -1,16 +1,4 @@
-"""Move heavy files (pickles, checkpoints) into _heavy/ and leave symlinks.
-
-Also mirrors results/ and logs/ into a top-level data/{results,logs,_heavy}/<run_name>/
-structure so users can download only the top-level results/ folder to get all runs.
-
-Usage: python scripts/organize_run.py <run_dir>
-
-After running:
-  <run_dir>/                    (original, symlinks to _heavy for heavy files)
-  data/results/<run_name>/      (symlink to <run_dir>/results/)
-  data/logs/<run_name>/         (symlink to <run_dir>/logs/)
-  data/_heavy/<run_name>/       (symlink to <run_dir>/_heavy/)
-"""
+"""Move heavy run artifacts into _heavy/ and symlink results, logs, and _heavy under data/."""
 
 import logging
 import shutil
@@ -39,13 +27,13 @@ def organize(run_dir: Path) -> None:
                 shutil.rmtree(dest)
             shutil.move(str(p), str(dest))
             p.symlink_to(dest.resolve())
-            logger.info(f"  moved dir  {p.name}/ -> _heavy/{p.name}/")
+            logger.info("  moved dir  %s/ -> _heavy/%s/", p.name, p.name)
 
         elif p.is_file() and p.suffix in HEAVY_EXTENSIONS:
             dest = heavy_dir / p.name
             shutil.move(str(p), str(dest))
             p.symlink_to(dest.resolve())
-            logger.info(f"  moved file {p.name} -> _heavy/{p.name}")
+            logger.info("  moved file %s -> _heavy/%s", p.name, p.name)
 
     for sub in run_dir.iterdir():
         if sub.name.startswith("_") or not sub.is_dir() or sub.is_symlink():
@@ -57,7 +45,7 @@ def organize(run_dir: Path) -> None:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(p), str(dest))
                 p.symlink_to(dest.resolve())
-                logger.info(f"  moved file {rel} -> _heavy/{rel}")
+                logger.info("  moved file %s -> _heavy/%s", rel, rel)
 
     light_size = sum(
         f.stat().st_size
@@ -65,8 +53,8 @@ def organize(run_dir: Path) -> None:
         if f.is_file() and not f.is_symlink() and "_heavy" not in f.parts
     )
     heavy_size = sum(f.stat().st_size for f in heavy_dir.rglob("*") if f.is_file())
-    logger.info(f"\n  Download folder: {light_size / 1e6:.1f} MB")
-    logger.info(f"  Heavy (excluded): {heavy_size / 1e6:.1f} MB")
+    logger.info("\n  Download folder: %.1f MB", light_size / 1e6)
+    logger.info("  Heavy (excluded): %.1f MB", heavy_size / 1e6)
 
     _mirror_to_top_level(run_dir)
 
@@ -86,18 +74,18 @@ def _mirror_to_top_level(run_dir: Path) -> None:
         if link.exists() or link.is_symlink():
             link.unlink()
         link.symlink_to(src.resolve())
-        logger.info(f"  mirrored {folder_name}/{run_name}/ -> {src}")
+        logger.info("  mirrored %s/%s/ -> %s", folder_name, run_name, src)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if len(sys.argv) < EXPECTED_PARTS:
-        logger.info(f"Usage: {sys.argv[0]} <run_dir>")
+        logger.info("Usage: %s <run_dir>", sys.argv[0])
         sys.exit(1)
     rd = Path(sys.argv[1])
     if not rd.exists():
-        logger.info(f"Not found: {rd}")
+        logger.info("Not found: %s", rd)
         sys.exit(1)
-    logger.info(f"Organizing {rd}...")
+    logger.info("Organizing %s...", rd)
     organize(rd)
     logger.info("Done.")

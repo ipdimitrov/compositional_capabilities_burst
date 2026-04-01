@@ -30,9 +30,12 @@ from burst.notebook.model import (
     train_step,
 )
 
+_rng = np.random.default_rng()
+
 
 def _sample_batch(target_pool: dict, bg_pool: dict, n_target: int, batch_size: int) -> np.ndarray:
     """Assemble a mixed batch of n_target special + rest background."""
+    global _rng
     t_ids = list(target_pool.keys())
     b_ids = list(bg_pool.keys())
     parts = []
@@ -45,12 +48,12 @@ def _sample_batch(target_pool: dict, bg_pool: dict, n_target: int, batch_size: i
         for i, tid in enumerate(ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = np.random.randint(len(pool[tid]), size=k)
+                idx = _rng.integers(len(pool[tid]), size=k)
                 parts.append(pool[tid][idx])
 
     _sample(target_pool, t_ids, n_target)
     _sample(bg_pool, b_ids, batch_size - n_target)
-    return np.concatenate(parts)[np.random.permutation(batch_size)]
+    return np.concatenate(parts)[_rng.permutation(batch_size)]
 
 
 def finetune(  # noqa: PLR0913, PLR0915
@@ -91,7 +94,8 @@ def finetune(  # noqa: PLR0913, PLR0915
     eval_other = data["eval_other"]
     eval_burst = data["eval_burst"]
 
-    np.random.seed(seed)
+    global _rng
+    _rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
     net = load_model(
@@ -128,7 +132,7 @@ def finetune(  # noqa: PLR0913, PLR0915
     pbar = tqdm(range(steps), desc=f"Finetune {tag}", disable=quiet)
     for s in pbar:
         n_target = (
-            int(np.random.binomial(batch_size, burst_frac)) if burst_frac < 1.0 else batch_size
+            int(_rng.binomial(batch_size, burst_frac)) if burst_frac < 1.0 else batch_size
         )
         batch = _sample_batch(target_pool, bg_pool, n_target, batch_size)
 

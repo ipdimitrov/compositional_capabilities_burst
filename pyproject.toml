@@ -57,12 +57,8 @@ ignore = [
     # ── docstring style ──
     "D203",   # conflicts with D211 (no-blank-line-before-class)
     "D213",   # conflicts with D212 (multi-line-summary-first-line)
-    "D100",   # module docstrings — not useful for scripts
     "D104",   # package __init__ docstrings
     "D105",   # magic method docstrings
-
-    # ── annotation style ──
-    "ANN401", # Dynamically typed expressions (typing.Any) are disallowed
 
     # ── Shazeer typing conventions ──
     "N806",
@@ -70,9 +66,7 @@ ignore = [
     "N812",
 
     # ── ML-specific ──
-    "NPY002",
     "S101",
-    "G004",
 ]
 
 [tool.ruff.lint.per-file-ignores]

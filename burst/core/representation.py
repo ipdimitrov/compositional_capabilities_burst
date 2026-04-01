@@ -1,7 +1,9 @@
+"""Late-layer representation shift analysis between pre- and post-burst models."""
+
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 from einops import reduce
@@ -12,13 +14,19 @@ from burst.dev.probe import collect_activations_KPTN
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from net.nanogpt import nanoGPT
+
+
+_ResultDict = dict[str, object]
+_TaskPool = dict[tuple[int, ...], np.ndarray]
+
 
 def build_representation_summary(
     run_dir: str | Path,
-    grouped_results: dict[str, list[dict[str, Any]]],
+    grouped_results: dict[str, list[_ResultDict]],
     *,
     n_docs_per_class: int = 64,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Build per-schedule representation drift metrics from checkpoints."""
     _cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     data_path = logs_dir / "_data.pkl"
@@ -34,7 +42,7 @@ def build_representation_summary(
     if other_docs.size == 0 or burst_docs.size == 0:
         return {}
 
-    by_schedule: dict[str, Any] = {}
+    by_schedule: dict[str, object] = {}
     for schedule, runs in grouped_results.items():
         per_seed = []
         for run in runs:
@@ -65,7 +73,7 @@ def build_representation_summary(
 
 
 def _representation_for_run(
-    run: dict[str, Any],
+    run: _ResultDict,
     ckpt_dir: Path,
     other_docs_BL: np.ndarray,
     burst_docs_BL: np.ndarray,
@@ -118,7 +126,7 @@ def _representation_for_run(
     }
 
 
-def _mean_layer_vectors(net: Any, docs_BL: np.ndarray) -> list[np.ndarray]:
+def _mean_layer_vectors(net: nanoGPT, docs_BL: np.ndarray) -> list[np.ndarray]:
     """Return mean activation vector per layer, averaged over docs and positions."""
     activations_KPTN = collect_activations_KPTN(net, docs_BL)
     return [
@@ -132,7 +140,7 @@ def _late_layer_indices(n_layers_total: int) -> list[int]:
     return list(range(start, n_layers_total))
 
 
-def _subsample_pool(pool: dict[Any, np.ndarray], n_docs: int, *, seed: int) -> np.ndarray:
+def _subsample_pool(pool: _TaskPool, n_docs: int, *, seed: int) -> np.ndarray:
     """Concatenate and subsample documents from a pool to at most n_docs."""
     if not pool:
         return np.zeros((0, 0), dtype=np.int64)

@@ -1,3 +1,5 @@
+"""Dataset helpers: padding, pooling, and PyTorch Dataset wrappers."""
+
 from typing import Any
 
 import numpy as np

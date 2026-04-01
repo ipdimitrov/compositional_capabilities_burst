@@ -5,21 +5,20 @@ Each worker trains one model on one schedule, saves checkpoints for
 post-hoc grad-sim, and writes training metrics.
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import pickle
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from einops import rearrange
-from omegaconf import OmegaConf
 
 from burst.config import (
     EVAL_KEYS,
@@ -32,23 +31,23 @@ from burst.config import (
 )
 from burst.core.data import BurstDataset
 from burst.core.repro import set_reproducibility
-from net.nanogpt import nanoGPT
+from burst.core.train_utils import (
+    DEVICE,
+    _cross_entropy_logits_BTV_targets_BT,
+    make_net_bare,
+    make_optim_cfg,
+    make_scaler,
+)
 from net.runner import configure_optimizers, reset_optimizer_state, update_phase_lr
 from synthetic.init import set_seed
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if TYPE_CHECKING:
+    from net.nanogpt import nanoGPT
+
 GRAD_NORM_EPS = 1e-6
 CHECKPOINT_EVERY = 10
+_rng = np.random.default_rng()
 PAIRWISE_STEP_NAMES = {"begin", "mid_burst", "end_burst", "mid_reversion", "end_reversion"}
-
-
-def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
-    logits_BTV: torch.Tensor, targets_BT: torch.Tensor
-) -> torch.Tensor:
-    """Compute cross-entropy loss after flattening batch and time dims."""
-    logits_bv = rearrange(logits_BTV, "b t v -> (b t) v")
-    targets_b = rearrange(targets_BT, "b t -> (b t)")
-    return F.cross_entropy(logits_bv, targets_b)
 
 
 def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batch_size: int) -> int:
@@ -69,7 +68,7 @@ def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batc
         frac = MIXED_FRACTIONS[schedule]
         if frac >= 1.0:
             return batch_size
-        return int(np.random.binomial(batch_size, frac))
+        return int(_rng.binomial(batch_size, frac))
 
     if schedule == "ramp_up":
         burst_len = max(int(p * T), 1)
@@ -77,7 +76,7 @@ def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batc
         ramp_len = min(int(2 * burst_len / max_frac), T)
         if step >= T - ramp_len:
             progress = (step - (T - ramp_len)) / max(ramp_len - 1, 1)
-            return int(np.random.binomial(batch_size, progress * max_frac))
+            return int(_rng.binomial(batch_size, progress * max_frac))
         return 0
 
     if schedule == "reversion_only":
@@ -108,19 +107,19 @@ def sample_batch(  # noqa: PLR0913
         for i, tid in enumerate(ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = np.random.randint(len(pool[tid]), size=k)
+                idx = _rng.integers(len(pool[tid]), size=k)
                 parts.append(pool[tid][idx])
                 sampled_tasks.extend([tid] * k)
 
     _sample_from(target_pool, t_ids, n_target)
     _sample_from(bg_pool, b_ids, batch_size - n_target)
 
-    perm = np.random.permutation(batch_size)
+    perm = _rng.permutation(batch_size)
     return np.concatenate(parts)[perm], [sampled_tasks[i] for i in perm]
 
 
 @torch.no_grad()
-def eval_free_gen(net: Any, docs_BL: np.ndarray, prompt_len: int) -> float:
+def eval_free_gen(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     """Evaluate free-generation accuracy on the last 6 output positions."""
     if docs_BL.shape[0] == 0:
         return 0.0
@@ -145,7 +144,7 @@ def eval_free_gen(net: Any, docs_BL: np.ndarray, prompt_len: int) -> float:
 
 
 @torch.no_grad()
-def eval_loss(net: Any, docs_BL: np.ndarray) -> float:
+def eval_loss(net: nanoGPT, docs_BL: np.ndarray) -> float:
     """Evaluate average cross-entropy loss on a document set."""
     if docs_BL.shape[0] == 0:
         return float("nan")
@@ -219,40 +218,15 @@ def run(job: dict, shared_data_path: str, run_dir: str, progress_dir: str) -> No
             pretrain_log = pickle.load(f)  # noqa: S301
 
     set_seed(seed)
-    net = nanoGPT(
-        OmegaConf.create(
-            {
-                "compile": False,
-                "vocab_size": cfg["vocab_size"],
-                "context_size": cfg["context_size"],
-                "n_layer": cfg["n_layer"],
-                "n_head": cfg["n_head"],
-                "n_embd": cfg["n_embd"],
-                "dropout": 0.0,
-                "bias": False,
-                "mlp": True,
-            }
-        )
-    ).to(DEVICE)
-
+    net = make_net_bare(cfg)
     if pretrain_ckpt and Path(pretrain_ckpt).exists():
         net.load_state_dict(torch.load(pretrain_ckpt, map_location=DEVICE, weights_only=True))
-
     if DEVICE == "cuda":
         net = torch.compile(net)
     raw_net = getattr(net, "_orig_mod", net)
 
-    optim_cfg = OmegaConf.create(
-        {
-            "learning_rate": cfg["lr"],
-            "weight_decay": cfg["weight_decay"],
-            "beta1": cfg["beta1"],
-            "beta2": cfg["beta2"],
-            "grad_clip": cfg["grad_clip"],
-        }
-    )
-    optimizer = configure_optimizers(net, optim_cfg)
-    scaler = torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
+    optimizer = configure_optimizers(net, make_optim_cfg(cfg))
+    scaler = make_scaler()
 
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     P = cfg.get("pre_burst_steps", 0)

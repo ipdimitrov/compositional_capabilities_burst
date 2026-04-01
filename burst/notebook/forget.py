@@ -29,6 +29,8 @@ from burst.notebook.model import (
     train_step,
 )
 
+_rng = np.random.default_rng()
+
 GRAD_NORM_EPS = 1e-6
 
 
@@ -71,7 +73,8 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     eval_other = data["eval_other"]
     eval_burst = data["eval_burst"]
 
-    np.random.seed(seed)
+    global _rng
+    _rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
     net = load_model(
@@ -121,9 +124,9 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
         for i, tid in enumerate(bg_ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = np.random.randint(len(bg_pool[tid]), size=k)
+                idx = _rng.integers(len(bg_pool[tid]), size=k)
                 parts.append(bg_pool[tid][idx])
-        batch = np.concatenate(parts)[np.random.permutation(batch_size)]
+        batch = np.concatenate(parts)[_rng.permutation(batch_size)]
 
         cur_lr = cosine_lr(s + 1, steps, lr_start, lr_end)
         loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)
@@ -151,7 +154,7 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
             net.train()
             g_bg = _get_grad_vector(net, batch)
             log["grad_norm"].append(g_bg.norm().item())
-            idx = np.random.randint(len(eval_burst), size=min(batch_size, len(eval_burst)))
+            idx = _rng.integers(len(eval_burst), size=min(batch_size, len(eval_burst)))
             burst_batch = eval_burst[idx]
             g_burst = _get_grad_vector(net, burst_batch)
             log["grad_norm_burst"].append(g_burst.norm().item())

@@ -1,4 +1,4 @@
-"""Ten new post-hoc mechanistic metrics for burstiness runs.
+r"""Ten new post-hoc mechanistic metrics for burstiness runs.
 
 Complements burst/deep_analysis.py (which covers ADL, gradient interference,
 EMA interpolation probe, critical sharpness, weight delta rank).
@@ -44,34 +44,36 @@ Dimension key:
     C: number of PCA components
 """
 
-import sys
-import os
 import argparse
-import pickle
 import json
+import os
+import pickle
+import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pathlib import Path
 from omegaconf import OmegaConf
 
-from net.nanogpt import nanoGPT
-from net.runner import configure_optimizers, update_cosine_warmup_lr
-from burst.core.train_utils import load_net
-from burst.dev.plot_utils import save_png as _save_png
 from burst.config import (
     PHASE_BURST,
     PHASE_REVERSION,
-    SCHEDULE_ORDER,
     SCHED_COLORS,
+    SCHEDULE_ORDER,
     parse_run_config,
 )
+from burst.core.train_utils import load_net
+from burst.dev.plot_utils import save_png as _save_png
+from net.nanogpt import nanoGPT
+from net.runner import configure_optimizers, update_cosine_warmup_lr
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_rng = np.random.default_rng()
 
 SCHEDULES_ORDERED = SCHEDULE_ORDER
 SCHEDULE_COLORS = SCHED_COLORS
@@ -90,7 +92,7 @@ def _flat_params(net: nanoGPT) -> torch.Tensor:
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    B, L = docs_t.shape
+    _B, L = docs_t.shape
     target_B6 = docs_t[:, -6:]
     generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
@@ -210,11 +212,10 @@ def compute_task_vector_transfer(
             net_pre_tgt.load_state_dict(transferred_sd)
 
             n = min(256, burst_docs_BL.shape[0])
-            idx = np.random.choice(burst_docs_BL.shape[0], n, replace=False)
+            idx = _rng.choice(burst_docs_BL.shape[0], n, replace=False)
             acc = _free_gen_acc(net_pre_tgt, burst_docs_BL[idx], prompt_len)
             transfer_accs.append(acc)
             seeds_done += 1
-            print(f"  {label_src} → {label_tgt}: transfer_acc={acc:.3f}", flush=True)
 
         results[sched] = {
             "transfer_accs": transfer_accs,
@@ -304,7 +305,6 @@ def compute_forgetting_trajectory_dim(
 
             dims.append(dim)
             seeds_done += 1
-            print(f"  {label}: trajectory_dim={dim} (from {len(rev_steps)} ckpts)", flush=True)
 
         results[sched] = {
             "dims": dims,
@@ -378,14 +378,14 @@ def compute_relearning_efficiency(
             scaler = torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
 
             n = min(256, burst_docs_BL.shape[0])
-            idx = np.random.choice(burst_docs_BL.shape[0], n, replace=False)
+            idx = _rng.choice(burst_docs_BL.shape[0], n, replace=False)
             docs_fine = burst_docs_BL[idx]
 
             accs = []
             net.train()
             it = 0
             for step in range(relearn_steps):
-                batch_idx = np.random.choice(n, min(cfg["batch_size"], n), replace=True)
+                batch_idx = _rng.choice(n, min(cfg["batch_size"], n), replace=True)
                 batch = torch.as_tensor(docs_fine[batch_idx], dtype=torch.long, device=DEVICE)
                 inp, tgt = batch[:, :-1], batch[:, 1:]
                 it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, relearn_steps)
@@ -405,15 +405,14 @@ def compute_relearning_efficiency(
 
             all_accs.append(accs)
             seeds_done += 1
-            final_acc = accs[-1][1] if accs else 0
-            print(f"  {label}: relearn_final_acc={final_acc:.3f}", flush=True)
+            accs[-1][1] if accs else 0
 
         if all_accs:
             steps_common = [a[0] for a in all_accs[0]]
             mean_accs = [
                 float(np.mean([run[i][1] for run in all_accs])) for i in range(len(steps_common))
             ]
-            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapezoid
             auc = (
                 float(_trapz(mean_accs, steps_common)) / max(steps_common[-1], 1)
                 if len(steps_common) > 1
@@ -461,7 +460,7 @@ def compute_linear_mode_connectivity(
     results = {}
 
     n = min(256, burst_docs_BL.shape[0])
-    idx = np.random.choice(burst_docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(burst_docs_BL.shape[0], n, replace=False)
     docs = burst_docs_BL[idx]
     docs_t = torch.as_tensor(docs, dtype=torch.long, device=DEVICE)
     inp_t, tgt_t = docs_t[:, :-1], docs_t[:, 1:]
@@ -519,7 +518,6 @@ def compute_linear_mode_connectivity(
 
             endpoint_avg = (loss_curve[0] + loss_curve[-1]) / 2
             barrier = max(loss_curve) - endpoint_avg
-            print(f"  {label}: LMC barrier={barrier:.4f}", flush=True)
 
         if all_loss_curves:
             mean_curve = [float(np.mean([c[i] for c in all_loss_curves])) for i in range(n_alphas)]
@@ -569,7 +567,7 @@ def compute_pruning_robustness(
     results = {}
 
     n = min(256, burst_docs_BL.shape[0])
-    idx = np.random.choice(burst_docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(burst_docs_BL.shape[0], n, replace=False)
     docs = burst_docs_BL[idx]
 
     for sched in schedules:
@@ -610,17 +608,13 @@ def compute_pruning_robustness(
 
             all_acc_curves.append(acc_curve)
             seeds_done += 1
-            print(
-                f"  {label}: pruning acc@0%={acc_curve[0]:.3f}, acc@90%={acc_curve[-1]:.3f}",
-                flush=True,
-            )
 
         if all_acc_curves:
             mean_curve = [
                 float(np.mean([c[i] for c in all_acc_curves])) for i in range(n_prune_levels)
             ]
             # Area under pruning curve (higher = more robust = deeper)
-            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapezoid
             robustness_auc = float(_trapz(mean_curve, sparsities))
         else:
             mean_curve = [float("nan")] * n_prune_levels
@@ -721,15 +715,15 @@ def compute_forgetting_speed_decomposition(all_results: list[dict]) -> dict:
             phases = log["phase"]
             T = r["config"]["total_steps"]
 
-            rev_steps = [s - T for s, p in zip(steps, phases) if p == PHASE_REVERSION]
-            rev_accs = [a for a, p in zip(accs, phases) if p == PHASE_REVERSION]
+            rev_steps = [s - T for s, p in zip(steps, phases, strict=False) if p == PHASE_REVERSION]
+            rev_accs = [a for a, p in zip(accs, phases, strict=False) if p == PHASE_REVERSION]
 
             if len(rev_accs) < 2:
                 continue
 
             peak = r.get(
                 "peak_burst",
-                max(a for a, p in zip(accs, phases) if p == PHASE_BURST)
+                max(a for a, p in zip(accs, phases, strict=False) if p == PHASE_BURST)
                 if any(p == PHASE_BURST for p in phases)
                 else 0,
             )
@@ -737,8 +731,8 @@ def compute_forgetting_speed_decomposition(all_results: list[dict]) -> dict:
 
             # Initial slope: linear fit over first 50 reversion steps
             early_mask = [s <= 50 for s in rev_steps]
-            early_steps = [s for s, m in zip(rev_steps, early_mask) if m]
-            early_accs = [a for a, m in zip(rev_accs, early_mask) if m]
+            early_steps = [s for s, m in zip(rev_steps, early_mask, strict=False) if m]
+            early_accs = [a for a, m in zip(rev_accs, early_mask, strict=False) if m]
             if len(early_steps) >= 2:
                 slope = float(np.polyfit(early_steps, early_accs, 1)[0])
             else:
@@ -803,7 +797,7 @@ def compute_layer_interference_localisation(all_results: list[dict]) -> dict:
                 layer_names = gsl["layer_names"]
 
             for ln, vals in per_layer.items():
-                burst_vals = [v for v, p in zip(vals, phases) if p == PHASE_BURST]
+                burst_vals = [v for v, p in zip(vals, phases, strict=False) if p == PHASE_BURST]
                 if burst_vals:
                     layer_sims.setdefault(ln, []).append(float(np.mean(burst_vals)))
 
@@ -860,7 +854,7 @@ def compute_grad_interference_temporal(all_results: list[dict]) -> dict:
             phases = gsl.get("phase", [])
             T = r["config"]["total_steps"]
 
-            for s, sim, ph in zip(steps, sims, phases):
+            for s, sim, ph in zip(steps, sims, phases, strict=False):
                 if ph == PHASE_REVERSION:
                     rel_step = s - T
                     step_sims.setdefault(rel_step, []).append(sim)
@@ -875,7 +869,7 @@ def compute_grad_interference_temporal(all_results: list[dict]) -> dict:
         # Re-alignment speed: steps until cosine sim first exceeds 0.1
         # (threshold of 0.5 is too high — reversion sims rarely exceed 0.5)
         realign_step = next(
-            (s for s, sim in zip(steps_sorted, mean_sims) if sim > 0.1),
+            (s for s, sim in zip(steps_sorted, mean_sims, strict=False) if sim > 0.1),
             steps_sorted[-1] if steps_sorted else float("nan"),
         )
 
@@ -931,7 +925,7 @@ def compute_grad_projection_metrics(all_results: list[dict]) -> dict:
             steps = gsl.get("step", [])
             if not proj or not steps:
                 continue
-            for i, (step, phase) in enumerate(zip(steps, gsl.get("phase", []))):
+            for i, (step, phase) in enumerate(zip(steps, gsl.get("phase", []), strict=False)):
                 step_data.setdefault(step, {k: [] for k in _PROJ_KEYS})
                 step_phases[step] = phase
                 for k in _PROJ_KEYS:
@@ -1339,7 +1333,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=d["steps"],
                     y=d["mean_accs"],
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1401,7 +1395,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=[s * 100 for s in d["sparsities"]],
                     y=d["mean_accs"],
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1437,7 +1431,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=d["steps"],
                     y=d["mean_sims"],
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1537,7 +1531,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                 y=schedules,
                 colorscale="RdBu",
                 zmid=0,
-                colorbar=dict(title="Cosine Sim"),
+                colorbar={"title": "Cosine Sim"},
             )
         )
         fig.update_layout(
@@ -1570,7 +1564,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=d["steps"],
                     y=d["mean_sims"],
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines",
                 )
             )
@@ -1637,19 +1631,19 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=steps,
                     y=y,
                     name=sched,
-                    line=dict(color=color, width=2),
+                    line={"color": color, "width": 2},
                     mode="lines",
                 )
             )
             fig.add_trace(
                 go.Scatter(
                     x=steps + steps[::-1],
-                    y=[v + e for v, e in zip(y, y_std)]
-                    + [v - e for v, e in zip(y[::-1], y_std[::-1])],
+                    y=[v + e for v, e in zip(y, y_std, strict=False)]
+                    + [v - e for v, e in zip(y[::-1], y_std[::-1], strict=False)],
                     fill="toself",
                     fillcolor=color,
                     opacity=0.15,
-                    line=dict(width=0),
+                    line={"width": 0},
                     showlegend=False,
                     hoverinfo="skip",
                 )
@@ -1718,7 +1712,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             d = gp[sched]
             burst_ratios = [
                 r
-                for r, p in zip(d.get("interference_ratio", []), d.get("phases", []))
+                for r, p in zip(d.get("interference_ratio", []), d.get("phases", []), strict=False)
                 if p == PHASE_BURST and not np.isnan(r)
             ]
             if burst_ratios:
@@ -1730,7 +1724,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             go.Bar(
                 x=sched_labels,
                 y=mean_ratios,
-                error_y=dict(type="data", array=std_ratios, visible=True),
+                error_y={"type": "data", "array": std_ratios, "visible": True},
                 marker_color=[_color(s) for s in sched_labels],
             )
         )
@@ -1773,7 +1767,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                         y=vals,
                         name=f"pos{burst_pos}",
                         mode="lines+markers",
-                        line=dict(width=2),
+                        line={"width": 2},
                     )
                 )
             fig.update_layout(
@@ -1815,14 +1809,14 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         )
         colors = [_color(s) for s in schedules]
 
-        def _add_scatter_summary(fig, row, col, y_vals):
+        def _add_scatter_summary(fig, row, col, y_vals) -> None:
             fig.add_trace(
                 go.Scatter(
                     x=burst_pcts,
                     y=y_vals,
                     mode="markers+lines",
-                    marker=dict(color=colors, size=10),
-                    line=dict(color="gray", width=1, dash="dot"),
+                    marker={"color": colors, "size": 10},
+                    line={"color": "gray", "width": 1, "dash": "dot"},
                     showlegend=False,
                 ),
                 row=row,
@@ -2004,8 +1998,6 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
     html_path = out_dir / "dashboard.html"
     with open(html_path, "w") as f:
         f.write("".join(html_parts))
-    print(f"\nDashboard saved: {html_path}", flush=True)
-    print(f"Charts saved: {charts_dir}", flush=True)
 
     from burst.dev.plot_utils import write_text_report
 
@@ -2030,10 +2022,6 @@ def analyse_run(
     relearn_steps: int = 50,
 ) -> dict:
     """Run all 10 new metrics on a single run directory."""
-    print(f"\n{'=' * 60}", flush=True)
-    print(f"Analysing: {run_dir.name}", flush=True)
-    print(f"{'=' * 60}", flush=True)
-
     from burst.core.train_utils import resolve_run_paths
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
@@ -2059,34 +2047,25 @@ def analyse_run(
     result = {"run_name": run_name, "burst_pos": rc["burst_pos"]}
 
     # Metrics from existing data (no checkpoints needed)
-    print("\n[6/10] Pairwise gradient separation...", flush=True)
     result["pairwise_grad_separation"] = compute_pairwise_grad_separation(all_results)
 
-    print("\n[7/10] Forgetting speed decomposition...", flush=True)
     result["forgetting_speed_decomposition"] = compute_forgetting_speed_decomposition(all_results)
 
-    print("\n[8/10] Per-layer interference localisation...", flush=True)
     result["layer_interference_localisation"] = compute_layer_interference_localisation(all_results)
 
-    print("\n[9/10] Gradient interference temporal dynamics...", flush=True)
     result["grad_interference_temporal"] = compute_grad_interference_temporal(all_results)
 
-    print("\n[11/11] Gradient projection (OGD-style interference decomposition)...", flush=True)
     result["grad_projection"] = compute_grad_projection_metrics(all_results)
 
-    print("\n[10/10] Burst position comparison (uses existing results)...", flush=True)
     # This is computed globally after all runs are processed
 
     if not ckpt_root.exists():
-        print("  No checkpoints directory — skipping checkpoint-based metrics.", flush=True)
         return result
 
-    print("\n[1/10] Task vector transfer...", flush=True)
     result["task_vector_transfer"] = compute_task_vector_transfer(
         ckpt_root, all_results, burst_docs_BL, prompt_len, n_seeds=n_seeds
     )
 
-    print("\n[2/10] Forgetting trajectory dimensionality...", flush=True)
     result["forgetting_trajectory_dim"] = compute_forgetting_trajectory_dim(
         ckpt_root, all_results, n_seeds=n_seeds
     )
@@ -2097,12 +2076,10 @@ def analyse_run(
     #     ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len,
     #     n_seeds=n_seeds, relearn_steps=relearn_steps)
 
-    print("\n[4/10] Linear mode connectivity...", flush=True)
     result["linear_mode_connectivity"] = compute_linear_mode_connectivity(
         ckpt_root, all_results, burst_docs_BL, prompt_len, n_seeds=n_seeds
     )
 
-    print("\n[5/10] Pruning robustness...", flush=True)
     result["pruning_robustness"] = compute_pruning_robustness(
         ckpt_root,
         all_results,
@@ -2115,7 +2092,7 @@ def analyse_run(
     return result
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="10 new post-hoc mechanistic metrics for burstiness runs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2144,7 +2121,7 @@ def main():
     for run_dir in args.run_dirs:
         run_dir = Path(run_dir)
         existing = existing_by_name.get(run_dir.name, {})
-        t0 = time.time()
+        time.time()
         r = analyse_run(
             run_dir,
             existing,
@@ -2153,10 +2130,8 @@ def main():
             relearn_steps=args.relearn_steps,
         )
         per_run_results.append(r)
-        print(f"  Completed {run_dir.name} in {time.time() - t0:.1f}s", flush=True)
 
     # Metric 10: burst position comparison (global, uses existing_analyses)
-    print("\n[10/10] Burst position comparison...", flush=True)
     bpc = compute_burst_position_comparison(existing_analyses)
     for r in per_run_results:
         r["burst_position_comparison"] = bpc
@@ -2184,11 +2159,8 @@ def main():
     results_path = args.out_dir / "results.pkl"
     with open(results_path, "wb") as f:
         pickle.dump({"per_run": per_run_results, "by_metric": new_results}, f)
-    print(f"\nResults saved: {results_path}", flush=True)
 
-    print("\nGenerating dashboard...", flush=True)
     make_dashboard(new_results, existing_analyses, args.out_dir)
-    print("\nDone.", flush=True)
 
 
 if __name__ == "__main__":

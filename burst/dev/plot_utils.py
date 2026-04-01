@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from plotly.graph_objs import Figure
 
 
-def _plotly_to_mpl_color(c):
+def _plotly_to_mpl_color(
+    c: str | tuple[float, ...],
+) -> str | tuple[float, ...]:
     if not isinstance(c, str):
         return c
     m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", c)
@@ -18,11 +24,14 @@ def _plotly_to_mpl_color(c):
     return c
 
 
-def plotly_to_png_matplotlib(fig_plotly, path: str, width: int = 1200, height: int = 600) -> None:
-    import matplotlib
+def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
+    fig_plotly: Figure, path: str, width: int = 1200, height: int = 600,
+) -> None:
+    """Render a Plotly figure to PNG via matplotlib."""
+    import matplotlib as mpl  # noqa: PLC0415
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    mpl.use("Agg")
+    import matplotlib.pyplot as plt  # noqa: PLC0415
 
     fig_data = fig_plotly.to_dict()
     traces = fig_data.get("data", [])
@@ -49,7 +58,7 @@ def plotly_to_png_matplotlib(fig_plotly, path: str, width: int = 1200, height: i
             if isinstance(mc, str):
                 color = _plotly_to_mpl_color(mc)
 
-        kwargs = dict(label=name)
+        kwargs = {"label": name}
         if color and isinstance(color, (str, tuple)):
             kwargs["color"] = color
 
@@ -60,10 +69,14 @@ def plotly_to_png_matplotlib(fig_plotly, path: str, width: int = 1200, height: i
             elif "markers" in mode:
                 ax.scatter(x, y, s=30, zorder=5, **kwargs)
         elif trace_type == "bar":
-            bar_colors = marker_info.get("color") if isinstance(marker_info, dict) else None
+            bar_colors = (
+                marker_info.get("color") if isinstance(marker_info, dict) else None
+            )
             if isinstance(bar_colors, list):
                 kwargs.pop("color", None)
-                kwargs["color"] = [_plotly_to_mpl_color(c) for c in bar_colors[: len(x)]]
+                kwargs["color"] = [
+                    _plotly_to_mpl_color(c) for c in bar_colors[: len(x)]
+                ]
             ax.bar(x, y, alpha=0.8, **kwargs)
         elif trace_type == "heatmap":
             pass
@@ -72,36 +85,38 @@ def plotly_to_png_matplotlib(fig_plotly, path: str, width: int = 1200, height: i
     yaxis = layout.get("yaxis", {})
     if isinstance(xaxis, dict):
         ax.set_xlabel(
-            xaxis.get("title", {}).get("text", "") if isinstance(xaxis.get("title"), dict) else ""
+            xaxis.get("title", {}).get("text", "")
+            if isinstance(xaxis.get("title"), dict)
+            else ""
         )
     if isinstance(yaxis, dict):
         ax.set_ylabel(
-            yaxis.get("title", {}).get("text", "") if isinstance(yaxis.get("title"), dict) else ""
+            yaxis.get("title", {}).get("text", "")
+            if isinstance(yaxis.get("title"), dict)
+            else ""
         )
 
     ax.set_title(title_text[:120], fontsize=10, wrap=True)
     handles, labels = ax.get_legend_handles_labels()
     if labels:
         ax.legend(handles[:15], labels[:15], fontsize=7, loc="best")
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(mfig)
 
 
-def save_png(fig, path: str, width: int = 1200, height: int = 600) -> None:
+def save_png(
+    fig: Figure, path: str, width: int = 1200, height: int = 600,
+) -> None:
+    """Save a Plotly figure to PNG, falling back to matplotlib."""
     try:
         fig.write_image(path, width=width, height=height, scale=2)
-    except Exception:
+    except Exception:  # noqa: BLE001
         plotly_to_png_matplotlib(fig, path, width=width, height=height)
 
 
-# ---------------------------------------------------------------------------
-# Machine-readable text report (compact, LLM-context-friendly)
-# ---------------------------------------------------------------------------
-
-
-def _fmt(v: Any, precision: int = 5) -> str:
+def _fmt(v: float | str, precision: int = 5) -> str:
     if isinstance(v, float):
         if v == 0.0:
             return "0"
@@ -109,7 +124,10 @@ def _fmt(v: Any, precision: int = 5) -> str:
     return str(v)
 
 
-def _trace_to_text(trace: dict) -> list[str]:
+_INLINE_THRESHOLD = 20
+
+
+def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
     """Convert a single Plotly trace dict to compact text lines."""
     lines: list[str] = []
     ttype = trace.get("type", "scatter")
@@ -126,10 +144,14 @@ def _trace_to_text(trace: dict) -> list[str]:
         else:
             lines.append("  [heatmap]")
         if x_labels:
-            lines.append(f"    cols: {', '.join(str(c) for c in x_labels)}")
+            lines.append(
+                f"    cols: {', '.join(str(c) for c in x_labels)}"
+            )
         for row_i, row in enumerate(z):
             row_label = y_labels[row_i] if row_i < len(y_labels) else row_i
-            lines.append(f"    {row_label}: {', '.join(_fmt(v) for v in row)}")
+            lines.append(
+                f"    {row_label}: {', '.join(_fmt(v) for v in row)}"
+            )
         return lines
 
     if ttype == "contour":
@@ -143,11 +165,18 @@ def _trace_to_text(trace: dict) -> list[str]:
         y0 = trace.get("y0")
         dy = trace.get("dy")
         if x0 is not None:
-            lines.append(f"    x0={_fmt(x0)} dx={_fmt(dx)} y0={_fmt(y0)} dy={_fmt(dy)}")
+            lines.append(
+                f"    x0={_fmt(x0)} dx={_fmt(dx)}"
+                f" y0={_fmt(y0)} dy={_fmt(dy)}"
+            )
         if z:
-            lines.append(f"    grid: {len(z)}x{len(z[0]) if z else 0}")
+            lines.append(
+                f"    grid: {len(z)}x{len(z[0]) if z else 0}"
+            )
             flat = [v for row in z for v in row]
-            lines.append(f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]")
+            lines.append(
+                f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]"
+            )
         return lines
 
     if ttype == "surface":
@@ -159,8 +188,12 @@ def _trace_to_text(trace: dict) -> list[str]:
         if z:
             flat = [v for row in z for v in row if v is not None]
             if flat:
-                lines.append(f"    grid: {len(z)}x{len(z[0]) if z else 0}")
-                lines.append(f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]")
+                lines.append(
+                    f"    grid: {len(z)}x{len(z[0]) if z else 0}"
+                )
+                lines.append(
+                    f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]"
+                )
         return lines
 
     header = f"  [{ttype}]"
@@ -172,33 +205,46 @@ def _trace_to_text(trace: dict) -> list[str]:
         return lines
 
     error_y = trace.get("error_y", {})
-    err_vals = error_y.get("array", []) if isinstance(error_y, dict) else []
+    err_vals = (
+        error_y.get("array", []) if isinstance(error_y, dict) else []
+    )
 
-    if len(x) <= 20:
-        for i, (xi, yi) in enumerate(zip(x, y)):
+    if len(x) <= _INLINE_THRESHOLD:
+        for i, (xi, yi) in enumerate(zip(x, y, strict=False)):
             entry = f"    {_fmt(xi)}: {_fmt(yi)}"
             if i < len(err_vals):
-                entry += f" ±{_fmt(err_vals[i])}"
+                entry += f" +/-{_fmt(err_vals[i])}"
             lines.append(entry)
     else:
         lines.append(f"    n={len(x)}")
         y_num = [v for v in y if isinstance(v, (int, float))]
         if y_num:
-            lines.append(f"    y range: [{_fmt(min(y_num))}, {_fmt(max(y_num))}]")
-            lines.append(f"    y mean: {_fmt(sum(y_num) / len(y_num))}")
-        sample_indices = [0, len(x) // 4, len(x) // 2, 3 * len(x) // 4, len(x) - 1]
+            lines.append(
+                f"    y range: [{_fmt(min(y_num))},"
+                f" {_fmt(max(y_num))}]"
+            )
+            lines.append(
+                f"    y mean: {_fmt(sum(y_num) / len(y_num))}"
+            )
+        sample_indices = [
+            0, len(x) // 4, len(x) // 2, 3 * len(x) // 4, len(x) - 1,
+        ]
         for idx in sample_indices:
             if idx < len(x):
                 entry = f"    {_fmt(x[idx])}: {_fmt(y[idx])}"
                 if idx < len(err_vals):
-                    entry += f" ±{_fmt(err_vals[idx])}"
+                    entry += f" +/-{_fmt(err_vals[idx])}"
                 lines.append(entry)
-        lines.append(f"    ... ({len(x)} points total, showing 5 samples)")
+        lines.append(
+            f"    ... ({len(x)} points total, showing 5 samples)"
+        )
 
     return lines
 
 
-def fig_to_text(fig, title: str = "", description: dict | None = None) -> str:
+def fig_to_text(  # noqa: C901
+    fig: Figure, title: str = "", description: dict | None = None,
+) -> str:
     """Convert a Plotly figure to a compact machine-readable text block."""
     d = fig.to_dict()
     layout = d.get("layout", {})
@@ -209,7 +255,7 @@ def fig_to_text(fig, title: str = "", description: dict | None = None) -> str:
     if not title:
         t = layout.get("title", {})
         title = t.get("text", "") if isinstance(t, dict) else str(t)
-        title = re.sub(r"<br\s*/?>", " — ", title)
+        title = re.sub(r"<br\s*/?>", " -- ", title)
         title = re.sub(r"<[^>]+>", "", title).strip()
     parts.append(title)
 
@@ -217,9 +263,9 @@ def fig_to_text(fig, title: str = "", description: dict | None = None) -> str:
         if description.get("what"):
             parts.append(f"  What: {description['what']}")
         if description.get("high"):
-            parts.append(f"  ↑ High: {description['high']}")
+            parts.append(f"  High: {description['high']}")
         if description.get("low"):
-            parts.append(f"  ↓ Low: {description['low']}")
+            parts.append(f"  Low: {description['low']}")
         if description.get("limitations"):
             parts.append(f"  Limitations: {description['limitations']}")
 
@@ -227,18 +273,26 @@ def fig_to_text(fig, title: str = "", description: dict | None = None) -> str:
     yaxis = layout.get("yaxis", {})
     if isinstance(xaxis, dict):
         xt = xaxis.get("title", {})
-        xlabel = xt.get("text", "") if isinstance(xt, dict) else str(xt) if xt else ""
+        xlabel = (
+            xt.get("text", "") if isinstance(xt, dict)
+            else str(xt) if xt else ""
+        )
         if xlabel:
             parts.append(f"  x-axis: {xlabel}")
     if isinstance(yaxis, dict):
         yt = yaxis.get("title", {})
-        ylabel = yt.get("text", "") if isinstance(yt, dict) else str(yt) if yt else ""
+        ylabel = (
+            yt.get("text", "") if isinstance(yt, dict)
+            else str(yt) if yt else ""
+        )
         if ylabel:
             parts.append(f"  y-axis: {ylabel}")
 
     annotations = layout.get("annotations", [])
     subplot_titles = [
-        a.get("text", "") for a in annotations if isinstance(a, dict) and a.get("text")
+        a.get("text", "")
+        for a in annotations
+        if isinstance(a, dict) and a.get("text")
     ]
     if subplot_titles:
         parts.append(f"  subplots: {' | '.join(subplot_titles)}")
@@ -249,17 +303,20 @@ def fig_to_text(fig, title: str = "", description: dict | None = None) -> str:
     return "\n".join(parts)
 
 
+_TRIPLE_ENTRY_LEN = 3
+
+
 def write_text_report(
     all_figs: list[tuple],
     out_path: Path,
     dashboard_title: str = "Dashboard",
     descriptions: dict[str, dict] | None = None,
 ) -> None:
-    """Write a compact machine-readable text report from the same all_figs list used for HTML.
+    """Write a compact text report from all_figs used for HTML.
 
     all_figs elements can be:
-      - (key, title, fig)     — unified_analysis, new_metrics
-      - (key, fig)            — basin_metrics
+      - (key, title, fig)     -- unified_analysis, new_metrics
+      - (key, fig)            -- basin_metrics
     """
     descriptions = descriptions or {}
     lines: list[str] = [
@@ -270,7 +327,7 @@ def write_text_report(
     ]
 
     for i, entry in enumerate(all_figs):
-        if len(entry) == 3:
+        if len(entry) == _TRIPLE_ENTRY_LEN:
             key, title, fig = entry
         else:
             key, fig = entry
@@ -282,6 +339,5 @@ def write_text_report(
         lines.append("")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
+    with out_path.open("w") as f:
         f.write("\n".join(lines))
-    print(f"Text report saved: {out_path}", flush=True)

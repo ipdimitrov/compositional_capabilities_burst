@@ -1,12 +1,15 @@
+"""Sweep pre-training hyperparameters and report convergence statistics."""
+
+from __future__ import annotations
+
 import argparse
-import multiprocessing as mp
-import os
-import sys
 import itertools
 import math
+import multiprocessing as mp
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,16 +18,17 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from burst.config import SEED_BASE, TrainConfig
-from burst.core.train.experiment import build_data, run_pretrain
 from burst.core.gpu import gpu_cfg
-
+from burst.core.train.experiment import build_data, run_pretrain
 
 DEPTH_DEFAULT = 3
 BURST_POS_DEFAULT = 3
 N_SEEDS_DEFAULT = 2
+SMALL_FLOAT_THRESHOLD = 1e-3
+ACC_OTHER_THRESHOLD = 0.99
 
 LR_VALUES = [3e-3, 1e-3]
 LR_PRETRAIN_END_FRAC_VALUES = [0.5, 0.1]  # , 0.3
@@ -48,6 +52,8 @@ CONFIG_KEYS = [
 
 @dataclass(frozen=True)
 class SweepRun:
+    """Single run configuration for the pretrain sweep."""
+
     config_id: str
     run_idx: int
     total_runs: int
@@ -63,9 +69,11 @@ class SweepRun:
 
     @property
     def group_key(self) -> tuple[int, int]:
+        """Return grouping key for data sharing."""
         return (self.n_a, self.n_docs_per_task)
 
     def as_param_dict(self) -> dict[str, Any]:
+        """Return parameters as a dict."""
         return {
             "lr": self.lr,
             "lr_pretrain_end_frac": self.lr_pretrain_end_frac,
@@ -82,18 +90,17 @@ class SweepRun:
 
 
 def _fmt_float(v: float) -> str:
-    return f"{v:.0e}" if v < 1e-3 else f"{v:.4f}".rstrip("0").rstrip(".")
+    return f"{v:.0e}" if v < SMALL_FLOAT_THRESHOLD else f"{v:.4f}".rstrip("0").rstrip(".")
 
 
-def _file_safe(v: float | int) -> str:
+def _file_safe(v: float) -> str:
     if isinstance(v, int):
         return str(v)
-    return f"{v:.0e}" if v < 1e-3 else str(v).replace(".", "p")
+    return f"{v:.0e}" if v < SMALL_FLOAT_THRESHOLD else str(v).replace(".", "p")
 
 
 def _build_sweep_runs(n_seeds: int, depth: int, burst_pos: int) -> list[SweepRun]:
     staged: list[dict[str, Any]] = []
-    config_idx = 0
     combos = itertools.product(
         LR_VALUES,
         LR_PRETRAIN_END_FRAC_VALUES,
@@ -102,8 +109,7 @@ def _build_sweep_runs(n_seeds: int, depth: int, burst_pos: int) -> list[SweepRun
         N_A_VALUES,
         N_DOCS_PER_TASK_VALUES,
     )
-    for lr, lr_pe, beta, pre_steps, n_a, n_docs in combos:
-        config_idx += 1
+    for config_idx, (lr, lr_pe, beta, pre_steps, n_a, n_docs) in enumerate(combos, start=1):
         cfg_id = f"cfg_{config_idx:04d}"
         for seed_idx in range(n_seeds):
             seed = SEED_BASE + seed_idx
@@ -157,8 +163,10 @@ def _build_group_tasks(
             effective_chunk_size = chunk_size
         else:
             effective_chunk_size = max(1, math.ceil(len(group_runs) / auto_chunks_per_group))
-        for run_chunk in _chunk_runs(group_runs, effective_chunk_size):
-            tasks.append((group_key, run_chunk, base_cfg))
+        tasks.extend(
+            (group_key, run_chunk, base_cfg)
+            for run_chunk in _chunk_runs(group_runs, effective_chunk_size)
+        )
     return tasks
 
 
@@ -213,8 +221,8 @@ def _run_group(
         first_step_acc_other_gt_99 = next(
             (
                 int(step)
-                for step, acc_other in zip(log["step"], acc_other_series)
-                if acc_other > 0.99
+                for step, acc_other in zip(log["step"], acc_other_series, strict=False)
+                if acc_other > ACC_OTHER_THRESHOLD
             ),
             None,
         )
@@ -262,7 +270,7 @@ def _plot_single_run(row: dict[str, Any], out_dir: Path) -> None:
     ax_acc.set_ylabel("accuracy")
     ax_loss.set_ylabel("loss")
     ax_acc.set_ylim(0.0, 1.0)
-    ax_acc.grid(True, alpha=0.25)
+    ax_acc.grid(visible=True, alpha=0.25)
 
     title = (
         f"{row['config_id']} seed={row['seed']} | "
@@ -299,7 +307,7 @@ def _plot_summary(raw_df: pd.DataFrame, agg_df: pd.DataFrame, out_dir: Path) -> 
         ax.set_xlabel(xlab)
         ax.set_ylabel("final acc_other (mean +/- std)")
         ax.set_ylim(0.0, 1.0)
-        ax.grid(True, axis="y", alpha=0.25)
+        ax.grid(visible=True, axis="y", alpha=0.25)
         fig.tight_layout()
         fig.savefig(out_dir / fname, dpi=150)
         plt.close(fig)
@@ -325,7 +333,7 @@ def _plot_summary(raw_df: pd.DataFrame, agg_df: pd.DataFrame, out_dir: Path) -> 
     ax.set_xticklabels(top["config_id"], rotation=70, ha="right", fontsize=8)
     ax.set_ylabel("mean final acc_other across seeds")
     ax.set_ylim(0.0, 1.0)
-    ax.grid(True, axis="y", alpha=0.25)
+    ax.grid(visible=True, axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(out_dir / "top20_configs_by_final_acc_other.png", dpi=150)
     plt.close(fig)
@@ -414,7 +422,8 @@ def _write_excel(
             df.to_excel(writer, sheet_name=sheet[:31], index=False)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
+    """Run pretraining-only full-factorial sweep."""
     parser = argparse.ArgumentParser(description="Pretraining-only full-factorial sweep.")
     parser.add_argument("--run-tag", default=None)
     parser.add_argument("--depth", type=int, default=DEPTH_DEFAULT)
@@ -441,9 +450,10 @@ def main() -> None:
     if args.max_runs is not None:
         all_runs = all_runs[: max(0, args.max_runs)]
     if not all_runs:
-        raise ValueError("No runs scheduled. Check --max-runs.")
+        msg = "No runs scheduled. Check --max-runs."
+        raise ValueError(msg)
 
-    timestamp = args.run_tag or datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = args.run_tag or datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
     out_dir = Path("data") / f"{timestamp}_pretrain_sweep_d{args.depth}_pos{args.burst_pos}"
     plots_dir = out_dir / "plots"
     per_run_dir = plots_dir / "per_run"
@@ -452,23 +462,17 @@ def main() -> None:
     per_run_dir.mkdir(parents=True, exist_ok=True)
     summary_dir.mkdir(parents=True, exist_ok=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    "cuda" if torch.cuda.is_available() else "cpu"
     max_workers = args.n_workers if args.n_workers > 0 else gpu_cfg.train_workers
     grouped: dict[tuple[int, int], list[SweepRun]] = {}
     for run in all_runs:
         grouped.setdefault(run.group_key, []).append(run)
 
-    group_items = list(grouped.items())
+    list(grouped.items())
     tasks = _build_group_tasks(
         grouped, max_workers=max_workers, chunk_size=args.chunk_size, base_cfg=base_cfg
     )
     n_workers = max(1, min(max_workers, len(tasks)))
-    print(f"Output: {out_dir}")
-    print(f"Device: {device}")
-    print(f"Total runs: {len(all_runs)}")
-    print(f"Groups (N_A, n_docs_per_task): {len(group_items)}")
-    print(f"Task chunks: {len(tasks)}")
-    print(f"Workers: {n_workers}")
 
     rows: list[dict[str, Any]] = []
     pending = list(tasks)
@@ -477,7 +481,6 @@ def main() -> None:
     ctx = mp.get_context("spawn")
 
     while pending:
-        print(f"Dispatching {len(pending)} chunks with {cur_workers} workers")
         failed: list[tuple[tuple[int, int], list[SweepRun], dict[str, Any]]] = []
         saw_cuda_oom = False
 
@@ -488,8 +491,7 @@ def main() -> None:
                     task = futs[fut]
                     try:
                         rows.extend(fut.result())
-                    except Exception as exc:
-                        print(f"Chunk failed: {exc}", flush=True)
+                    except Exception as exc:  # noqa: BLE001
                         if _is_cuda_oom(exc):
                             saw_cuda_oom = True
                         failed.append(task)
@@ -500,25 +502,24 @@ def main() -> None:
             break
 
         if retries_left <= 0:
+            msg = (
+                f"{len(failed)} task chunks failed after retries."
+                " Last failure likely shown above."
+            )
             raise RuntimeError(
-                f"{len(failed)} task chunks failed after retries. Last failure likely shown above."
+                msg
             )
 
         retries_left -= 1
         pending = failed
         if saw_cuda_oom and cur_workers > 1:
             next_workers = max(1, cur_workers // 2)
-            if next_workers < cur_workers:
-                print(
-                    f"CUDA OOM detected. Reducing workers: {cur_workers} -> {next_workers}",
-                    flush=True,
-                )
-                cur_workers = next_workers
-        print(f"Retrying {len(pending)} failed chunks ({retries_left} retries left)", flush=True)
+            cur_workers = min(cur_workers, next_workers)
 
     raw_df = pd.DataFrame(rows)
     if raw_df.empty:
-        raise RuntimeError("Sweep produced no rows.")
+        msg = "Sweep produced no rows."
+        raise RuntimeError(msg)
 
     agg_df, ranking_df, by_param = _build_tables(raw_df)
 
@@ -529,14 +530,7 @@ def main() -> None:
     excel_path = out_dir / "pretrain_sweep_results.xlsx"
     _write_excel(excel_path, raw_df, agg_df, ranking_df, by_param)
 
-    top = ranking_df.iloc[0]
-    print(f"Excel: {excel_path}")
-    print("Best config:")
-    print(
-        f"  config_id={top['config_id']} "
-        f"acc_other_mean={top['final_acc_other_mean']:.4f} "
-        f"loss_mean={top['final_loss_mean']:.4f}"
-    )
+    ranking_df.iloc[0]
 
 
 if __name__ == "__main__":

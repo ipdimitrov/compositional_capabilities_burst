@@ -1,3 +1,5 @@
+"""Train nanoGPT on synthetic data with evaluation, logging, and checkpointing."""
+
 import logging
 
 import torch
@@ -37,7 +39,7 @@ def main(cfg: DictConfig) -> None:
     net.to(device)
     if cfg.net.compile:
         net = torch.compile(net)
-    logger.info(f"number of parameters: {net.get_num_params() / 1e6:.2f}M")
+    logger.info("number of parameters: %.2fM", net.get_num_params() / 1e6)
 
     optimizer = configure_optimizers(net, cfg.optimizer)
 

@@ -39,34 +39,36 @@ Dimension key:
     S: n_schedules
 """
 
-import sys
-import os
 import argparse
-import pickle
 import json
-import time
 import multiprocessing
+import os
+import pickle
+import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pathlib import Path
 
-from net.nanogpt import nanoGPT
 from burst.config import (
     PHASE_BURST,
     PHASE_REVERSION,
-    SCHEDULE_ORDER,
     SCHED_COLORS,
+    SCHEDULE_ORDER,
     parse_run_config,
 )
 from burst.core.train_utils import load_net
-from burst.dev.probe import collect_activations_KPTN
 from burst.dev.plot_utils import plotly_to_png_matplotlib as _plotly_to_png_matplotlib
+from burst.dev.probe import collect_activations_KPTN
+from net.nanogpt import nanoGPT
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_rng = np.random.default_rng()
 
 SCHEDULES_ORDERED = SCHEDULE_ORDER
 SCHEDULE_COLORS = SCHED_COLORS
@@ -87,7 +89,7 @@ def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     func_start = alphabet_start + n_alphabets
     burst_func_id = func_start + n_a * depth + 1
     value_ids = list(range(alphabet_start, alphabet_start + n_alphabets))
-    return [i for i in [burst_func_id] + value_ids if i < vocab_size]
+    return [i for i in [burst_func_id, *value_ids] if i < vocab_size]
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +105,7 @@ def _compute_delta_KTN(
     n_samples: int,
 ) -> torch.Tensor:
     n = min(n_samples, other_docs_BL.shape[0])
-    idx = np.random.choice(other_docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(other_docs_BL.shape[0], n, replace=False)
     docs = other_docs_BL[idx]
     acts_ckpt = collect_activations_KPTN(net_ckpt, docs)
     acts_pre = collect_activations_KPTN(net_pre, docs)
@@ -119,7 +121,7 @@ def _logit_lens_readability(
     burst_token_ids: list[int],
     top_k: int = 10,
 ) -> dict:
-    K, T, N = delta_KTN.shape
+    K, T, _N = delta_KTN.shape
     unembed_VN = net.transformer.wte.weight.detach().float().cpu()
     delta_KTN_f = delta_KTN.float()
     logits_KTV = torch.einsum("ktn,vn->ktv", delta_KTN_f, unembed_VN)
@@ -141,7 +143,7 @@ def _logit_lens_readability(
 def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    B, L = docs_t.shape
+    _B, L = docs_t.shape
     target_B6 = docs_t[:, -6:]
     generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
@@ -157,7 +159,7 @@ def _free_gen_acc_ablated(
 ) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    B, L = docs_t.shape
+    _B, L = docs_t.shape
     target_B6 = docs_t[:, -6:]
 
     delta_TN = delta_KTN[ablate_layer].to(DEVICE).float()
@@ -202,7 +204,7 @@ def compute_adl_for_label(
     burst_docs_BL: np.ndarray,
     prompt_len: int,
     n_samples: int = 256,
-    key_steps: list[int] = None,
+    key_steps: list[int] | None = None,
 ) -> dict:
     """Compute ADL metrics at key checkpoints for one label."""
     if key_steps is None:
@@ -268,10 +270,10 @@ def extract_grad_interference(result: dict) -> dict:
     burst_vs_other = gsl.get("burst_vs_other", [])
     phases = gsl.get("phase", [])
 
-    [s for s, p in zip(steps, phases) if p == PHASE_BURST]
-    burst_sims = [v for v, p in zip(burst_vs_other, phases) if p == PHASE_BURST]
-    [s for s, p in zip(steps, phases) if p == PHASE_REVERSION]
-    rev_sims = [v for v, p in zip(burst_vs_other, phases) if p == PHASE_REVERSION]
+    [s for s, p in zip(steps, phases, strict=False) if p == PHASE_BURST]
+    burst_sims = [v for v, p in zip(burst_vs_other, phases, strict=False) if p == PHASE_BURST]
+    [s for s, p in zip(steps, phases, strict=False) if p == PHASE_REVERSION]
+    rev_sims = [v for v, p in zip(burst_vs_other, phases, strict=False) if p == PHASE_REVERSION]
 
     mean_burst_interference = float(np.mean(burst_sims)) if burst_sims else float("nan")
     mean_rev_interference = float(np.mean(rev_sims)) if rev_sims else float("nan")
@@ -283,7 +285,7 @@ def extract_grad_interference(result: dict) -> dict:
     end_layer_interference = {}
     for ln in layer_names:
         vals = per_layer.get(ln, [])
-        burst_vals = [v for v, p in zip(vals, phases) if p == PHASE_BURST]
+        burst_vals = [v for v, p in zip(vals, phases, strict=False) if p == PHASE_BURST]
         mean_layer_interference[ln] = float(np.mean(burst_vals)) if burst_vals else float("nan")
         end_layer_interference[ln] = float(burst_vals[-1]) if burst_vals else float("nan")
 
@@ -312,7 +314,7 @@ def ema_interpolation_probe(
     burst_docs_BL: np.ndarray,
     prompt_len: int,
     n_samples: int = 256,
-    alphas: list[float] = None,
+    alphas: list[float] | None = None,
 ) -> dict:
     """Interpolate between reverted and peak-burst model; measure burst accuracy.
 
@@ -341,7 +343,7 @@ def ema_interpolation_probe(
     net_interp = load_net(cfg, ckpt_peak)
 
     n = min(n_samples, burst_docs_BL.shape[0])
-    idx = np.random.choice(burst_docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(burst_docs_BL.shape[0], n, replace=False)
     docs = burst_docs_BL[idx]
 
     accs = []
@@ -352,9 +354,9 @@ def ema_interpolation_probe(
         accs.append(acc)
 
     # Compute "cliff sharpness": alpha at which accuracy first exceeds 0.5
-    cliff_alpha = next((a for a, acc in zip(alphas, accs) if acc > 0.5), 1.0)
+    cliff_alpha = next((a for a, acc in zip(alphas, accs, strict=False) if acc > 0.5), 1.0)
     # Area under the curve (higher = more gradual = deeper)
-    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapezoid
     auc = float(_trapz(accs, alphas))
 
     return {"alphas": alphas, "accs": accs, "cliff_alpha": cliff_alpha, "auc": auc}
@@ -421,7 +423,7 @@ def compute_critical_sharpness(
     net.train()
 
     n = min(n_samples, burst_docs_BL.shape[0])
-    idx = np.random.choice(burst_docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(burst_docs_BL.shape[0], n, replace=False)
     docs = torch.as_tensor(burst_docs_BL[idx], dtype=torch.long, device=DEVICE)
     inp, tgt = docs[:, :-1], docs[:, 1:]
 
@@ -433,15 +435,15 @@ def compute_critical_sharpness(
         for _ in range(n_hutchinson):
             net.zero_grad()
             logits = net(inp).float()
-            B, T_seq, V = logits.shape
+            _B, _T_seq, V = logits.shape
             loss = F.cross_entropy(logits.reshape(-1, V), tgt.reshape(-1))
             grads = torch.autograd.grad(loss, params, create_graph=True)
 
             v_list = [torch.randint_like(p, 0, 2).float() * 2 - 1 for p in params]
-            gv = sum((g * v).sum() for g, v in zip(grads, v_list))
+            gv = sum((g * v).sum() for g, v in zip(grads, v_list, strict=False))
 
             hvp = torch.autograd.grad(gv, params, retain_graph=False)
-            trace = sum((hv * v).sum().item() for hv, v in zip(hvp, v_list))
+            trace = sum((hv * v).sum().item() for hv, v in zip(hvp, v_list, strict=False))
             traces.append(trace)
             net.zero_grad()
 
@@ -529,10 +531,6 @@ def analyse_run(
     n_hutchinson: int = 10,
 ) -> dict:
     """Run all five analyses on a single run directory."""
-    print(f"\n{'=' * 60}", flush=True)
-    print(f"Analysing: {run_dir.name}", flush=True)
-    print(f"{'=' * 60}", flush=True)
-
     from burst.core.train_utils import resolve_run_paths
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
@@ -557,7 +555,7 @@ def analyse_run(
         all_results = pickle.load(f)
 
     {r["label"]: r for r in all_results}
-    schedules_present = sorted(set(r["schedule"] for r in all_results))
+    schedules_present = sorted({r["schedule"] for r in all_results})
 
     ckpt_root = logs_dir / "checkpoints"
 
@@ -579,7 +577,6 @@ def analyse_run(
     # -----------------------------------------------------------------------
     # Metric 2: Gradient interference (from existing data, free)
     # -----------------------------------------------------------------------
-    print("\n[2/5] Gradient interference (from grad_sim_log)...", flush=True)
     for r in all_results:
         label = r["label"]
         if "grad_sim_log" in r:
@@ -588,12 +585,10 @@ def analyse_run(
                 "seed": r["seed"],
                 **extract_grad_interference(r),
             }
-    print(f"  Done: {len(analysis['grad_interference'])} labels", flush=True)
 
     # -----------------------------------------------------------------------
     # Metrics 3 + 5: EMA interpolation probe + weight delta rank
     # -----------------------------------------------------------------------
-    print("\n[3+5/5] EMA interpolation probe + weight delta rank...", flush=True)
     jobs_by_schedule: dict[str, list[dict]] = {}
     for r in all_results:
         sched = r["schedule"]
@@ -638,7 +633,7 @@ def analyse_run(
                 prompt_len,
                 n_samples=adl_n_samples,
             )
-            for alpha, acc in zip(ema["alphas"], ema["accs"]):
+            for alpha, acc in zip(ema["alphas"], ema["accs"], strict=False):
                 ema_accs_by_alpha.setdefault(alpha, []).append(acc)
             ema_cliff_alphas.append(ema["cliff_alpha"])
             ema_aucs.append(ema["auc"])
@@ -652,11 +647,6 @@ def analyse_run(
                 rank_by_group.setdefault(g, []).append(v)
 
             seeds_done += 1
-            print(
-                f"  {label}: EMA cliff_alpha={ema['cliff_alpha']:.2f}, "
-                f"auc={ema['auc']:.3f}, total_rank={dr['total_rank']}",
-                flush=True,
-            )
 
         alphas_sorted = sorted(ema_accs_by_alpha.keys())
         analysis["task_vectors"][sched] = {
@@ -676,7 +666,6 @@ def analyse_run(
     # -----------------------------------------------------------------------
     # Metric 4: Critical sharpness
     # -----------------------------------------------------------------------
-    print("\n[4/5] Critical sharpness (Hutchinson)...", flush=True)
     for sched in schedules_present:
         sched_results = jobs_by_schedule[sched]
         traces = []
@@ -703,7 +692,6 @@ def analyse_run(
             )
             traces.append(trace)
             seeds_done += 1
-            print(f"  {label}: sharpness={trace:.1f}", flush=True)
 
         analysis["sharpness"][sched] = {
             "traces": traces,
@@ -714,7 +702,6 @@ def analyse_run(
     # -----------------------------------------------------------------------
     # Metric 1: ADL
     # -----------------------------------------------------------------------
-    print("\n[1/5] ADL (readability + causal ablation)...", flush=True)
     for sched in schedules_present:
         sched_results = jobs_by_schedule[sched]
         seeds_done = 0
@@ -767,12 +754,7 @@ def analyse_run(
                 == max(s2["step"] for s2 in adl_result["adl_steps"] if s2["step"] <= 499)
             ]
             if peak_step_data:
-                ps = peak_step_data[-1]
-                print(
-                    f"  {label}: readability@peak={np.mean(ps['mean_readability_K']):.3f}, "
-                    f"max_drop={ps['max_acc_drop']:.3f}",
-                    flush=True,
-                )
+                peak_step_data[-1]
 
         analysis["adl"][sched] = {
             step: {
@@ -840,13 +822,13 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
     for analysis in analyses:
         run_name = analysis["run_name"]
         gi = analysis["grad_interference"]
-        schedules = sorted(set(v["schedule"] for v in gi.values()), key=_sched_order)
+        schedules = sorted({v["schedule"] for v in gi.values()}, key=_sched_order)
         for sched in schedules:
             sched_entries = [v for v in gi.values() if v["schedule"] == sched]
-            all_steps = sorted(set(s for e in sched_entries for s in e["steps"]))
+            all_steps = sorted({s for e in sched_entries for s in e["steps"]})
             all_sims = {s: [] for s in all_steps}
             for e in sched_entries:
-                for s, sim in zip(e["steps"], e["burst_vs_other"]):
+                for s, sim in zip(e["steps"], e["burst_vs_other"], strict=False):
                     all_sims[s].append(sim)
             steps_arr = sorted(all_sims.keys())
             mean_sims = [np.mean(all_sims[s]) for s in steps_arr]
@@ -855,7 +837,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=steps_arr,
                     y=mean_sims,
                     name=f"{sched} ({run_name})",
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines",
                 )
             )
@@ -897,13 +879,13 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         vertical_spacing=0.15,
     )
 
-    for row_idx, (y_key, y_label) in enumerate(zip(y_keys, row_labels), start=1):
-        for x_col, (x_key, x_label) in enumerate(zip(x_keys, col_labels)):
+    for row_idx, (y_key, y_label) in enumerate(zip(y_keys, row_labels, strict=False), start=1):
+        for x_col, (x_key, x_label) in enumerate(zip(x_keys, col_labels, strict=False)):
             for run_idx, analysis in enumerate(analyses):
                 col_idx = x_col * n_runs + run_idx + 1
                 gi = analysis["grad_interference"]
                 sm = analysis["summary_metrics"]
-                schedules = sorted(set(v["schedule"] for v in gi.values()), key=_sched_order)
+                schedules = sorted({v["schedule"] for v in gi.values()}, key=_sched_order)
                 xs, ys, colors, labels = [], [], [], []
                 for sched in schedules:
                     if sched not in sm:
@@ -922,7 +904,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                         mode="markers+text",
                         text=labels,
                         textposition="top center",
-                        marker=dict(color=colors, size=12),
+                        marker={"color": colors, "size": 12},
                         showlegend=False,
                     ),
                     row=row_idx,
@@ -945,7 +927,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
     for analysis in analyses:
         gi = analysis["grad_interference"]
         run_name = analysis["run_name"]
-        schedules = sorted(set(v["schedule"] for v in gi.values()), key=_sched_order)
+        schedules = sorted({v["schedule"] for v in gi.values()}, key=_sched_order)
         sample_entry = next(iter(gi.values()))
         layer_names = list(sample_entry["mean_layer_interference"].keys())
 
@@ -967,7 +949,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 y=y_labels,
                 colorscale="RdBu",
                 zmid=0,
-                colorbar=dict(title="Cosine Sim"),
+                colorbar={"title": "Cosine Sim"},
             )
         )
         fig3.update_layout(
@@ -995,7 +977,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=data["alphas"],
                     y=data["mean_accs"],
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1040,7 +1022,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 mode="markers+text",
                 text=labels,
                 textposition="top center",
-                marker=dict(color=colors, size=12),
+                marker={"color": colors, "size": 12},
                 showlegend=False,
             ),
             row=1,
@@ -1086,7 +1068,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 mode="markers+text",
                 text=labels,
                 textposition="top center",
-                marker=dict(color=colors, size=12),
+                marker={"color": colors, "size": 12},
                 showlegend=False,
             ),
             row=1,
@@ -1115,7 +1097,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
             go.Bar(
                 x=schedules,
                 y=[sh[s]["mean"] for s in schedules],
-                error_y=dict(type="data", array=[sh[s]["std"] for s in schedules]),
+                error_y={"type": "data", "array": [sh[s]["std"] for s in schedules]},
                 name=run_name,
                 marker_color=[_color(s) for s in schedules],
             )
@@ -1193,7 +1175,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                 mode="markers+text",
                 text=labels,
                 textposition="top center",
-                marker=dict(color=colors, size=12),
+                marker={"color": colors, "size": 12},
                 showlegend=False,
             ),
             row=1,
@@ -1309,7 +1291,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
                     x=steps_sorted,
                     y=norms,
                     name=sched,
-                    line=dict(color=_color(sched), width=2),
+                    line={"color": _color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1359,14 +1341,14 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
             ],
         )
 
-        def _add_scatter(fig, row, col, x, y, colors, labels):
+        def _add_scatter(fig, row, col, x, y, colors, labels) -> None:
             fig.add_trace(
                 go.Scatter(
                     x=x,
                     y=y,
                     mode="markers+lines",
-                    marker=dict(color=colors, size=10),
-                    line=dict(color="gray", width=1, dash="dot"),
+                    marker={"color": colors, "size": 10},
+                    line={"color": "gray", "width": 1, "dash": "dot"},
                     text=labels,
                     textposition="top center",
                     showlegend=False,
@@ -1506,8 +1488,6 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
     html_path = out_dir / "dashboard.html"
     with open(html_path, "w") as f:
         f.write("".join(html_parts))
-    print(f"\nDashboard saved: {html_path}", flush=True)
-    print(f"Charts saved: {charts_dir}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1529,8 +1509,7 @@ def _find_all_run_dirs(data_root: Path) -> list[Path]:
     candidates = sorted(
         p for p in data_root.iterdir() if p.is_dir() and p.name.startswith("burst_")
     )
-    valid = [p for p in candidates if _is_valid_run_dir(p)]
-    return valid
+    return [p for p in candidates if _is_valid_run_dir(p)]
 
 
 def _analyse_run_worker(args_tuple: tuple) -> dict:
@@ -1545,7 +1524,7 @@ def _analyse_run_worker(args_tuple: tuple) -> dict:
     )
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Five-metric deep analysis of burstiness runs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1606,11 +1585,9 @@ def main():
     if args.all:
         run_dirs = _find_all_run_dirs(args.data_root)
         if not run_dirs:
-            print(f"No valid run directories found under {args.data_root}", flush=True)
             return
-        print(f"Found {len(run_dirs)} valid run directories:", flush=True)
-        for d in run_dirs:
-            print(f"  {d}", flush=True)
+        for _d in run_dirs:
+            pass
     elif args.run_dirs:
         run_dirs = [Path(d) for d in args.run_dirs]
     else:
@@ -1625,10 +1602,6 @@ def main():
     ]
 
     if args.n_parallel > 1:
-        print(
-            f"\nRunning {len(run_dirs)} analyses with {args.n_parallel} parallel workers...",
-            flush=True,
-        )
         # spawn context avoids CUDA fork issues
         ctx = multiprocessing.get_context("spawn")
         with ctx.Pool(processes=args.n_parallel) as pool:
@@ -1636,19 +1609,15 @@ def main():
     else:
         analyses = []
         for wa in worker_args:
-            t0 = time.time()
+            time.time()
             analysis = _analyse_run_worker(wa)
             analyses.append(analysis)
-            print(f"  Completed {wa[0]} in {time.time() - t0:.1f}s", flush=True)
 
     results_path = out_dir / "results.pkl"
     with open(results_path, "wb") as f:
         pickle.dump(analyses, f)
-    print(f"\nResults saved: {results_path}", flush=True)
 
-    print("\nGenerating dashboard...", flush=True)
     make_dashboard(analyses, out_dir)
-    print("\nDone.", flush=True)
 
 
 if __name__ == "__main__":

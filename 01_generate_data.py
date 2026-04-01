@@ -1,3 +1,5 @@
+"""Generate synthetic training data from composed functions and write it to disk."""
+
 import logging
 
 from omegaconf import DictConfig

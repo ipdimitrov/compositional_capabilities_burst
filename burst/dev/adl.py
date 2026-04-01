@@ -24,32 +24,37 @@ Dimension key:
     V: vocab_size
 """
 
-import sys
-import os
-import argparse
-import pickle
-import json
+from __future__ import annotations
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import argparse
+import json
+import pickle
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import numpy as np
 import torch
-from pathlib import Path
 
-from net.nanogpt import nanoGPT
-from burst.core.parallel import run_job_pool
-from burst.config import PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION, parse_run_config
-from burst.core.train_utils import load_net
+from burst.config import PHASE_BURST, PHASE_PRE_BURST, PHASE_REVERSION, parse_run_config
 from burst.core.gpu import gpu_cfg
+from burst.core.parallel import JobResult, run_job_pool
+from burst.core.train_utils import load_net
 from burst.dev.probe import collect_activations_KPTN
 
+if TYPE_CHECKING:
+    from net.nanogpt import nanoGPT
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_rng = np.random.default_rng()
 
 ADL_ENABLED = False
 
 
 @torch.no_grad()
-def compute_delta_KTN(
+def compute_delta_KTN(  # noqa: N802
     net_checkpoint: nanoGPT,
     net_pre_burst: nanoGPT,
     other_docs_BL: np.ndarray,
@@ -63,15 +68,14 @@ def compute_delta_KTN(
     Returns tensor of shape (K, T, N) on CPU.
     """
     n = min(n_samples, other_docs_BL.shape[0])
-    idx = np.random.choice(other_docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(other_docs_BL.shape[0], n, replace=False)
     docs_BL = other_docs_BL[idx]
 
     acts_ckpt = collect_activations_KPTN(net_checkpoint, docs_BL)
     acts_pre = collect_activations_KPTN(net_pre_burst, docs_BL)
 
     K = len(acts_ckpt)
-    delta_KTN = torch.stack([(acts_ckpt[k] - acts_pre[k]).mean(dim=0) for k in range(K)])
-    return delta_KTN
+    return torch.stack([(acts_ckpt[k] - acts_pre[k]).mean(dim=0) for k in range(K)])
 
 
 @torch.no_grad()
@@ -88,11 +92,12 @@ def logit_lens_readability(
     whether burst-relevant token IDs appear in the top-k predicted tokens.
 
     Returns:
-        readability_KT: (K, T) array — fraction of top_k that are burst tokens
+        readability_KT: (K, T) array -- fraction of top_k that are burst tokens
         top_tokens_KT: (K, T) list of top-k token ids at each position
         mean_burst_rank_KT: (K, T) mean rank of burst tokens in logit ordering
+
     """
-    K, T, N = delta_KTN.shape
+    K, T, _N = delta_KTN.shape
     unembed_VN = net.transformer.wte.weight.detach().float()
 
     delta_KTN_dev = delta_KTN.to(DEVICE)
@@ -137,11 +142,12 @@ def causal_ablation_accuracy(
 
     Returns:
         acc_baseline: burst accuracy without ablation
-        acc_ablated_K: (K,) array — burst accuracy after ablating layer k
-        acc_drop_K: (K,) array — accuracy drop from ablating layer k
+        acc_ablated_K: (K,) array -- burst accuracy after ablating layer k
+        acc_drop_K: (K,) array -- accuracy drop from ablating layer k
+
     """
     n = min(n_samples, burst_docs_BL.shape[0])
-    idx = np.random.choice(burst_docs_BL.shape[0], n, replace=False)
+    idx = _rng.choice(burst_docs_BL.shape[0], n, replace=False)
     docs_BL = burst_docs_BL[idx]
 
     acc_baseline = _free_gen_accuracy(net, docs_BL, prompt_len)
@@ -163,11 +169,10 @@ def causal_ablation_accuracy(
 
 
 @torch.no_grad()
-@torch.no_grad()
 def _free_gen_accuracy(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    B, L = docs_t.shape
+    _B, L = docs_t.shape
     target_B6 = docs_t[:, -6:]
     generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
@@ -181,21 +186,23 @@ def _free_gen_accuracy_with_ablation(
     delta_KTN: torch.Tensor,
     ablate_layer: int,
 ) -> float:
-    """Free-gen accuracy with delta projected out at ablate_layer.
+    """Project out delta at ablate_layer and measure free-gen accuracy.
 
     For layer k, at every token position t, we subtract the component of the
     residual stream along delta_KTN[k, t, :] (normalised direction).
     """
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    B, L = docs_t.shape
+    _B, L = docs_t.shape
     target_B6 = docs_t[:, -6:]
 
     delta_TN = delta_KTN[ablate_layer].to(DEVICE).float()
     norms_T = delta_TN.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     delta_unit_TN = delta_TN / norms_T
 
-    def _ablate_hook(module, input, output):
+    def _ablate_hook(
+        _module: object, _input: object, output: object,
+    ) -> object:
         if isinstance(output, tuple):
             x_raw, rest = output[0], output[1:]
         else:
@@ -205,7 +212,10 @@ def _free_gen_accuracy_with_ablation(
         T_delta = delta_unit_TN.shape[0]
         T_use = min(T_cur, T_delta)
         d_TN = delta_unit_TN[:T_use]
-        proj = torch.einsum("btn,tn->bt", x_BTN[:, :T_use], d_TN).unsqueeze(-1) * d_TN.unsqueeze(0)
+        proj = (
+            torch.einsum("btn,tn->bt", x_BTN[:, :T_use], d_TN).unsqueeze(-1)
+            * d_TN.unsqueeze(0)
+        )
         x_BTN[:, :T_use] -= proj
         x_BTN = x_BTN.to(x_raw.dtype)
         if rest is not None:
@@ -229,7 +239,7 @@ def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     """Return token IDs associated with the burst function b*.
 
     Vocab layout: X0..X{n_alphabets-1}, then F0..F{n_a*depth+1}, then specials.
-    b* = F{n_a*depth+1} (last function token, one per position × n_a + 1).
+    b* = F{n_a*depth+1} (last function token, one per position x n_a + 1).
 
     We return the function token for b* plus all value tokens (X0..X9),
     since burst accuracy is measured on output value tokens.
@@ -244,11 +254,11 @@ def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     burst_func_id = func_start + n_a * depth + 1
     value_ids = list(range(alphabet_start, alphabet_start + n_alphabets))
 
-    ids = [burst_func_id] + value_ids
+    ids = [burst_func_id, *value_ids]
     return [i for i in ids if i < vocab_size]
 
 
-def _worker_main():
+def _worker_main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--job-path", required=True)
@@ -257,10 +267,10 @@ def _worker_main():
     parser.add_argument("--adl-batch-size", type=int, required=True)
     args = parser.parse_args()
 
-    with open(args.job_path, "rb") as f:
-        job = pickle.load(f)
-    with open(args.data_path, "rb") as f:
-        other_docs_BL, burst_docs_BL, prompt_len = pickle.load(f)
+    with Path(args.job_path).open("rb") as f:
+        job = pickle.load(f)  # noqa: S301
+    with Path(args.data_path).open("rb") as f:
+        other_docs_BL, burst_docs_BL, prompt_len = pickle.load(f)  # noqa: S301
 
     cfg = job["cfg"]
     n_a = job["n_a"]
@@ -298,11 +308,12 @@ def _worker_main():
         "acc_drop_K": ablation["acc_drop_K"],
     }
 
-    with open(args.output_path, "wb") as f:
+    with Path(args.output_path).open("wb") as f:
         pickle.dump(result, f)
 
 
-def main():
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
+    """Run ADL analysis across all checkpoints in a training run."""
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--n-workers", type=int, default=None)
@@ -310,32 +321,39 @@ def main():
     args = parser.parse_args()
 
     run_dir = args.run_dir
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
-    with open(cfg_path) as f:
+    with cfg_path.open() as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
-    base_cfg, depth, _burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
+    base_cfg = rc["base_cfg"]
+    depth = rc["depth"]
+    _burst_pos = rc["burst_pos"]
+    n_a = rc["n_a"]
     P = base_cfg.get("pre_burst_steps", 0)
     T = base_cfg["total_steps"]
     base_cfg["reversion_steps"]
 
     ckpt_root = logs_dir / "checkpoints"
     if not ckpt_root.exists():
-        print(f"No checkpoints directory in {logs_dir}, nothing to do.", flush=True)
+        print(  # noqa: T201
+            f"No checkpoints directory in {logs_dir}, nothing to do.",
+            flush=True,
+        )
         return
 
-    with open(logs_dir / "_data.pkl", "rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+    with (logs_dir / "_data.pkl").open("rb") as f:
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
 
     prompt_len = run_cfg.get("task_info", {}).get("prompt_len")
     if prompt_len is None:
-        raise ValueError("prompt_len not found in config.json task_info")
+        msg = "prompt_len not found in config.json task_info"
+        raise ValueError(msg)
 
     job_entries = run_cfg["jobs"]
     {
@@ -347,14 +365,17 @@ def main():
         label = j["label"]
         pkl_path = logs_dir / f"{label}.pkl"
         if pkl_path.exists():
-            with open(pkl_path, "rb") as f:
-                r = pickle.load(f)
+            with pkl_path.open("rb") as f:
+                r = pickle.load(f)  # noqa: S301
             r["config"]
             break
 
     n_workers = args.n_workers or max(1, gpu_cfg.probe_workers)
-    print(f"{gpu_cfg.summary()}", flush=True)
-    print(f"ADL: batch_size={args.adl_batch_size}, workers={n_workers}", flush=True)
+    print(f"{gpu_cfg.summary()}", flush=True)  # noqa: T201
+    print(  # noqa: T201
+        f"ADL: batch_size={args.adl_batch_size}, workers={n_workers}",
+        flush=True,
+    )
 
     jobs = []
     for j in job_entries:
@@ -366,11 +387,14 @@ def main():
         pkl_path = logs_dir / f"{label}.pkl"
         if not pkl_path.exists():
             continue
-        with open(pkl_path, "rb") as f:
-            result = pickle.load(f)
+        with pkl_path.open("rb") as f:
+            result = pickle.load(f)  # noqa: S301
         cfg = result["config"]
 
-        ckpt_files = sorted(ckpt_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
+        ckpt_files = sorted(
+            ckpt_dir.glob("step_*.pt"),
+            key=lambda p: int(p.stem.split("_")[1]),
+        )
         if not ckpt_files:
             continue
 
@@ -404,14 +428,19 @@ def main():
             )
 
     if not jobs:
-        print("No checkpoint jobs found.", flush=True)
+        print("No checkpoint jobs found.", flush=True)  # noqa: T201
         return
 
-    print(f"ADL jobs: {len(jobs)} checkpoints across {len(job_entries)} labels", flush=True)
+    print(  # noqa: T201
+        f"ADL jobs: {len(jobs)} checkpoints across {len(job_entries)} labels",
+        flush=True,
+    )
 
     worker_script = str(Path(__file__))
 
-    def build_cmd(script, job_path, data_path, output_path):
+    def build_cmd(
+        script: str, job_path: str, data_path: str, output_path: str,
+    ) -> list[str]:
         return [
             sys.executable,
             script,
@@ -426,9 +455,12 @@ def main():
             str(args.adl_batch_size),
         ]
 
-    def on_done(jr, n_done, n_total):
+    def on_done(jr: JobResult, _n_done: int, _n_total: int) -> None:
         status = "ok" if jr.success else f"FAIL: {jr.error[:80]}"
-        print(f"  [{n_done}/{n_total}] {jr.label}: {status}", flush=True)
+        print(  # noqa: T201
+            f"  [{_n_done}/{_n_total}] {jr.label}: {status}",
+            flush=True,
+        )
 
     results = run_job_pool(
         jobs=jobs,
@@ -470,7 +502,7 @@ def main():
         log["acc_ablated_K"].append(d["acc_ablated_K"])
         log["acc_drop_K"].append(d["acc_drop_K"])
 
-    for label, entry in per_label.items():
+    for entry in per_label.values():
         log = entry["adl_log"]
         order = np.argsort(log["step"])
         for key in [
@@ -499,23 +531,27 @@ def main():
             "adl_batch_size": args.adl_batch_size,
             "adl_log": per_label[label]["adl_log"],
         }
-        with open(adl_dir / f"{label}.json", "w") as f:
+        with (adl_dir / f"{label}.json").open("w") as f:
             json.dump(record, f)
 
     all_results_path = logs_dir / "all_results.pkl"
     if all_results_path.exists():
-        with open(all_results_path, "rb") as f:
-            all_results = pickle.load(f)
+        with all_results_path.open("rb") as f:
+            all_results = pickle.load(f)  # noqa: S301
         for r in all_results:
             lbl = r["label"]
             if lbl in per_label:
                 r["adl_log"] = per_label[lbl]["adl_log"]
-        with open(all_results_path, "wb") as f:
+        with all_results_path.open("wb") as f:
             pickle.dump(all_results, f)
-        print(f"Updated all_results.pkl with ADL data for {len(per_label)} labels", flush=True)
+        print(  # noqa: T201
+            f"Updated all_results.pkl with ADL data for {len(per_label)} labels",
+            flush=True,
+        )
 
-    print(
-        f"ADL done: {len(per_label)} labels, {sum(jr.success for jr in results)}/{len(results)} ok",
+    print(  # noqa: T201
+        f"ADL done: {len(per_label)} labels, "
+        f"{sum(jr.success for jr in results)}/{len(results)} ok",
         flush=True,
     )
 

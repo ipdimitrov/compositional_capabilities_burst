@@ -1,3 +1,5 @@
+"""Reproducibility: RNG seeding and JSON manifest generation."""
+
 from __future__ import annotations
 
 import json
@@ -20,7 +22,7 @@ def set_reproducibility(seed: int, *, deterministic: bool) -> None:
     """Seed all RNGs and configure torch determinism settings."""
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
-    np.random.seed(seed)
+    np.random.seed(seed)  # noqa: NPY002
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -58,7 +60,7 @@ def _runtime() -> dict[str, Any]:
     }
 
 
-def _jsonable(value: Any) -> Any:
+def _jsonable(value: object) -> str | dict | list | int | float | bool | None:
     """Recursively convert Path objects to strings for JSON serialisation."""
     if isinstance(value, Path):
         return str(value)

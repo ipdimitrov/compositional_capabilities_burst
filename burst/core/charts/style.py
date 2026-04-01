@@ -1,12 +1,18 @@
+"""Matplotlib styling helpers for consistent figure appearance."""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import matplotlib as mpl
 
 mpl.use("Agg")
 import matplotlib.pyplot as plt
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
 
 FIG_DPI = 220
 SERIF_STACK = ["STIXGeneral", "Times New Roman", "DejaVu Serif"]
@@ -37,7 +43,7 @@ def apply_paper_style() -> None:
     )
 
 
-def style_axes(ax: Any, xlabel: str, ylabel: str, title: str = "") -> None:
+def style_axes(ax: Axes, xlabel: str, ylabel: str, title: str = "") -> None:
     """Apply standard axis labels, title, and grid."""
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -46,7 +52,7 @@ def style_axes(ax: Any, xlabel: str, ylabel: str, title: str = "") -> None:
     ax.grid(visible=True)
 
 
-def save_figure(fig: Any, path: str | Path) -> None:
+def save_figure(fig: Figure, path: str | Path) -> None:
     """Save a figure to disk and close it."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

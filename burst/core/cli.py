@@ -1,3 +1,5 @@
+"""CLI dispatcher for burst.core sub-commands (train, gradients, pipeline, charts)."""
+
 from __future__ import annotations
 
 import argparse
@@ -234,16 +236,16 @@ def main() -> None:
     )
 
     if bundle_path is not None:
-        logger.info(f"bundle: {bundle_path}")
+        logger.info("bundle: %s", bundle_path)
     if chart_paths:
         target_dir = (
             Path(cmd.out_dir)
             if cmd.out_dir is not None
             else (resolve_run_paths(cmd.run_dir)[2] / CORE_CHARTS_DIRNAME)
         )
-        logger.info(f"charts: {target_dir}")
-        logger.info(f"count: {len(chart_paths)}")
-    logger.info(f"repro_manifest: {manifest_path}")
+        logger.info("charts: %s", target_dir)
+        logger.info("count: %s", len(chart_paths))
+    logger.info("repro_manifest: %s", manifest_path)
 
 
 if __name__ == "__main__":

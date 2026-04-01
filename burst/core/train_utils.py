@@ -9,10 +9,12 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from burst.core.train.experiment import DepthNData
 
 import numpy as np
 import torch
@@ -227,7 +229,7 @@ N_PROBE_DOCS_PER_TASK = 200
 
 
 def build_probe_docs(
-    data: Any,
+    data: DepthNData,
     doc_len: int,
     n_per_task: int,
 ) -> tuple[np.ndarray, np.ndarray]:

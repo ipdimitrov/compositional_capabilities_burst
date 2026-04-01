@@ -1,23 +1,4 @@
-r"""Next-token probes per layer for Other-class vs Burst-class regimes.
-
-Two probe types, both operating per-position on the 6 f3-output positions:
-
-  1. logit_lens  — apply the model's own ln_f + LM_head to intermediate
-     layer activations and measure next-token accuracy (no training).
-  2. learned_probe — train a small linear layer (N → 10 digit classes)
-     with cross-entropy via SGD, then measure accuracy.
-
-Retrains each model to the target step, extracts residual-stream
-activations at every transformer layer, and produces per-regime
-accuracy curves, A-B diffs, and diff-in-diffs.
-
-Usage:
-    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag>
-    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> --seed-override 107
-    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> \\
-        --probe-steps 250 500 750 1000
-    python scripts/probe_next_token_regimes.py data/burst_d<depth>_<run_tag> --n-workers 38
-"""
+"""Next-token logit-lens and learned probes per layer for Other- vs Burst-class regimes."""
 
 import argparse
 import json
@@ -103,8 +84,8 @@ def collect_all_layer_acts_KBM_N(  # noqa: N802
     """Collect residual-stream activations at f3 positions for every layer."""
     net.eval()
     n = min(len(docs_BL), max_samples)
-    np.random.seed(PROBE_SEED)
-    idx = np.random.choice(len(docs_BL), n, replace=False)
+    rng = np.random.default_rng(PROBE_SEED)
+    idx = rng.choice(len(docs_BL), size=n, replace=False)
 
     n_layers = len(net.transformer.h)
     K = n_layers + 1
@@ -268,9 +249,9 @@ def probe_from_checkpoints_at_steps(  # noqa: PLR0913
 
     for step in probe_steps:
         if step not in available_ckpts:
-            logger.info(f"    WARNING: no checkpoint for step {step}, skipping")
+            logger.info("    WARNING: no checkpoint for step %s, skipping", step)
             continue
-        logger.info(f"    Loading ckpt step {step}...")
+        logger.info("    Loading ckpt step %s...", step)
         net = load_net(cfg, available_ckpts[step])
         net.eval()
         results_by_step[step] = probe_all_layers(
@@ -302,7 +283,7 @@ def retrain_and_probe_at_steps(  # noqa: PLR0913
         """Probe the model if global_step is in the requested set."""
         if global_step in checkpoint_set:
             net.eval()
-            logger.info(f"    Probing step {global_step} ({phase})...")
+            logger.info("    Probing step %s (%s)...", global_step, phase)
             results_by_step[global_step] = probe_all_layers(
                 net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth
             )
@@ -347,8 +328,11 @@ def probe_all_layers(  # noqa: PLR0913
         for k in range(K):
             layer_name = "emb" if k == 0 else f"L{k - 1}"
             logger.info(
-                f"      {layer_name:4s}  {regime}  "
-                f"logit_lens={ll_acc[k]:.3f}  learned_probe={lp_acc[k]:.3f}"
+                "      %-4s  %s  logit_lens=%.3f  learned_probe=%.3f",
+                layer_name,
+                regime,
+                float(ll_acc[k]),
+                float(lp_acc[k]),
             )
 
     return results
@@ -755,22 +739,22 @@ def main() -> None:  # noqa: C901, PLR0915
     base_output_dir.mkdir(parents=True, exist_ok=True)
 
     f3_pos = get_final_output_positions(seq_len, depth)
-    logger.info(f"Run dir: {run_dir}")
-    logger.info(f"Probe steps: {probe_steps}")
-    logger.info(f"Output: {base_output_dir}")
-    logger.info(f"Device: {DEVICE}")
-    logger.info(f"Methods: {PROBE_METHODS}")
-    logger.info(f"Final-output model-input positions: {f3_pos}")
+    logger.info("Run dir: %s", run_dir)
+    logger.info("Probe steps: %s", probe_steps)
+    logger.info("Output: %s", base_output_dir)
+    logger.info("Device: %s", DEVICE)
+    logger.info("Methods: %s", PROBE_METHODS)
+    logger.info("Final-output model-input positions: %s", f3_pos)
 
-    logger.info(f"\nRebuilding data (seed={DATA_SEED})...")
+    logger.info("\nRebuilding data (seed=%s)...", DATA_SEED)
     tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
     doc_len = ti["doc_len"]
-    logger.info(f"  doc_len={doc_len}  seq_len={seq_len}")
+    logger.info("  doc_len=%s  seq_len=%s", doc_len, seq_len)
 
     set_seed(DATA_SEED)
     d = DepthNData(bcfg["n_alphabets"], seq_len, n_a, depth, burst_pos, DATA_SEED)
     other_docs, burst_docs = build_regime_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
-    logger.info(f"  Other docs: {other_docs.shape}  Burst docs: {burst_docs.shape}")
+    logger.info("  Other docs: %s  Burst docs: %s", other_docs.shape, burst_docs.shape)
 
     jobs_cfg = cfg["jobs"]
     if args.seed_override is not None:
@@ -781,14 +765,14 @@ def main() -> None:  # noqa: C901, PLR0915
 
     schedules_to_run = sorted({j["schedule"] for j in jobs_cfg})
     n_workers = min(len(jobs_cfg), args.n_workers or gpu_cfg.probe_workers)
-    logger.info(f"\n{gpu_cfg.summary()}")
-    logger.info(f"Schedules: {schedules_to_run}")
-    logger.info(f"Jobs: {len(jobs_cfg)}, workers: {n_workers}")
-    logger.info(f"Layers: {n_layers + 1} (emb + {n_layers} blocks)")
+    logger.info("\n%s", gpu_cfg.summary())
+    logger.info("Schedules: %s", schedules_to_run)
+    logger.info("Jobs: %s, workers: %s", len(jobs_cfg), n_workers)
+    logger.info("Layers: %s (emb + %s blocks)", n_layers + 1, n_layers)
     n_probes = len(PROBE_METHODS) * len(jobs_cfg) * (n_layers + 1) * 2 * len(probe_steps)
-    logger.info(f"Total probe evaluations: {n_probes}")
+    logger.info("Total probe evaluations: %s", n_probes)
     mode = "checkpoint-loading" if use_checkpoints else "retrain"
-    logger.info(f"Mode: {mode} ({len(jobs_cfg)} jobs, probing at {len(probe_steps)} steps)\n")
+    logger.info("Mode: %s (%s jobs, probing at %s steps)\n", mode, len(jobs_cfg), len(probe_steps))
 
     jobs = []
     for jcfg in jobs_cfg:
@@ -834,11 +818,11 @@ def main() -> None:  # noqa: C901, PLR0915
         if jr.success:
             for step, res in jr.data["step_results"].items():
                 all_step_results[step][jr.data["label"]] = res
-            logger.info(f"  [{n_done}/{n_total}] {jr.label:30s} done ({jr.elapsed:.0f}s)")
+            logger.info("  [%s/%s] %-30s done (%.0fs)", n_done, n_total, jr.label, jr.elapsed)
         else:
-            logger.info(f"  FAIL [{n_done}/{n_total}]: {jr.label}")
+            logger.info("  FAIL [%s/%s]: %s", n_done, n_total, jr.label)
             if jr.error:
-                logger.info(f"    {jr.error}")
+                logger.info("    %s", jr.error)
 
     run_job_pool(
         jobs=jobs,
@@ -859,7 +843,7 @@ def main() -> None:  # noqa: C901, PLR0915
 
         all_results = all_step_results[probe_step]
 
-        logger.info(f"\nComputing diffs for step {probe_step}...")
+        logger.info("\nComputing diffs for step %s...", probe_step)
         diffs, diffs_ps = compute_diffs(all_results, schedules_to_run, PROBE_METHODS)
         did = compute_diff_in_diffs(diffs, PROBE_METHODS)
 
@@ -875,11 +859,11 @@ def main() -> None:  # noqa: C901, PLR0915
             "depth": depth,
         }
         torch.save(save_data, step_dir / "results.pt")
-        logger.info(f"Saved results to {step_dir / 'results.pt'}")
+        logger.info("Saved results to %s", step_dir / "results.pt")
 
-        logger.info(f"\nPlotting step {probe_step}...")
+        logger.info("\nPlotting step %s...", probe_step)
         for method in PROBE_METHODS:
-            logger.info(f"  {method}...")
+            logger.info("  %s...", method)
             plot_raw_curves(all_results, method, n_layers, step_dir)
             plot_ab_diffs(diffs, method, n_layers, step_dir, diffs_per_seed=diffs_ps)
             plot_diff_in_diffs(did, method, n_layers, step_dir)
@@ -893,7 +877,7 @@ def main() -> None:  # noqa: C901, PLR0915
         combined_dir.mkdir(parents=True, exist_ok=True)
 
         for method in PROBE_METHODS:
-            logger.info(f"  {method}...")
+            logger.info("  %s...", method)
             plot_combined_curves(all_step_results, method, n_layers, combined_dir)
             plot_combined_diffs(
                 all_step_diffs,
@@ -903,7 +887,7 @@ def main() -> None:  # noqa: C901, PLR0915
                 step_diffs_per_seed=all_step_diffs_per_seed,
             )
 
-    logger.info(f"\nAll done. Results in {base_output_dir}")
+    logger.info("\nAll done. Results in %s", base_output_dir)
 
 
 if __name__ == "__main__":

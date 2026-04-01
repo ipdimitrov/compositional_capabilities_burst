@@ -298,13 +298,14 @@ def summary_table(
         def _fmt(v: object, f: str = ".3f") -> str:
             return f"{v:{f}}" if isinstance(v, (int, float)) else str(v)
 
-        logger.info(
+        line = (
             f"{row['tag']:<15} {row['burst_frac'] * 100:>5.0f}% "
             f"{_fmt(row['peak_burst']):>6} {_fmt(row.get('end_burst', '-')):>6} "
             f"{_fmt(row.get('dropoff_pct', '-'), '.1f'):>6} "
             f"{_fmt(row.get('reversion_auc', '-'), '.0f'):>8} "
             f"{_fmt(row.get('life_95', '-')):>8} {_fmt(row.get('life_80', '-')):>8}"
         )
+        logger.info("%s", line)
         rows.append(row)
     return rows
 
@@ -1099,4 +1100,4 @@ def save_report(  # noqa: PLR0913
         _save(plot_cka_matrices(analysis), "11_cka_matrices")
         _save(plot_summary_dashboard(ft_list, fg_list, analysis), "12_summary_dashboard")
 
-    logger.info(f"Report saved to {out_dir}")
+    logger.info("Report saved to %s", out_dir)

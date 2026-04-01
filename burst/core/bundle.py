@@ -1,3 +1,5 @@
+"""Bundle run artefacts (config, training logs, metrics) into a single dict."""
+
 from __future__ import annotations
 
 import json
@@ -60,7 +62,7 @@ def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
     results, cfg = load_results(run_dir)
     assert results, "expected at least one result in all_results.pkl"
 
-    grouped = _group_results(results)
+    grouped = _group_by_schedule(results)
     schedules = ordered_schedules(grouped.keys())
     thresholds = list(TrainConfig().reversion_thresholds)
     burst_mode = cfg.get("burst_mode", MODE_CURRENT)
@@ -122,16 +124,8 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
     return records
 
 
-def _group_results(results: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Group result dicts by schedule in canonical order."""
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for result in results:
-        grouped[result["schedule"]].append(result)
-    return {schedule: grouped[schedule] for schedule in ordered_schedules(grouped.keys())}
-
-
-def _group_grad_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Group gradient records by schedule in canonical order."""
+def _group_by_schedule(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group dicts by their 'schedule' key in canonical order."""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         grouped[record["schedule"]].append(record)
@@ -289,7 +283,7 @@ def _build_gradient_curves(
     burst_mode: str,
 ) -> dict[str, Any]:
     """Build per-schedule gradient metric curves (cosine, norms, etc.)."""
-    grouped_grad = _group_grad_records(grad_records)
+    grouped_grad = _group_by_schedule(grad_records)
     payload: dict[str, Any] = {}
     for schedule, runs in grouped_grad.items():
         if schedule not in grouped:
