@@ -34,7 +34,6 @@ from burst.config import (
     reversion_life_key,
 )
 from burst.core.data import BurstDataset
-from burst.core.repro import set_reproducibility
 from burst.core.train_utils import (
     DEVICE,
     _cross_entropy_logits_BTV_targets_BT,
@@ -42,8 +41,8 @@ from burst.core.train_utils import (
     make_optim_cfg,
     make_scaler,
 )
+from burst.rng import get_rng, seed_all
 from net.runner import configure_optimizers, reset_optimizer_state, update_phase_lr
-from synthetic.init import set_seed
 
 if TYPE_CHECKING:
     from burst.types import WorkerJob
@@ -51,7 +50,6 @@ if TYPE_CHECKING:
 
 GRAD_NORM_EPS = 1e-6
 CHECKPOINT_EVERY = 10
-_rng = np.random.default_rng()
 
 def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batch_size: int) -> int:
     """Return the number of special-class examples in a batch at a given burst-phase step.
@@ -71,7 +69,7 @@ def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batc
         frac = MIXED_FRACTIONS[schedule]
         if frac >= 1.0:
             return batch_size
-        return int(_rng.binomial(batch_size, frac))
+        return int(get_rng().binomial(batch_size, frac))
 
     if schedule == "ramp_up":
         burst_len = max(int(p * T), 1)
@@ -79,7 +77,7 @@ def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batc
         ramp_len = min(int(2 * burst_len / max_frac), T)
         if step >= T - ramp_len:
             progress = (step - (T - ramp_len)) / max(ramp_len - 1, 1)
-            return int(_rng.binomial(batch_size, progress * max_frac))
+            return int(get_rng().binomial(batch_size, progress * max_frac))
         return 0
 
     if schedule == "reversion_only":
@@ -114,14 +112,14 @@ def sample_batch(  # noqa: PLR0913
         for i, tid in enumerate(ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = _rng.integers(len(pool[tid]), size=k)
+                idx = get_rng().integers(len(pool[tid]), size=k)
                 parts.append(pool[tid][idx])
                 sampled_tasks.extend([tid] * k)
 
     _sample_from(target_pool, t_ids, n_target)
     _sample_from(bg_pool, b_ids, batch_size - n_target)
 
-    perm = _rng.permutation(batch_size)
+    perm = get_rng().permutation(batch_size)
     return np.concatenate(parts)[perm], [sampled_tasks[i] for i in perm]
 
 
@@ -293,7 +291,7 @@ def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) 
     """Train one model on one schedule and write results to disk."""
     label, schedule, seed, cfg = job["label"], job["schedule"], job["seed"], job["cfg"]
     deterministic = bool(job["deterministic"])
-    set_reproducibility(seed, deterministic=deterministic)
+    seed_all(seed, deterministic=deterministic)
     pretrain_ckpt = job.get("pretrain_ckpt")
     pretrain_log_path = job.get("pretrain_log_path")
 
@@ -308,7 +306,7 @@ def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) 
         with Path(pretrain_log_path).open("rb") as f:
             pretrain_log = pickle.load(f)  # noqa: S301
 
-    set_seed(seed)
+    seed_all(seed, deterministic=deterministic)
     net = make_net_bare(cfg)
     if pretrain_ckpt and Path(pretrain_ckpt).exists():
         net.load_state_dict(torch.load(pretrain_ckpt, map_location=DEVICE, weights_only=True))

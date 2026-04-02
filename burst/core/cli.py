@@ -13,8 +13,9 @@ from typing import Literal
 from burst.config import CORE_CHARTS_DIRNAME, DEFAULT_DETERMINISTIC, DEFAULT_REPRO_SEED
 from burst.core.bundle import build_and_save_core_bundle, load_core_bundle
 from burst.core.charts.render import render_core_charts
-from burst.core.repro import set_reproducibility, write_repro_manifest
+from burst.core.repro import write_repro_manifest
 from burst.core.train_utils import resolve_run_paths
+from burst.rng import seed_all
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +181,7 @@ def _parse_args() -> CliCommand:  # noqa: C901, PLR0915
 def main() -> None:
     """Run the burst pipeline CLI."""
     cmd = _parse_args()
-    set_reproducibility(cmd.seed, deterministic=cmd.deterministic)
+    seed_all(cmd.seed, deterministic=cmd.deterministic)
 
     if cmd.mode == "train":
         subprocess.run(  # noqa: S603

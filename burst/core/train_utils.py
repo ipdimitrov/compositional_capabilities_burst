@@ -19,9 +19,9 @@ from einops import rearrange
 from omegaconf import OmegaConf
 
 from burst.core.train.worker import n_target_for_step, sample_batch
+from burst.rng import seed_all
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, phase_lr, reset_optimizer_state, update_phase_lr
-from synthetic.init import set_seed
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -139,7 +139,7 @@ def retrain_with_callbacks(
     If max_step is given, training stops at that global step.
     """
     seed, cfg, schedule = job["seed"], job["cfg"], job["schedule"]
-    set_seed(seed)
+    seed_all(seed)
     net = make_net(cfg)
     optim_cfg = make_optim_cfg(cfg)
     optimizer = configure_optimizers(net, optim_cfg)

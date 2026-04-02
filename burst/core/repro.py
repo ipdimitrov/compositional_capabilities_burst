@@ -1,38 +1,18 @@
-"""Reproducibility: RNG seeding and JSON manifest generation."""
+"""Reproducibility: JSON manifest generation."""
 
 from __future__ import annotations
 
 import json
-import os
 import platform
-import random
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 
 from burst.config import REPRO_MANIFEST_FILENAME
-
-
-def set_reproducibility(seed: int, *, deterministic: bool) -> None:
-    """Seed all RNGs and configure torch determinism settings."""
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)  # noqa: NPY002
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    torch.backends.cudnn.deterministic = deterministic
-    torch.backends.cudnn.benchmark = not deterministic
-    torch.use_deterministic_algorithms(deterministic, warn_only=not deterministic)
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = not deterministic
-    torch.backends.cudnn.allow_tf32 = not deterministic
 
 
 def _git_sha() -> str | None:

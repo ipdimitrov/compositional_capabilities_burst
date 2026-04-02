@@ -66,7 +66,7 @@ def main(cfg: DictConfig) -> None:
         mat = evaluator.get_acc(net, lstm=cfg.lstm)
         accs.append((ck, mat))
 
-        acc_vals = np.array(list(mat.values()))[:, 0]
+        acc_vals = np.array(list(mat.values()))
         logger.info("Iter: %s  Acc: %s", ck[0], np.mean(acc_vals))
 
     evaluator.save_accs(cfg, accs)

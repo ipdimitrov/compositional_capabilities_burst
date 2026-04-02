@@ -1,35 +1,21 @@
 """Load YAML configs via OmegaConf and set deterministic RNG seeds across libraries."""
 
 import logging
-import random
 from pathlib import Path
 
 import numpy as np
-import torch
 import yaml
 from omegaconf import DictConfig, OmegaConf
+
+from burst.rng import seed_all
 
 logger = logging.getLogger(__name__)
 
 
 def set_seed(seed: int = 0) -> None:
-    """Set global random seeds with scrambled true seed to avoid correlated nearby values."""
-    rng = np.random.default_rng(seed)
-    true_seed = int(rng.integers(2**30))
-
-    random.seed(true_seed)
-    np.random.seed(true_seed)  # noqa: NPY002
-
-    import synthetic.functions as _syn_fn  # noqa: PLC0415
-    import synthetic.generator as _syn_gen  # noqa: PLC0415
-
-    _shared = np.random.default_rng(true_seed)
-    _syn_fn._rng = _shared  # noqa: SLF001
-    _syn_gen._rng = _shared  # noqa: SLF001
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.manual_seed(true_seed)
-    torch.cuda.manual_seed_all(true_seed)
+    """Scramble seed to decorrelate nearby values, then seed everything."""
+    true_seed = int(np.random.default_rng(seed).integers(2**30))
+    seed_all(true_seed)
 
 
 def read_config(fname: str | Path) -> DictConfig:

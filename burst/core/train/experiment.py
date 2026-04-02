@@ -73,7 +73,7 @@ from burst.config import (
 )
 from burst.core.data import pad_pools_to_same_length
 from burst.core.gpu import gpu_cfg
-from burst.core.repro import set_reproducibility, write_repro_manifest
+from burst.core.repro import write_repro_manifest
 from burst.core.train_utils import (
     DEVICE,
     _cross_entropy_logits_BTV_targets_BT,
@@ -81,13 +81,12 @@ from burst.core.train_utils import (
     make_optim_cfg,
     make_scaler,
 )
+from burst.rng import get_rng, seed_all
 from net.runner import configure_optimizers, update_phase_lr
-from synthetic.init import set_seed
 
 logger = logging.getLogger(__name__)
 
 PRETRAIN_ACC_THRESHOLD = 0.99
-_rng = np.random.default_rng()
 
 
 class NpEncoder(json.JSONEncoder):
@@ -194,7 +193,7 @@ class DepthNData:
     def _make_doc(self, task: tuple[int, ...]) -> np.ndarray:
         """Generate a single tokenised document for a task composition."""
         fns = task[1:]
-        inp = _rng.choice(self.n_alph, size=self.seq_len, replace=True)
+        inp = get_rng().choice(self.n_alph, size=self.seq_len, replace=True)
         sp = np.array([self.token_idx[" "]])
 
         cur = inp.copy()
@@ -217,7 +216,7 @@ def build_data(
     cfg: dict, depth: int, burst_pos: int, n_a: int, data_seed: int = DATA_SEED,
 ) -> tuple[dict, dict, dict, int, dict, dict]:
     """Build training/eval data pools and return pools, eval docs, prompt len, cfg, task info."""
-    set_seed(data_seed)
+    seed_all(data_seed)
     d = DepthNData(cfg["n_alphabets"], cfg["seq_len"], n_a, depth, burst_pos, data_seed)
     nd, ne = cfg["n_docs_per_task"], cfg["n_eval_per_task"]
 
@@ -286,7 +285,7 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
     from burst.config import EVAL_KEYS, PHASE_PRE_BURST  # noqa: PLC0415
     from burst.core.train.worker import eval_free_gen, eval_loss  # noqa: PLC0415
 
-    set_seed(seed)
+    seed_all(seed)
     net = make_net(cfg)
     optimizer = configure_optimizers(net, make_optim_cfg(cfg))
     scaler = make_scaler()
@@ -314,9 +313,9 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
         for i, tid in enumerate(bg_ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = _rng.integers(len(bg_pool[tid]), size=k)
+                idx = get_rng().integers(len(bg_pool[tid]), size=k)
                 parts.append(bg_pool[tid][idx])
-        batch_np = np.concatenate(parts)[_rng.permutation(bs)]
+        batch_np = np.concatenate(parts)[get_rng().permutation(bs)]
 
         dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inp, tgt = dat[:, :-1], dat[:, 1:]
@@ -393,7 +392,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     parser.add_argument("--note", type=str, default="")
     args = parser.parse_args()
-    set_reproducibility(args.seed, deterministic=args.deterministic)
+    seed_all(args.seed, deterministic=args.deterministic)
 
     exp = ExperimentConfig(
         depth=args.depth,

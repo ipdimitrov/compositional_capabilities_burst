@@ -8,7 +8,6 @@ import logging
 from pathlib import Path
 
 import numpy as np
-import torch
 from tqdm.auto import tqdm
 
 from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER
@@ -21,11 +20,10 @@ from burst.notebook.model import (
     save_model,
     train_step,
 )
+from burst.rng import get_rng, seed_all
 from burst.types import ExperimentData, PretrainResult
 
 logger = logging.getLogger(__name__)
-
-_rng = np.random.default_rng()
 
 
 def pretrain(  # noqa: PLR0913, PLR0915
@@ -67,9 +65,7 @@ def pretrain(  # noqa: PLR0913, PLR0915
         "n_head": n_head,
     }
 
-    global _rng  # noqa: PLW0603
-    _rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
+    seed_all(seed)
 
     net = make_model(**model_cfg)
     optimizer = make_optimizer(net, lr=lr, beta1=beta1, beta2=beta2)
@@ -97,9 +93,9 @@ def pretrain(  # noqa: PLR0913, PLR0915
         for i, tid in enumerate(bg_ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = _rng.integers(len(bg_pool[tid]), size=k)
+                idx = get_rng().integers(len(bg_pool[tid]), size=k)
                 parts.append(bg_pool[tid][idx])
-        batch = np.concatenate(parts)[_rng.permutation(batch_size)]
+        batch = np.concatenate(parts)[get_rng().permutation(batch_size)]
 
         cur_lr = lr * min(1.0, (s + 1) / warmup) if warmup > 0 else lr
         loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)

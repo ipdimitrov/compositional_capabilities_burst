@@ -7,7 +7,6 @@ quickly the model forgets the burst capability.
 from pathlib import Path
 
 import numpy as np
-import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
@@ -30,9 +29,8 @@ from burst.notebook.model import (
     save_model,
     train_step,
 )
+from burst.rng import get_rng, seed_all
 from burst.types import ExperimentData, ForgetResult
-
-_rng = np.random.default_rng()
 
 ACC_NEAR_ZERO = 1e-6
 
@@ -75,9 +73,7 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     eval_other = data["eval_other"]
     eval_burst = data["eval_burst"]
 
-    global _rng  # noqa: PLW0603
-    _rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
+    seed_all(seed)
 
     net = load_model(
         finetune_ckpt, vocab_size, context_size, n_layer=n_layer, n_embd=n_embd, n_head=n_head
@@ -124,9 +120,9 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
         for i, tid in enumerate(bg_ids):
             k = per + (1 if i < rem else 0)
             if k > 0:
-                idx = _rng.integers(len(bg_pool[tid]), size=k)
+                idx = get_rng().integers(len(bg_pool[tid]), size=k)
                 parts.append(bg_pool[tid][idx])
-        batch = np.concatenate(parts)[_rng.permutation(batch_size)]
+        batch = np.concatenate(parts)[get_rng().permutation(batch_size)]
 
         cur_lr = cosine_lr(s + 1, steps, lr_start, lr_end)
         loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)
@@ -154,7 +150,7 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
             net.train()
             g_bg = _get_grad_vector(net, batch)
             log["grad_norm"].append(g_bg.norm().item())
-            idx = _rng.integers(len(eval_burst), size=min(batch_size, len(eval_burst)))
+            idx = get_rng().integers(len(eval_burst), size=min(batch_size, len(eval_burst)))
             burst_batch = eval_burst[idx]
             g_burst = _get_grad_vector(net, burst_batch)
             log["grad_norm_burst"].append(g_burst.norm().item())

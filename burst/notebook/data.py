@@ -10,6 +10,7 @@ import numpy as np
 
 from burst.config import CLASS_BURST, CLASS_OTHER, DATA_SEED, N_A
 from burst.core.data import pad_pools_to_same_length
+from burst.rng import get_rng, seed_all
 from burst.types import ExperimentData
 
 N_ALPH = 10
@@ -23,8 +24,6 @@ N_EVAL = 100
 VOCAB_SLACK = 10
 CONTEXT_SLACK = 5
 
-_rng = np.random.default_rng()
-
 
 def _cat(pool: dict[tuple, np.ndarray], fallback_cols: int = 1) -> np.ndarray:
     if not pool:
@@ -32,7 +31,7 @@ def _cat(pool: dict[tuple, np.ndarray], fallback_cols: int = 1) -> np.ndarray:
     return np.concatenate(list(pool.values()))
 
 
-def make_data(  # noqa: PLR0913, PLR0915
+def make_data(  # noqa: PLR0913
     *,
     n_alph: int = N_ALPH,
     seq_len: int = SEQ_LEN,
@@ -92,12 +91,11 @@ def make_data(  # noqa: PLR0913, PLR0915
             fns.insert(burst_pos - 1, bf)
             burst_tasks.append((CLASS_BURST, *tuple(fns)))
 
-    global _rng  # noqa: PLW0603
-    _rng = np.random.default_rng(seed)
+    seed_all(seed)
 
     def _make_doc(task: tuple) -> np.ndarray:
         fns = task[1:]
-        inp = _rng.integers(0, n_alph, size=seq_len)
+        inp = get_rng().integers(0, n_alph, size=seq_len)
         sp = np.array([token_idx[" "]])
         cur = inp.copy()
         outs = []

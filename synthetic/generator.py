@@ -14,9 +14,8 @@ import tqdm
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
+from burst.rng import get_rng
 from synthetic.functions import BaseFunction
-
-_rng = np.random.default_rng()
 
 
 class SyntheticData:
@@ -77,13 +76,13 @@ class SyntheticData:
 
     def sample_task(self, split: str = "train") -> tuple:
         """Sample a random task from the given split."""
-        idx = int(_rng.integers(0, self.nsplit_tasks[split]))
+        idx = int(get_rng().integers(0, self.nsplit_tasks[split]))
         return self.functions[split][idx]
 
     def sample_token(self) -> np.ndarray:
         """Sample tokens from the alphabet."""
         alph = np.arange(self.n_alphabets)
-        return _rng.choice(alph, size=self.cfg.seq_len, replace=self.cfg.with_replacement)
+        return get_rng().choice(alph, size=self.cfg.seq_len, replace=self.cfg.with_replacement)
 
     def decode(self, token_idx: np.ndarray) -> str:
         """Decode token indices to a subscript-formatted string."""
@@ -300,14 +299,13 @@ class SyntheticEval(SyntheticData):
     def evaluate_docs(
         self, net: torch.nn.Module, dat: torch.Tensor,
         seq_info: dict[str, int], device: str, *, lstm: bool = False,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Evaluate documents and return total, sharp, and cached accuracies."""
+    ) -> np.ndarray:
+        """Evaluate autoregressive token accuracy on output positions."""
         shape = dat.shape
         if device == "cuda":
             dat = dat.cuda(non_blocking=True)
 
         dat = dat.view(-1, shape[-1])
-        inp_c = dat[:, :-1]
         inp = dat[:, : seq_info["prompt"]]
 
         if lstm:
@@ -319,33 +317,18 @@ class SyntheticEval(SyntheticData):
             inp_next = torch.argmax(logits, -1, keepdims=True)
             inp = torch.cat((inp, inp_next), dim=1)
 
-        output = inp
-        output_c = torch.argmax(net(inp_c), -1)
+        output = inp[:, seq_info["last_space"] + 1 :]
+        targets = dat[:, seq_info["last_space"] + 1 :]
 
-        output_l = output[:, seq_info["last_space"] + 1 :]
-        output_cl = output_c[:, seq_info["last_space"] :]
+        acc = (output.reshape(-1) == targets.reshape(-1))
+        acc = acc.view(shape[0], shape[1], output.shape[-1])
 
-        targets_l = dat[:, seq_info["last_space"] + 1 :]
-
-        # Accuracy averaged over all positions
-        acc_l = output_l.reshape(-1) == targets_l.reshape(-1)
-        acc_l = acc_l.view(shape[0], shape[1], output_l.shape[-1])
-
-        # Strict accuracy (1 if all tokens correct, 0 otherwise)
-        acc_cl = output_cl.reshape(-1) == targets_l.reshape(-1)
-        acc_cl = acc_cl.view(shape[0], shape[1], output_cl.shape[-1])
-
-        # Accuracy including the step-by-step tokens)
-        total_acc = acc_l.float().mean((-1, -2)).to("cpu").numpy()
-        sharp_acc = acc_l.all(-1).float().mean(-1).to("cpu").numpy()
-        total_acc_c = acc_cl.float().mean((-1, -2)).to("cpu").numpy()
-
-        return total_acc, sharp_acc, total_acc_c
+        return acc.float().mean((-1, -2)).to("cpu").numpy()
 
     def get_acc(
         self, net: torch.nn.Module, *, lstm: bool = False,
-    ) -> dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        """Get the accuracy of each function composition."""
+    ) -> dict[tuple, np.ndarray]:
+        """Get autoregressive token accuracy for each function composition."""
         info = self.functions_info
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -367,12 +350,10 @@ class SyntheticEval(SyntheticData):
             task_funcs = []
             for d, t in enumerate(tid):
                 fnap = BaseFunction.permute if self.permute_eval and d == 0 else BaseFunction.map
-
                 fn = functools.partial(fnap, mapping=info["functions"][d][t])
                 task_funcs.append(fn)
 
             task_info = (tid, reduced_func, task_funcs)
-
             docs = [self.generate_step_document(task_info) for _ in range(self.nsamples)]
 
             if idx == 0:
@@ -384,12 +365,10 @@ class SyntheticEval(SyntheticData):
 
             if idx % self.nbatch == self.nbatch - 1 or idx == len(info["task_id"]) - 1:
                 flatten_docs = torch.Tensor(np.array(doc_list, dtype=int)).long()
-
-                acc_list = self.evaluate_docs(net, flatten_docs, seq_info, device, lstm=lstm)
+                accs = self.evaluate_docs(net, flatten_docs, seq_info, device, lstm=lstm)
 
                 for j in range(len(tid_list)):
-                    t = tid_list[j]
-                    acc_map[tuple(t)] = (acc_list[0][j], acc_list[1][j], acc_list[2][j])
+                    acc_map[tuple(tid_list[j])] = accs[j]
 
                 tid_list = []
                 doc_list = []
@@ -411,16 +390,14 @@ class SyntheticEvalCombinatorial(SyntheticEval):
     def evaluate_docs(  # type: ignore[override]
         self, net: torch.nn.Module, dat: torch.Tensor,
         seq_info: dict[str, int], device: str,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Evaluate documents and return total and cached accuracies."""
+    ) -> np.ndarray:
+        """Evaluate autoregressive token accuracy on output positions."""
         shape = dat.shape
 
         if device == "cuda":
             dat = dat.cuda(non_blocking=True)
 
         dat = dat.view(-1, shape[-1])
-
-        inp_c = dat[:, :-1]
         inp = dat[:, : seq_info["prompt"]]
 
         for _ in range(seq_info["new"]):
@@ -429,24 +406,13 @@ class SyntheticEvalCombinatorial(SyntheticEval):
             inp_next = torch.argmax(logits, -1, keepdims=True)
             inp = torch.cat((inp, inp_next), dim=1)
 
-        output = inp
-        output_c = torch.argmax(net(inp_c), -1)
+        output = inp[:, seq_info["last_space"] + 1 :]
+        targets = dat[:, seq_info["last_space"] + 1 :]
 
-        output_l = output[:, seq_info["last_space"] + 1 :]
-        output_cl = output_c[:, seq_info["last_space"] :]
+        acc = (output.reshape(-1) == targets.reshape(-1))
+        acc = acc.view(shape[0], shape[1], output.shape[-1])
 
-        targets_l = dat[:, seq_info["last_space"] + 1 :]
-
-        acc_l = output_l.reshape(-1) == targets_l.reshape(-1)
-        acc_l = acc_l.view(shape[0], shape[1], output_l.shape[-1])
-
-        acc_cl = output_cl.reshape(-1) == targets_l.reshape(-1)
-        acc_cl = acc_cl.view(shape[0], shape[1], output_cl.shape[-1])
-
-        total_acc = acc_l.float().mean(-2).to("cpu").numpy()
-        total_acc_c = acc_cl.float().mean(-2).to("cpu").numpy()
-
-        return total_acc, total_acc_c
+        return acc.float().mean(-2).to("cpu").numpy()
 
     def generate_step_document(self, task_info: tuple) -> np.ndarray:
         """Generate a step-by-step document for combinatorial evaluation."""
@@ -555,12 +521,10 @@ class SyntheticEvalCombinatorial(SyntheticEval):
                 if idx % self.nbatch == self.nbatch - 1 or idx == len(task_list[key]) - 1:
                     flatten_docs = torch.Tensor(np.array(doc_list, dtype=int)).long()
 
-                    acc_list = self.evaluate_docs(net, flatten_docs, seq_info, device)
+                    accs = self.evaluate_docs(net, flatten_docs, seq_info, device)
 
                     for j in range(len(tid_list)):
-                        t = tid_list[j]
-
-                        acc_map[key][tuple(t)] = (acc_list[0][j], acc_list[1][j])
+                        acc_map[key][tuple(tid_list[j])] = accs[j]
 
                     tid_list = []
                     doc_list = []

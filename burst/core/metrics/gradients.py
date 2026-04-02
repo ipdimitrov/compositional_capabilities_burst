@@ -49,19 +49,19 @@ from burst.config import (  # noqa: E402
 )
 from burst.core.gpu import gpu_cfg  # noqa: E402
 from burst.core.parallel import JobResult, run_job_pool  # noqa: E402
-from burst.core.repro import set_reproducibility, write_repro_manifest  # noqa: E402
+from burst.core.repro import write_repro_manifest  # noqa: E402
 from burst.core.train_utils import (  # noqa: E402
     DEVICE,
     _cross_entropy_logits_BTV_targets_BT,
     load_net,
 )
+from burst.rng import get_rng, seed_all  # noqa: E402
 from net.nanogpt import nanoGPT  # noqa: E402
 
 warnings.filterwarnings("ignore", message=".*Full backward hook.*no inputs require gradients.*")
 MATRIX_NDIM = 2
 NEAR_ZERO = 1e-12
 MIN_VECTORS_FOR_SIMILARITY = 2
-_rng = np.random.default_rng()
 
 # ---------------------------------------------------------------------------
 # Feature flags — comment out any key to skip that metric entirely.
@@ -147,7 +147,7 @@ def _grad_vecs_per_layer(
 ) -> dict[str, torch.Tensor]:
     """Run one backward pass and extract per-layer gradient vectors."""
     n = min(n_samples, docs_np.shape[0])
-    idx = _rng.choice(docs_np.shape[0], n, replace=False)
+    idx = get_rng().choice(docs_np.shape[0], n, replace=False)
     tokens_BL = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp_BT, tgt_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
@@ -170,7 +170,7 @@ def _grad_vecs_per_layer(
 def _grad_vec_for_docs(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> torch.Tensor:
     """Compute a flat gradient vector from a random subset of docs."""
     n = min(n_samples, docs_np.shape[0])
-    idx = _rng.choice(docs_np.shape[0], n, replace=False)
+    idx = get_rng().choice(docs_np.shape[0], n, replace=False)
     tokens_BL = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp_BT, tgt_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
@@ -247,7 +247,7 @@ def _grad_snr_per_layer(
     from torch.func import functional_call, grad, vmap  # noqa: PLC0415
 
     n = min(n_examples, docs_np.shape[0])
-    idx = _rng.choice(docs_np.shape[0], n, replace=False)
+    idx = get_rng().choice(docs_np.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp_EL = dat[:, :-1]
     tgt_EL = dat[:, 1:]
@@ -380,7 +380,7 @@ def _token_pos_grad_norms(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> 
     input token position.
     """
     n = min(n_samples, docs_np.shape[0])
-    idx = _rng.choice(docs_np.shape[0], n, replace=False)
+    idx = get_rng().choice(docs_np.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
 
@@ -427,7 +427,7 @@ def _grad_attribution(
 
     """
     n = min(n_samples, docs_np.shape[0])
-    idx = _rng.choice(docs_np.shape[0], n, replace=False)
+    idx = get_rng().choice(docs_np.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
     inp, tgt = dat[:, :-1], dat[:, 1:]
 
@@ -618,7 +618,7 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
         target_pool, bg_pool = pickle.load(f)  # noqa: S301
 
     cfg = job["cfg"]
-    set_reproducibility(int(cfg["seed"]), deterministic=bool(job["deterministic"]))
+    seed_all(int(cfg["seed"]), deterministic=bool(job["deterministic"]))
     ckpt_path = job["ckpt_path"]
     step = job["step"]
     phase = job["phase"]
@@ -792,7 +792,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     parser.add_argument("--note", type=str, default="")
     args = parser.parse_args()
-    set_reproducibility(args.seed, deterministic=args.deterministic)
+    seed_all(args.seed, deterministic=args.deterministic)
 
     run_dir = args.run_dir
     manifest_path = write_repro_manifest(

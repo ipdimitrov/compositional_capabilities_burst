@@ -8,9 +8,9 @@ import random
 import numpy as np
 from omegaconf import DictConfig
 
-logger = logging.getLogger(__name__)
+from burst.rng import get_rng
 
-_rng = np.random.default_rng()
+logger = logging.getLogger(__name__)
 
 
 class BaseFunction:
@@ -54,7 +54,7 @@ class CreateFunctions:
 
                     functions = [np.arange(ln)]
                     functions.extend(
-                        _rng.permutation(ln) for _ in range(n_functions)
+                        get_rng().permutation(ln) for _ in range(n_functions)
                     )
                     all_functions.append(functions)
 
@@ -64,7 +64,7 @@ class CreateFunctions:
                 for _ in range(depth):
                     functions = [np.arange(self.n_alphabets)]
                     functions.extend(
-                        _rng.permutation(self.n_alphabets)
+                        get_rng().permutation(self.n_alphabets)
                         for _ in range(n_functions)
                     )
                     all_functions.append(functions)
@@ -72,7 +72,7 @@ class CreateFunctions:
             else:
                 functions = [np.arange(self.n_alphabets)]
                 functions.extend(
-                    _rng.permutation(self.n_alphabets)
+                    get_rng().permutation(self.n_alphabets)
                     for _ in range(n_functions)
                 )
                 for _ in range(depth):
