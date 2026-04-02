@@ -160,7 +160,7 @@ def load_per_layer_grad_cosine(
         if candidate.is_dir():
             gs_dir = candidate
             break
-    assert gs_dir, f"No grad_cosine_sim dir in {run_dir}"
+    assert gs_dir, f"No grad_cosine_sim dir in {run_dir}"  # noqa: S101
 
     by_sched: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for fp in sorted(gs_dir.glob("*.json")):
@@ -211,7 +211,7 @@ def _filter_layers(
     return filtered[::-1], filtered_grid[::-1]
 
 
-def _heatmap(
+def _heatmap(  # noqa: PLR0913
     z: np.ndarray,
     x: list[int],
     y: list[str],
@@ -249,12 +249,13 @@ def _heatmap(
     return fig
 
 
-def _line_per_layer(
+def _line_per_layer(  # noqa: PLR0913
     steps: list[int],
     grid: np.ndarray,
     layers: list[str],
     title: str,
     ylabel: str,
+    *,
     log_y: bool = False,
 ) -> go.Figure:
     """Build a per-layer line chart."""
@@ -298,6 +299,7 @@ def _line_per_schedule(
     key: str,
     title: str,
     ylabel: str,
+    *,
     log_y: bool = False,
 ) -> go.Figure:
     """Build a per-schedule line chart."""
@@ -305,7 +307,7 @@ def _line_per_schedule(
     for sched in sorted(data, key=_sched_order):
         d = data[sched]
         total = (
-            d[key].sum(axis=0) if d[key].ndim == 2
+            d[key].sum(axis=0) if d[key].ndim == 2  # noqa: PLR2004
             else d[key]
         )
         fig.add_trace(
@@ -577,14 +579,14 @@ def _resolve(
         pkl_path = logs_dir / "all_results.pkl"
         if pkl_path.exists():
             with pkl_path.open("rb") as f:
-                all_results = pickle.load(f)
+                all_results = pickle.load(f)  # noqa: S301
             break
     else:
         msg = f"No all_results.pkl in {run_dir}"
         raise FileNotFoundError(msg)
 
     ckpt_root = logs_dir / "checkpoints"
-    assert ckpt_root.exists(), f"No checkpoints at {ckpt_root}"
+    assert ckpt_root.exists(), f"No checkpoints at {ckpt_root}"  # noqa: S101
     return cfg, all_results, ckpt_root, logs_dir
 
 

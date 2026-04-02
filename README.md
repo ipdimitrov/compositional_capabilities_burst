@@ -1,21 +1,25 @@
-# Burst Pipeline (Canonical CLI)
+# Burst: Compositional Capability Acquisition Under Distribution Shift
 
-This repo contains the synthetic compositional task code and the burst-training analysis pipeline.
+This repo studies how small transformers acquire and retain **compositional capabilities** when the training distribution shifts abruptly (a "burst" of a held-out class) and then reverts.
 
-The canonical entrypoint is:
+A nanoGPT-style transformer is trained on **pure-bijection composition tasks** in three phases:
 
-```bash
-uv run python -m burst.core <mode> ...
-```
+1. **Pre-burst** — train on all task classes *except* one special class.
+2. **Burst** — oversample the special class at a configurable concentration (100%, 50%, 10%, …).
+3. **Reversion** — return to the original distribution (no special class).
 
-## Why this CLI exists
+The core question: *how does burst concentration affect learning speed, retention, and interference with previously-learned capabilities?*
 
-- One command surface for train + metrics + chart pipeline.
-- Explicit run modes with no hidden behavior.
-- Reproducibility contract on every run:
-  - deterministic toggle
-  - explicit seed
-  - machine-readable run manifest at `results/repro_manifest.json`
+## What the pipeline produces
+
+| Stage | Command | Outputs |
+|-------|---------|---------|
+| **Train** | `burst.core train` | Per-seed checkpoints, accuracy/loss logs, task distribution stats → `data/<run>/logs/` |
+| **Gradient metrics** | `burst.core gradients` | Cosine similarity & norm JSONs per schedule → `data/<run>/results/grad_cosine_sim/` |
+| **Bundle** | `burst.core bundle` | Single `core_bundle.json` aggregating all metrics → `data/<run>/results/chart_bundle/v1/` |
+| **Charts** | `burst.core charts` | Publication-quality PNGs → `data/<run>/results/core_charts/` |
+
+Charts include: accuracy/loss overlays across schedules, AUC bars, reversion zoom, gradient cosine similarity, gradient norms, representation drift, per-schedule breakdowns, and a summary table.
 
 ## Setup
 
@@ -25,36 +29,15 @@ uv sync
 
 Then run everything with `uv run python ...`.
 
-## Ruff (linting)
+## CLI
 
-Run lint checks:
-
-```bash
-uv run ruff check .
-```
-
-Auto-fix safe issues:
+The single entrypoint is:
 
 ```bash
-uv run ruff check . --fix
+uv run python -m burst.core <mode> [options]
 ```
 
-Format:
-
-```bash
-uv run ruff format .
-```
-
-Current `pyproject.toml` enables only `E` and `F` rules, so magic-number rules are not active by default.
-If you want to explicitly scan for magic values:
-
-```bash
-uv run ruff check . --select PLR2004
-```
-
-## Canonical Modes
-
-### 1) Train
+### Train
 
 ```bash
 uv run python -m burst.core train \
@@ -66,9 +49,9 @@ uv run python -m burst.core train \
   --deterministic
 ```
 
-This creates a new run directory in `data/` with `logs/` and `results/`.
+Creates a timestamped run directory under `data/` with logs and checkpoints.
 
-### 2) Gradient Metrics
+### Gradient metrics
 
 ```bash
 uv run python -m burst.core gradients data/<run_dir> \
@@ -78,59 +61,74 @@ uv run python -m burst.core gradients data/<run_dir> \
   --deterministic
 ```
 
-### 3) Build Bundle (Stage 1)
-
-```bash
-uv run python -m burst.core bundle data/<run_dir> --seed 1337 --deterministic
-```
-
-### 4) Render Charts (Stage 2)
-
-```bash
-uv run python -m burst.core charts data/<run_dir> --seed 1337 --deterministic
-```
-
-### 5) Full Core Analysis Pipeline
+### Bundle → Charts (full analysis)
 
 ```bash
 uv run python -m burst.core pipeline data/<run_dir> --seed 1337 --deterministic
 ```
 
-`pipeline` = `bundle` + `charts`.
+Or run the stages separately:
 
-## Reproducibility Contract
+```bash
+uv run python -m burst.core bundle data/<run_dir> --seed 1337 --deterministic
+uv run python -m burst.core charts  data/<run_dir> --seed 1337 --deterministic
+```
 
-Every canonical mode records:
+## Burst modes
 
-- mode
-- seed
-- deterministic setting
-- runtime metadata (python/torch/cuda/gpu/git sha)
-- CLI args
+| Mode | Burst length | Batch size | Invariant |
+|------|-------------|------------|-----------|
+| `current` | Scales inversely with concentration | Fixed | Total special-class examples seen |
+| `constant_steps` | Fixed | Fixed | Number of training steps |
+| `scaled_batch` | Fixed | Scales inversely with concentration | Special examples per step |
 
-Output path:
+## Run directory layout
 
-- `data/<run_dir>/results/repro_manifest.json`
+```
+data/<run_dir>/
+├── logs/
+│   ├── pretrain_ckpt.pt          # shared pretrain checkpoint
+│   ├── pretrain_log.pkl
+│   ├── all_results.pkl           # aggregated per-job results
+│   ├── <schedule>_s<seed>.pkl    # individual run logs
+│   ├── checkpoints/              # per-step model snapshots
+│   └── task_distributions/       # class count stats per phase
+└── results/
+    ├── config.json               # full experiment metadata
+    ├── repro_manifest.json       # reproducibility record
+    ├── grad_cosine_sim/          # gradient metric JSONs
+    ├── chart_bundle/v1/          # bundled data for plotting
+    └── core_charts/              # rendered PNGs
+```
 
-You can disable strict deterministic execution when needed:
+## Reproducibility
+
+Every CLI mode records a manifest at `results/repro_manifest.json` containing: mode, seed, deterministic flag, Python/torch/CUDA/GPU info, git SHA, and full CLI args.
+
+Disable strict determinism when needed:
 
 ```bash
 uv run python -m burst.core pipeline data/<run_dir> --seed 1337 --no-deterministic
 ```
 
-## Code Layout
+## Linting
 
-- `burst/core/`: production pipeline code
-  - `train/`: training orchestration + workers
-  - `metrics/`: gradient metric computation
-  - `bundle.py`: stage-1 chart data artifacts
-  - `charts/`: stage-2 chart rendering
-  - `cli.py`: canonical discriminated CLI
-  - `repro.py`: deterministic + manifest contract
-- `burst/dev/`: heavy/experimental analyses and appendix tooling
-- `simple/`: separate compact experimentation codepath
+```bash
+uv run ruff check .          # lint
+uv run ruff check . --fix    # auto-fix
+uv run ruff format .         # format
+```
 
-## Notes
+## Code layout
 
-- Prefer canonical CLI modes over direct file execution.
-- If a script is in `burst/dev/`, treat it as optional and non-core.
+- `burst/config.py` — schedules, hyperparameters, display constants (single source of truth)
+- `burst/core/` — production pipeline
+  - `train/` — training orchestration + per-job workers
+  - `metrics/` — gradient similarity and norm computation
+  - `bundle.py` — stage-1 data aggregation
+  - `charts/` — stage-2 matplotlib rendering
+  - `cli.py` — CLI dispatch
+  - `repro.py` — deterministic seeding + manifest
+- `burst/dev/` — experimental analyses (non-core, optional)
+- `net/` — nanoGPT model implementation
+- `synthetic/` — task and data generation

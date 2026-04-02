@@ -48,12 +48,12 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from burst.config import (
+from burst.config import (  # noqa: E402
     parse_run_config,
 )
-from burst.core.metrics.gradients import _layer_groups
-from burst.core.train_utils import DEVICE, load_net, resolve_run_paths
-from burst.dev._shared import cross_entropy_loss as _cross_entropy_loss_shared
+from burst.core.metrics.gradients import _layer_groups  # noqa: E402
+from burst.core.train_utils import DEVICE, load_net, resolve_run_paths  # noqa: E402
+from burst.dev._shared import cross_entropy_loss as _cross_entropy_loss_shared  # noqa: E402
 
 _rng = np.random.default_rng()
 _DIR_NORM_EPS = 1e-10
@@ -61,10 +61,10 @@ _BASIN_FAST_THRESHOLD = 300
 _MIN_SEEDS_FOR_SCATTER = 2
 
 
-from burst.dev._shared import ckpt_files as _ckpt_files
-from burst.dev._shared import sched_color as _color
-from burst.dev._shared import sched_label as _label
-from burst.dev._shared import sched_order as _sched_order
+from burst.dev._shared import ckpt_files as _ckpt_files  # noqa: E402
+from burst.dev._shared import sched_color as _color  # noqa: E402
+from burst.dev._shared import sched_label as _label  # noqa: E402
+from burst.dev._shared import sched_order as _sched_order  # noqa: E402
 
 
 def _is_nan(v: float) -> bool:
@@ -78,7 +78,7 @@ def _is_nan(v: float) -> bool:
 
 
 @torch.no_grad()
-def compute_layerwise_weight_diff(
+def compute_layerwise_weight_diff(  # noqa: C901
     ckpt_root: Path,
     all_results: list[dict],
     n_seeds: int = 3,
@@ -166,7 +166,7 @@ def compute_layerwise_weight_diff(
 
 
 @torch.no_grad()
-def compute_layerwise_activations(
+def compute_layerwise_activations(  # noqa: C901, PLR0913, PLR0915
     ckpt_root: Path,
     all_results: list[dict],
     burst_docs_BL: np.ndarray,
@@ -284,7 +284,7 @@ _cross_entropy_loss = _cross_entropy_loss_shared
 
 
 @torch.no_grad()
-def compute_loss_basin_random_directions(
+def compute_loss_basin_random_directions(  # noqa: PLR0913
     ckpt_root: Path,
     all_results: list[dict],
     burst_docs_BL: np.ndarray,
@@ -935,7 +935,7 @@ def plot_weight_norms(data: dict, out_dir: Path) -> None:
         plt.close(fig)
 
 
-def plot_grad_norms_and_cosim(
+def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
     gs_records: list, out_dir: Path, _P: int = 0,
 ) -> None:
     """Plot gradient norms (L1, L2, Linf) over time and per layer, correlated with cosim."""
@@ -1156,7 +1156,7 @@ def plot_grad_norms_and_cosim(
         plt.close(fig)
 
 
-def plot_grad_rank(
+def plot_grad_rank(  # noqa: C901, PLR0912, PLR0915
     gs_records: list, out_dir: Path,
 ) -> None:
     """Re-plot grad rank from existing data, investigating issues."""
@@ -1335,7 +1335,7 @@ def plot_sharpness(loss_surface_data: dict, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0915
     """Run the full new-analysis pipeline."""
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -1358,13 +1358,13 @@ def main() -> None:
     rc = parse_run_config(run_cfg)
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     other_docs_BL = np.concatenate(list(bg_pool.values()))
 
     with (logs_dir / "all_results.pkl").open("rb") as f:
-        all_results = pickle.load(f)
+        all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
     out_dir = results_dir / "new_analysis"
@@ -1429,21 +1429,21 @@ def main() -> None:
     logger.info("[5/8] Sharpness (from basin_metrics)...")
     t0 = time.time()
     try:
-        from burst.dev.basin_metrics import analyse_run as bm_analyse
+        from burst.dev.basin_metrics import analyse_run as bm_analyse  # noqa: PLC0415
 
         bm_result = bm_analyse(
             run_dir, n_seeds=args.n_seeds, skip_surface=False
         )
         ls_data = bm_result.get("loss_surface", {})
         plot_sharpness(ls_data, out_dir / "sharpness")
-    except Exception:
+    except Exception:  # noqa: BLE001
         ls_data = {}
     logger.info("  Done in %.1fs", time.time() - t0)
 
     if not args.only_basin_sharpness:
         logger.info("[6/8] Gradient norms and cosim...")
         t0 = time.time()
-        from burst.dev.pres_charts import load_grad_sim_data
+        from burst.dev.pres_charts import load_grad_sim_data  # noqa: PLC0415
 
         gs_records = load_grad_sim_data(run_dir)
         if gs_records:

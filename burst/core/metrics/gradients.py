@@ -34,12 +34,12 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-from einops import rearrange
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from einops import rearrange  # noqa: E402
 
-from burst.config import (
+from burst.config import (  # noqa: E402
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
     PHASE_BURST,
@@ -47,15 +47,15 @@ from burst.config import (
     PHASE_REVERSION,
     parse_run_config,
 )
-from burst.core.gpu import gpu_cfg
-from burst.core.parallel import JobResult, run_job_pool
-from burst.core.repro import set_reproducibility, write_repro_manifest
-from burst.core.train_utils import (
+from burst.core.gpu import gpu_cfg  # noqa: E402
+from burst.core.parallel import JobResult, run_job_pool  # noqa: E402
+from burst.core.repro import set_reproducibility, write_repro_manifest  # noqa: E402
+from burst.core.train_utils import (  # noqa: E402
     DEVICE,
     _cross_entropy_logits_BTV_targets_BT,
     load_net,
 )
-from net.nanogpt import nanoGPT
+from net.nanogpt import nanoGPT  # noqa: E402
 
 warnings.filterwarnings("ignore", message=".*Full backward hook.*no inputs require gradients.*")
 MATRIX_NDIM = 2
@@ -244,7 +244,7 @@ def _grad_snr_per_layer(
     Uses torch.func.vmap + grad to compute all per-example gradients in one
     vectorised call instead of n_examples sequential backward passes.
     """
-    from torch.func import functional_call, grad, vmap
+    from torch.func import functional_call, grad, vmap  # noqa: PLC0415
 
     n = min(n_examples, docs_np.shape[0])
     idx = _rng.choice(docs_np.shape[0], n, replace=False)
@@ -513,7 +513,7 @@ def compute_grad_cosine_sim_per_layer(
     }
 
 
-def compute_pairwise_grad_sim(
+def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
     net: nanoGPT,
     task_docs: dict[Any, np.ndarray],
     n_samples: int,
@@ -529,7 +529,7 @@ def compute_pairwise_grad_sim(
       ALL_OTHER   -- all other-class tasks pooled
       ALL_DATA    -- everything pooled
     """
-    from burst.config import CLASS_BURST
+    from burst.config import CLASS_BURST  # noqa: PLC0415
 
     net.train()
 
@@ -602,7 +602,7 @@ def compute_pairwise_grad_sim(
 # ---------------------------------------------------------------------------
 
 
-def _worker_main() -> None:
+def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Run a single gradient-metric job in a subprocess."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
@@ -613,9 +613,9 @@ def _worker_main() -> None:
     args = parser.parse_args()
 
     with Path(args.job_path).open("rb") as f:
-        job = pickle.load(f)
+        job = pickle.load(f)  # noqa: S301
     with Path(args.data_path).open("rb") as f:
-        target_pool, bg_pool = pickle.load(f)
+        target_pool, bg_pool = pickle.load(f)  # noqa: S301
 
     cfg = job["cfg"]
     set_reproducibility(int(cfg["seed"]), deterministic=bool(job["deterministic"]))
@@ -777,7 +777,7 @@ def _resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Orchestrate gradient metric computation across all checkpoints."""
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -850,7 +850,7 @@ def main() -> None:
         if not result_path.exists():
             continue
         with result_path.open("rb") as f:
-            result = pickle.load(f)
+            result = pickle.load(f)  # noqa: S301
         cfg = result["config"]
 
         for pt_file in sorted(ckpt_dir.glob("step_*.pt")):
@@ -887,7 +887,7 @@ def main() -> None:
     logger.info("Jobs: %d checkpoints across %d labels", len(jobs), len(job_entries))
 
     with data_path.open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     worker_script = str(Path(__file__))
 
@@ -1053,7 +1053,7 @@ def main() -> None:
     )
     if all_results_path.exists():
         with all_results_path.open("rb") as f:
-            all_results = pickle.load(f)
+            all_results = pickle.load(f)  # noqa: S301
         for r in all_results:
             label = r["label"]
             if label in per_label:
@@ -1064,7 +1064,7 @@ def main() -> None:
         logger.info("Updated all_results.pkl with grad-sim data for %d labels", len(per_label))
 
     if args.delete_checkpoints:
-        import shutil
+        import shutil  # noqa: PLC0415
 
         shutil.rmtree(ckpt_root)
         logger.info("Cleaned up checkpoints")

@@ -28,9 +28,9 @@ def sanity_checks(cfg: DictConfig, loader: DataLoader[Any]) -> None:
     logger.info("Sequence length: %s", seq_len)
     logger.info("Vocabulary length: %s", vocab_len)
 
-    assert cfg.net.vocab_size >= vocab_len
-    assert cfg.net.context_size >= seq_len
-    assert cfg.net.n_embd % cfg.net.n_head == 0
+    assert cfg.net.vocab_size >= vocab_len  # noqa: S101
+    assert cfg.net.context_size >= seq_len  # noqa: S101
+    assert cfg.net.n_embd % cfg.net.n_head == 0  # noqa: S101
 
     if not torch.cuda.is_available():
         warnings.warn("WARNING: running on CPU", UserWarning, stacklevel=2)
@@ -89,7 +89,7 @@ def _cosine_segment(t_frac: float, lr_start: float, lr_end: float) -> float:
     return lr_end + coeff * (lr_start - lr_end)
 
 
-def phase_lr(
+def phase_lr(  # noqa: PLR0913
     global_step: int,
     warmup_steps: int,
     pretrain_steps: int,
@@ -141,7 +141,7 @@ def reset_optimizer_state(optimizer: torch.optim.Optimizer) -> None:
                     state[k] = 0
 
 
-def update_phase_lr(
+def update_phase_lr(  # noqa: PLR0913
     global_step: int,
     optimizer: torch.optim.Optimizer,
     warmup_steps: int,

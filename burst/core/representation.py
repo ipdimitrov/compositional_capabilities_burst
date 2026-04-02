@@ -35,7 +35,7 @@ def build_representation_summary(
         return {}
 
     with data_path.open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     other_docs = _subsample_pool(bg_pool, n_docs_per_class, seed=0)
     burst_docs = _subsample_pool(target_pool, n_docs_per_class, seed=1)
@@ -85,11 +85,11 @@ def _representation_for_run(
 
     step_to_path = {int(path.stem.split("_")[1]): path for path in ckpt_files}
     available_steps = sorted(step_to_path)
-    pre_step = available_steps[0]
-    burst_steps = run["config"]["total_steps"]
-    peak_step = min(available_steps, key=lambda step: abs(step - (burst_steps - 1)))
+    peak_step = min(
+        available_steps, key=lambda step: abs(step - (run["config"]["total_steps"] - 1))
+    )
 
-    net_pre = load_net(run["config"], str(step_to_path[pre_step]))
+    net_pre = load_net(run["config"], str(step_to_path[available_steps[0]]))
     net_peak = load_net(run["config"], str(step_to_path[peak_step]))
 
     other_pre = _mean_layer_vectors(net_pre, other_docs_BL)
@@ -154,7 +154,7 @@ def _subsample_pool(pool: _TaskPool, n_docs: int, *, seed: int) -> np.ndarray:
 
 def _mean_ci_payload(values: np.ndarray) -> dict[str, float]:
     """Return {mean, ci} dict with 95% confidence interval."""
-    from burst.core.bundle import _mean_ci
+    from burst.core.bundle import _mean_ci  # noqa: PLC0415
 
     mean, ci = _mean_ci(values)
     return {"mean": mean, "ci": ci}

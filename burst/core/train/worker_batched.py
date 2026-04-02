@@ -30,7 +30,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with Path(args.jobs_path).open("rb") as f:
-        jobs = pickle.load(f)
+        jobs = pickle.load(f)  # noqa: S301
 
     for job in jobs:
         try:

@@ -89,7 +89,7 @@ def make_scaler() -> torch.amp.GradScaler:
     return torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
 
 
-def train_step(
+def train_step(  # noqa: PLR0913
     batch_np: np.ndarray,
     net: nanoGPT,
     optimizer: torch.optim.Optimizer,
@@ -101,16 +101,13 @@ def train_step(
     """Single training step with phase-aware LR. Returns loss_value."""
     tokens_BL = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
     inputs_BT, targets_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
-    P = cfg["pre_burst_steps"]
-    T = cfg["total_steps"]
-    U = cfg["reversion_steps"]
     update_phase_lr(
         global_step,
         optimizer,
         cfg["warmup_iters"],
-        P,
-        T,
-        U,
+        cfg["pre_burst_steps"],
+        cfg["total_steps"],
+        cfg["reversion_steps"],
         cfg["lr"],
         cfg["lr_pretrain_end_frac"],
         cfg["lr_burst_end_frac"],
@@ -205,7 +202,7 @@ def load_results(run_dir: str | Path) -> tuple[list[dict], dict]:
         pkl_path = Path(run_dir) / "all_results.pkl"
 
     with pkl_path.open("rb") as f:
-        results = pickle.load(f)
+        results = pickle.load(f)  # noqa: S301
     with cfg_path.open() as f:
         cfg = json.load(f)
     return results, cfg
@@ -250,13 +247,14 @@ def compute_lr_schedule(
     P = pretrain_steps if pretrain_steps is not None else cfg["pre_burst_steps"]
     T = burst_steps if burst_steps is not None else cfg["total_steps"]
     U = cfg["reversion_steps"]
-    warmup = cfg["warmup_iters"]
-    lr_max = cfg["lr"]
-    lr_pe = cfg["lr_pretrain_end_frac"]
-    lr_be = cfg["lr_burst_end_frac"]
-    lr_re = cfg["lr_reversion_end_frac"]
 
-    total = P + T + U
-    steps = np.arange(1, total + 1)
-    lrs = np.array([phase_lr(s, warmup, P, T, U, lr_max, lr_pe, lr_be, lr_re) for s in steps])
+    steps = np.arange(1, P + T + U + 1)
+    lrs = np.array([
+        phase_lr(
+            s, cfg["warmup_iters"], P, T, U,
+            cfg["lr"], cfg["lr_pretrain_end_frac"],
+            cfg["lr_burst_end_frac"], cfg["lr_reversion_end_frac"],
+        )
+        for s in steps
+    ])
     return steps, lrs

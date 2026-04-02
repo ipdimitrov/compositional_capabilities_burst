@@ -272,7 +272,7 @@ def extract_grad_interference(result: dict) -> dict:
 
 
 @torch.no_grad()
-def ema_interpolation_probe(
+def ema_interpolation_probe(  # noqa: PLR0913
     ckpt_peak: str,
     ckpt_reverted: str,
     cfg: dict,
@@ -319,7 +319,7 @@ def ema_interpolation_probe(
         accs.append(acc)
 
     # Compute "cliff sharpness": alpha at which accuracy first exceeds 0.5
-    cliff_alpha = next((a for a, acc in zip(alphas, accs, strict=True) if acc > 0.5), 1.0)
+    cliff_alpha = next((a for a, acc in zip(alphas, accs, strict=True) if acc > 0.5), 1.0)  # noqa: PLR2004
     # Area under the curve (higher = more gradual = deeper)
     auc = float(np.trapezoid(accs, alphas))
 
@@ -342,7 +342,7 @@ def compute_task_vector_norms(
         parts = name.split(".")
         if "wte" in name or "wpe" in name:
             group = "emb"
-        elif len(parts) >= 4 and parts[1] == "h":
+        elif len(parts) >= 4 and parts[1] == "h":  # noqa: PLR2004
             i = parts[2]
             if "ln_" in name:
                 group = f"L{i}_ln"
@@ -420,7 +420,7 @@ def compute_critical_sharpness(
 
 
 @torch.no_grad()
-def compute_weight_delta_rank(
+def compute_weight_delta_rank(  # noqa: C901, PLR0912
     ckpt_pre: str,
     ckpt_post: str,
     cfg: dict,
@@ -439,9 +439,9 @@ def compute_weight_delta_rank(
     for name, p_post in net_post.named_parameters():
         p_pre = dict(net_pre.named_parameters())[name]
         delta = (p_post - p_pre).float().cpu()
-        if delta.dim() < 2:
+        if delta.dim() < 2:  # noqa: PLR2004
             continue
-        if delta.dim() > 2:
+        if delta.dim() > 2:  # noqa: PLR2004
             delta = delta.view(delta.shape[0], -1)
         try:
             sv = torch.linalg.svdvals(delta)
@@ -457,7 +457,7 @@ def compute_weight_delta_rank(
         parts = name.split(".")
         if "wte" in name or "wpe" in name:
             group = "emb"
-        elif len(parts) >= 4 and parts[1] == "h":
+        elif len(parts) >= 4 and parts[1] == "h":  # noqa: PLR2004
             i = parts[2]
             if "ln_" in name:
                 group = f"L{i}_ln"
@@ -487,7 +487,7 @@ def compute_weight_delta_rank(
 # ---------------------------------------------------------------------------
 
 
-def analyse_run(
+def analyse_run(  # noqa: C901, PLR0912, PLR0915
     run_dir: Path,
     adl_seeds: int = 3,
     adl_n_samples: int = 256,
@@ -495,7 +495,7 @@ def analyse_run(
     n_hutchinson: int = 10,
 ) -> dict:
     """Run all five analyses on a single run directory."""
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
@@ -509,14 +509,14 @@ def analyse_run(
     T = base_cfg["total_steps"]
 
     with logs_dir / "_data.pkl".open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
     with logs_dir / "all_results.pkl".open("rb") as f:
-        all_results = pickle.load(f)
+        all_results = pickle.load(f)  # noqa: S301
 
     schedules_present = sorted({r["schedule"] for r in all_results})
 
@@ -742,16 +742,16 @@ def analyse_run(
 # ---------------------------------------------------------------------------
 
 
-def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
+def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
     """Generate HTML dashboard + PNG charts from analysis results."""
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go  # noqa: PLC0415
+    from plotly.subplots import make_subplots  # noqa: PLC0415
 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
-    from burst.dev._shared import sched_color as _color
-    from burst.dev._shared import sched_order as _sched_order
+    from burst.dev._shared import sched_color as _color  # noqa: PLC0415
+    from burst.dev._shared import sched_order as _sched_order  # noqa: PLC0415
 
     def _save_png(fig: Any, name: str) -> str:  # noqa: ANN401
         path = charts_dir / f"{name}.png"
@@ -813,11 +813,12 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
     y_keys = ["mean_reversion_auc", "mean_dropoff_pct"]
     x_keys = ["mean_burst_interference", "end_burst_interference"]
 
-    subplot_titles = []
-    for row_lbl in ["AUC", "% Unlearning"]:
-        for col_lbl in ["Mean Grad Interference", "End-of-Burst Grad Interference"]:
-            for a in analyses:
-                subplot_titles.append(f"{a['run_name']} | {col_lbl} vs {row_lbl}")
+    subplot_titles = [
+        f"{a['run_name']} | {col_lbl} vs {row_lbl}"
+        for row_lbl in ["AUC", "% Unlearning"]
+        for col_lbl in ["Mean Grad Interference", "End-of-Burst Grad Interference"]
+        for a in analyses
+    ]
 
     fig2 = make_subplots(
         rows=2,
@@ -1152,7 +1153,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         colors = []
         for sched in schedules:
             step_data = adl[sched]
-            peak_steps = [s for s in step_data if s <= 499]
+            peak_steps = [s for s in step_data if s <= 499]  # noqa: PLR2004
             if not peak_steps:
                 continue
             peak_step = max(peak_steps)
@@ -1193,7 +1194,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         colors = []
         for sched in schedules:
             step_data = adl[sched]
-            peak_steps = [s for s in step_data if s <= 499]
+            peak_steps = [s for s in step_data if s <= 499]  # noqa: PLR2004
             if not peak_steps:
                 continue
             peak_step = max(peak_steps)
@@ -1288,7 +1289,9 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
             ],
         )
 
-        def _add_scatter(fig: Any, row: int, col: int, x: Any, y: Any, colors: Any, labels: Any) -> None:  # noqa: ANN401, PLR0913
+        def _add_scatter(  # noqa: PLR0913
+            fig: Any, row: int, col: int, x: Any, y: Any, colors: Any, labels: Any,  # noqa: ANN401
+        ) -> None:
             fig.add_trace(
                 go.Scatter(
                     x=x,
@@ -1372,7 +1375,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
         adl_read = []
         for s in schedules:
             step_data = adl.get(s, {})
-            peak_steps = [st for st in step_data if st <= 499]
+            peak_steps = [st for st in step_data if st <= 499]  # noqa: PLR2004
             if peak_steps:
                 adl_read.append(step_data[max(peak_steps)]["mean_readability"])
             else:
@@ -1472,6 +1475,7 @@ def _analyse_run_worker(args_tuple: tuple) -> dict:
 
 
 def main() -> None:
+    """CLI entry point for deep analysis."""
     parser = argparse.ArgumentParser(
         description="Five-metric deep analysis of burstiness runs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

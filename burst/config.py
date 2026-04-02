@@ -241,7 +241,7 @@ class ExperimentConfig:
             msg = f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}"
             raise ValueError(msg)
         if self.n_workers == 0:
-            from burst.core.gpu import gpu_cfg
+            from burst.core.gpu import gpu_cfg  # noqa: PLC0415
 
             self.n_workers = gpu_cfg.train_workers
 
@@ -268,13 +268,13 @@ def parse_run_config(cfg: dict[str, Any]) -> dict[str, Any]:
         return v if v is not None else task_info.get(key)
 
     depth = _get("depth")
-    assert depth is not None, "config missing 'depth'"
+    assert depth is not None, "config missing 'depth'"  # noqa: S101
 
     burst_pos = _get("burst_pos")
-    assert burst_pos is not None, "config missing 'burst_pos'"
+    assert burst_pos is not None, "config missing 'burst_pos'"  # noqa: S101
 
     n_a = _get("n_a")
-    assert n_a is not None, "config missing 'n_a'"
+    assert n_a is not None, "config missing 'n_a'"  # noqa: S101
 
     return {"depth": depth, "burst_pos": burst_pos, "n_a": n_a, "base_cfg": base_cfg}
 
@@ -298,5 +298,5 @@ def ordered_schedules(scheds: Iterable[str]) -> list[str]:
 
 def sched_sort_key(schedule: str) -> int:
     """Return the sort index for a schedule name."""
-    assert schedule in SCHEDULE_ORDER, f"Unknown schedule: {schedule}"
+    assert schedule in SCHEDULE_ORDER, f"Unknown schedule: {schedule}"  # noqa: S101
     return SCHEDULE_ORDER.index(schedule)

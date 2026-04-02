@@ -20,8 +20,8 @@ def set_seed(seed: int = 0) -> None:
     random.seed(true_seed)
     np.random.seed(true_seed)  # noqa: NPY002
 
-    import synthetic.functions as _syn_fn
-    import synthetic.generator as _syn_gen
+    import synthetic.functions as _syn_fn  # noqa: PLC0415
+    import synthetic.generator as _syn_gen  # noqa: PLC0415
 
     _shared = np.random.default_rng(true_seed)
     _syn_fn._rng = _shared  # noqa: SLF001

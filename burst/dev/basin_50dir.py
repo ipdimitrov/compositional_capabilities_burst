@@ -44,8 +44,8 @@ from burst.core.train_utils import load_net, resolve_run_paths
 
 logger = logging.getLogger(__name__)
 
-from burst.core.train_utils import DEVICE
-from burst.dev._shared import cross_entropy_loss as _cross_entropy_loss
+from burst.core.train_utils import DEVICE  # noqa: E402
+from burst.dev._shared import cross_entropy_loss as _cross_entropy_loss  # noqa: E402
 
 _rng = np.random.default_rng()
 
@@ -56,9 +56,9 @@ N_EVAL_DOCS = 128
 _MIN_FILTER_DIM = 2
 
 
-from burst.dev._shared import sched_color as _color
-from burst.dev._shared import sched_label as _label
-from burst.dev._shared import sched_order as _sched_order
+from burst.dev._shared import sched_color as _color  # noqa: E402
+from burst.dev._shared import sched_label as _label  # noqa: E402
+from burst.dev._shared import sched_order as _sched_order  # noqa: E402
 
 
 def _filter_normalise(
@@ -81,7 +81,7 @@ def _filter_normalise(
 
 
 @torch.no_grad()
-def compute_one_seed(
+def compute_one_seed(  # noqa: PLR0913
     cfg: dict,
     ckpt_path: str,
     burst_eval: np.ndarray,
@@ -286,7 +286,7 @@ def plot_sharpness(
     plt.close(fig)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0915
     """Run 50-direction filter-normalised loss basin analysis."""
     parser = argparse.ArgumentParser(
         description=(
@@ -313,7 +313,7 @@ def main() -> None:
     parse_run_config(run_cfg)
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     burst_docs = np.concatenate(list(target_pool.values()))
     other_docs = np.concatenate(list(bg_pool.values()))
@@ -329,10 +329,10 @@ def main() -> None:
     ]
 
     with (logs_dir / "all_results.pkl").open("rb") as f:
-        all_results = pickle.load(f)
+        all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
-    assert ckpt_root.exists(), f"No checkpoints at {ckpt_root}"
+    assert ckpt_root.exists(), f"No checkpoints at {ckpt_root}"  # noqa: S101
 
     epsilons = np.linspace(
         -args.max_epsilon, args.max_epsilon, args.n_points,

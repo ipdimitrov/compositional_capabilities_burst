@@ -36,7 +36,9 @@ def pad_pools_to_same_length(*pools: dict[Any, np.ndarray]) -> list[dict[Any, np
             if docs.shape[1] < max_len:
                 pad_width = max_len - docs.shape[1]
                 padding = np.full((docs.shape[0], pad_width), 0, dtype=docs.dtype)
-                docs = np.concatenate([docs, padding], axis=1)
-            new_pool[key] = docs
+                padded_docs = np.concatenate([docs, padding], axis=1)
+            else:
+                padded_docs = docs
+            new_pool[key] = padded_docs
         padded_pools.append(new_pool)
     return padded_pools

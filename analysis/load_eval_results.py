@@ -17,7 +17,7 @@ TEXT_CONTRAST_THRESHOLD = 0.4
 # ============================================================
 inorder_path = PROJECT_ROOT / "data/inorder_eval_step_random50/accs.pkl"
 with inorder_path.open("rb") as f:
-    accs_inorder = pickle.load(f)
+    accs_inorder = pickle.load(f)  # noqa: S301
 
 iterations = [entry[0][0] for entry in accs_inorder]
 
@@ -95,7 +95,7 @@ plt.show()
 # ============================================================
 outorder_path = PROJECT_ROOT / "data/outorder_eval_step_random50/accs.pkl"
 with outorder_path.open("rb") as f:
-    accs_outorder = pickle.load(f)
+    accs_outorder = pickle.load(f)  # noqa: S301
 
 # Keys are (num_identities, displacement)
 # Values are dicts mapping task_id -> (step_accs_array, final_accs_array)

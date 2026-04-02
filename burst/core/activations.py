@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 
 from burst.core.train_utils import DEVICE
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from net.nanogpt import nanoGPT
 
 COLLECT_BATCH_SIZE = 512

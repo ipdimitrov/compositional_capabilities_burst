@@ -89,7 +89,7 @@ def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batc
     raise ValueError(msg)
 
 
-def sample_batch(
+def sample_batch(  # noqa: PLR0913
     target_pool: dict, bg_pool: dict, n_target: int, batch_size: int,
     t_ids: list | None = None, b_ids: list | None = None,
 ) -> tuple[np.ndarray, list]:
@@ -198,7 +198,7 @@ def checkpoint_steps(T: int, U: int) -> dict[int, str]:
     return steps
 
 
-def _save_task_distribution(
+def _save_task_distribution(  # noqa: PLR0913
     stats_dir: Path,
     label: str,
     schedule: str,
@@ -289,7 +289,7 @@ def _compute_reversion_metrics(
     }
 
 
-def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) -> None:
+def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) -> None:  # noqa: C901, PLR0912, PLR0915
     """Train one model on one schedule and write results to disk."""
     label, schedule, seed, cfg = job["label"], job["schedule"], job["seed"], job["cfg"]
     deterministic = bool(job["deterministic"])
@@ -301,12 +301,12 @@ def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) 
     progress_file.write_text("0")
 
     with Path(shared_data_path).open("rb") as f:
-        target_pool, bg_pool, eval_docs, prompt_len, _ = pickle.load(f)
+        target_pool, bg_pool, eval_docs, prompt_len, _ = pickle.load(f)  # noqa: S301
 
     pretrain_log = None
     if pretrain_log_path and Path(pretrain_log_path).exists():
         with Path(pretrain_log_path).open("rb") as f:
-            pretrain_log = pickle.load(f)
+            pretrain_log = pickle.load(f)  # noqa: S301
 
     set_seed(seed)
     net = make_net_bare(cfg)
@@ -451,5 +451,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with Path(args.job_path).open("rb") as f:
-        job = pickle.load(f)
+        job = pickle.load(f)  # noqa: S301
     run(job, args.data_path, args.run_dir, args.progress_dir)

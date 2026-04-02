@@ -58,7 +58,7 @@ def _sample_batch(target_pool: dict, bg_pool: dict, n_target: int, batch_size: i
     return np.concatenate(parts)[_rng.permutation(batch_size)]
 
 
-def finetune(
+def finetune(  # noqa: PLR0913, PLR0915
     data: ExperimentData,
     pretrain_ckpt: str | Path,
     out_dir: str | Path,

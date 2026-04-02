@@ -422,7 +422,7 @@ def _write_excel(
             df.to_excel(writer, sheet_name=sheet[:31], index=False)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Run pretraining-only full-factorial sweep."""
     parser = argparse.ArgumentParser(description="Pretraining-only full-factorial sweep.")
     parser.add_argument("--run-tag", default=None)
@@ -491,7 +491,7 @@ def main() -> None:
                     task = futs[fut]
                     try:
                         rows.extend(fut.result())
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001
                         if _is_cuda_oom(exc):
                             saw_cuda_oom = True
                         failed.append(task)

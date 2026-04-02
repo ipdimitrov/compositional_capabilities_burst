@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _rng = np.random.default_rng()
 
 
-def pretrain(
+def pretrain(  # noqa: PLR0913, PLR0915
     data: ExperimentData,
     out_dir: str | Path,
     *,

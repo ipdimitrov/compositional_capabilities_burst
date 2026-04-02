@@ -70,7 +70,7 @@ def load_grad_sim_data(run_dir: _PathLike) -> list[dict]:
     for pkl in [rd / "logs" / "all_results.pkl", rd / "all_results.pkl"]:
         if pkl.exists():
             with pkl.open("rb") as f:
-                results = pickle.load(f)
+                results = pickle.load(f)  # noqa: S301
             records.extend(
                 {
                     "schedule": r["schedule"],
@@ -182,7 +182,7 @@ def schedule_bars(
     return p_
 
 
-def overlay(
+def overlay(  # noqa: PLR0913
     pdir: Path,
     results: list[dict],
     cfg: _Cfg,
@@ -306,7 +306,7 @@ def overlay(
     return p_
 
 
-def bar_chart(
+def bar_chart(  # noqa: PLR0913
     pdir: Path,
     results: list[dict],
     cfg: _Cfg,
@@ -911,7 +911,7 @@ def grad_cosine_rate_of_change(
             continue
         steps_ref, vals_arr = interp[sched]
         m = np.mean(vals_arr, axis=0)
-        if len(steps_ref) < 3:
+        if len(steps_ref) < 3:  # noqa: PLR2004
             continue
         dt = np.diff(steps_ref)
         dm = np.diff(m)
@@ -1162,7 +1162,7 @@ def grad_cosine_mean_over_phases_bars(
     return p_
 
 
-def _draw_pairwise_heatmap(
+def _draw_pairwise_heatmap(  # noqa: PLR0913
     ax: mpl.axes.Axes,
     mean_matrix: np.ndarray,
     labels: list[str],
@@ -1211,7 +1211,7 @@ def _draw_pairwise_heatmap(
     return im
 
 
-def pairwise_grad_cosine_heatmap(
+def pairwise_grad_cosine_heatmap(  # noqa: C901
     pdir: Path, _cfg: _Cfg, gs_records: list[dict]
 ) -> list[Path]:
     """Render pairwise gradient cosine similarity heatmaps per schedule and step."""
@@ -1369,7 +1369,7 @@ PAIRWISE_METRIC_COLORS = {
 }
 
 
-def _collect_pairwise_series(
+def _collect_pairwise_series(  # noqa: C901
     _gs_records: list[dict], scheds_grouped: _Groups
 ) -> dict[str, dict[str, Any]]:
     """Build {sched: {metric: (steps_ref, vals_array_SxT)}} from pairwise snapshots."""
@@ -1567,7 +1567,7 @@ def _load_probe_data(
     if not all_path.exists():
         return None, None
     with all_path.open("rb") as f:
-        results = pickle.load(f)
+        results = pickle.load(f)  # noqa: S301
     meta_path = probe_dir / "probe_meta.json"
     if meta_path.exists():
         with meta_path.open() as f:
@@ -1723,7 +1723,7 @@ def probe_dynamics_aggregated(
     return p_
 
 
-def probe_layer_schedule_heatmap(
+def probe_layer_schedule_heatmap(  # noqa: C901, PLR0915
     pdir: Path, probe_results: list[dict], meta: dict, _cfg: _Cfg
 ) -> list[Path]:
     """Render layer x schedule heatmap at end of training + end of reversion."""
@@ -2015,7 +2015,7 @@ def grad_cosine_layer_step_heatmap(
     return paths
 
 
-def grad_cosine_layer_schedule_heatmap(
+def grad_cosine_layer_schedule_heatmap(  # noqa: C901
     pdir: Path, cfg: _Cfg, gs_records: list[dict]
 ) -> list[Path]:
     """Render heatmap of rows=layers, cols=schedules, at key training phases."""
@@ -2518,7 +2518,7 @@ def adl_readability_vs_auc(
     return p_
 
 
-def generate_all(
+def generate_all(  # noqa: PLR0915
     run_dir: _PathLike, results: list[dict], cfg: _Cfg
 ) -> dict[str, Any]:
     """Generate all presentation charts and return a dict of chart paths."""

@@ -46,8 +46,8 @@ logger = logging.getLogger(__name__)
 _rng = np.random.default_rng()
 
 
-from burst.dev._shared import ckpt_files as _ckpt_files
-from burst.dev._shared import sched_order as _sched_order
+from burst.dev._shared import ckpt_files as _ckpt_files  # noqa: E402
+from burst.dev._shared import sched_order as _sched_order  # noqa: E402
 
 
 def compute_diagonal_fisher(
@@ -107,7 +107,7 @@ def compute_fisher_displacement(
     return {"total_D": sum(per_layer_D.values()), "per_layer_D": per_layer_D}
 
 
-def run_ewc_analysis(
+def run_ewc_analysis(  # noqa: C901, PLR0915
     run_dir: Path,
     n_fisher_batches: int = 200,
     n_seeds: int = 3,
@@ -121,9 +121,9 @@ def run_ewc_analysis(
     base_cfg = rc["base_cfg"]
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        _, bg_pool, _, _, _ = pickle.load(f)
+        _, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
     with (logs_dir / "all_results.pkl").open("rb") as f:
-        all_results = pickle.load(f)
+        all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
     if not ckpt_root.exists():
@@ -211,7 +211,7 @@ def run_ewc_analysis(
 
 def make_ewc_plots(result: dict, out_dir: Path) -> None:
     """Generate EWC displacement plots."""
-    import plotly.graph_objects as go
+    import plotly.graph_objects as go  # noqa: PLC0415
 
     out_dir.mkdir(parents=True, exist_ok=True)
     per_schedule = result.get("per_schedule", {})

@@ -104,6 +104,7 @@ def logit_lens_on_delta(
     delta_KTN: torch.Tensor,
     burst_token_ids: list[int],
     top_k: int = 20,
+    *,
     use_ln: bool = True,
 ) -> dict:
     """Project d_bar through [ln_f +] W_U and measure burst-token presence in top-k.
@@ -186,7 +187,7 @@ def logit_lens_compare_methods(
 
 
 @torch.no_grad()
-def steering_experiment(
+def steering_experiment(  # noqa: PLR0913
     net: nanoGPT,
     delta_KTN: torch.Tensor,
     other_docs_BL: np.ndarray,
@@ -220,7 +221,7 @@ def steering_experiment(
 
     delta_TN = delta_KTN[steer_layer].to(DEVICE).float()
     delta_norm = delta_TN.norm()
-    if delta_norm < 1e-8:
+    if delta_norm < 1e-8:  # noqa: PLR2004
         return {
             "alphas": alphas,
             "burst_acc_on_other": [0.0] * len(alphas),
@@ -314,7 +315,7 @@ def _measure_burst_acc_on_other(
 
 
 @torch.no_grad()
-def steering_sweep_layers(
+def steering_sweep_layers(  # noqa: PLR0913
     net: nanoGPT,
     delta_KTN: torch.Tensor,
     other_docs_BL: np.ndarray,
@@ -358,7 +359,7 @@ def steering_sweep_layers(
 # ---------------------------------------------------------------------------
 
 
-def analyse_run(
+def analyse_run(  # noqa: C901, PLR0915
     run_dir: Path,
     n_seeds: int = 3,
     n_samples: int = 256,
@@ -368,7 +369,7 @@ def analyse_run(
     """Run Logit Lens + Steering analysis on a single run directory."""
     logger.info("Fingerprint analysis: %s", run_dir.name)
 
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
@@ -381,14 +382,14 @@ def analyse_run(
     T = base_cfg["total_steps"]
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
     with (logs_dir / "all_results.pkl").open("rb") as f:
-        all_results = pickle.load(f)
+        all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
     schedules_present = sorted({r["schedule"] for r in all_results})
@@ -427,7 +428,7 @@ def analyse_run(
 
             ckpt_files = {int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")}
             available = sorted(ckpt_files.keys())
-            if len(available) < 2:
+            if len(available) < 2:  # noqa: PLR2004
                 continue
 
             cfg = r["config"]
@@ -611,10 +612,10 @@ _METRIC_DESCRIPTIONS = {
 }
 
 
-def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
+def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
     """Build an interactive HTML dashboard from fingerprint analyses."""
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go  # noqa: PLC0415
+    from plotly.subplots import make_subplots  # noqa: PLC0415
 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)

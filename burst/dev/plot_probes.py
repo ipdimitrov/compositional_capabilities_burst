@@ -37,7 +37,7 @@ _STEP_TOLERANCE = 30
 
 
 def _load_steps_from_config(run_dir: Path) -> tuple[int, int] | None:
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, _, _ = resolve_run_paths(run_dir)
     if not cfg_path.exists():
@@ -65,14 +65,14 @@ def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
             results = []
             for p in individual:
                 with p.open("rb") as f:
-                    results.append(pickle.load(f))
+                    results.append(pickle.load(f))  # noqa: S301
             with all_path.open("wb") as f:
                 pickle.dump(results, f)
         else:
             sys.exit(1)
     else:
         with all_path.open("rb") as f:
-            results = pickle.load(f)
+            results = pickle.load(f)  # noqa: S301
 
     steps_from_cfg = _load_steps_from_config(run_dir)
 
@@ -107,7 +107,7 @@ def _layer_labels(n_layers: int) -> list[str]:
     return ["emb"] + [f"L{i}" for i in range(n_layers)]
 
 
-def plot_heatmap(
+def plot_heatmap(  # noqa: PLR0913
     acc_KT: np.ndarray,
     token_labels: list[str],
     layer_labels: list[str],
@@ -145,7 +145,7 @@ def plot_heatmap(
     plt.close(fig)
 
 
-def plot_diff_heatmap(
+def plot_diff_heatmap(  # noqa: PLR0913
     acc_other_KT: np.ndarray,
     acc_burst_KT: np.ndarray,
     token_labels: list[str],
@@ -187,7 +187,7 @@ def plot_diff_heatmap(
     plt.close(fig)
 
 
-def plot_training_dynamics(
+def plot_training_dynamics(  # noqa: C901
     result: dict,
     token_labels: list[str],
     layer_labels: list[str],
@@ -470,9 +470,9 @@ def _mean_acc_at_step(
     return np.mean(arrs, axis=0)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Generate all probe visualisation plots for a run directory."""
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2:  # noqa: PLR2004
         data_dir = Path("data")
         burst_dirs = sorted([d for d in data_dir.glob("burst_d*") if d.is_dir()])
         if not burst_dirs:

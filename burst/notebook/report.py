@@ -31,7 +31,7 @@ def _smooth(vals: list[float], alpha: float = 0.3) -> list[float]:
 
 def _frac_color(frac: float) -> str:
     """Map burst fraction to a red-to-blue colour hex string."""
-    import colorsys
+    import colorsys  # noqa: PLC0415
 
     h = 0.0 + (1.0 - frac) * 0.58
     r, g, b = colorsys.hls_to_rgb(h, 0.42, 0.72)
@@ -41,7 +41,7 @@ def _frac_color(frac: float) -> str:
 def _tag_to_frac(tag: str) -> float:
     """Extract burst fraction from a tag string like 'burst_50'."""
     parts = tag.split("_")
-    assert len(parts) >= 2, f"unexpected tag format: {tag!r}"
+    assert len(parts) >= 2, f"unexpected tag format: {tag!r}"  # noqa: S101, PLR2004
     return int(parts[1]) / 100
 
 
@@ -158,7 +158,7 @@ def plot_loss(
     return fig
 
 
-def plot_full_trajectory(
+def plot_full_trajectory(  # noqa: C901, PLR0915
     pretrain_result: dict, finetune_results: list[dict] | dict,
     forget_results: list[dict] | dict, figsize: tuple[int, int] = (18, 10),
 ) -> Figure:
@@ -463,7 +463,7 @@ def plot_weight_drift(
     return fig
 
 
-def plot_grad_norms(
+def plot_grad_norms(  # noqa: C901, PLR0915
     ft_results: list[dict] | dict, fg_results: list[dict] | dict,
     figsize: tuple[int, int] = (14, 8),
 ) -> Figure:
@@ -893,7 +893,7 @@ def plot_cka_matrices(analysis: dict, figsize: tuple[int, int] = (5, 5)) -> Figu
     return fig
 
 
-def plot_summary_dashboard(
+def plot_summary_dashboard(  # noqa: PLR0915
     ft_results: list[dict] | dict, fg_results: list[dict] | dict,
     analysis: dict, figsize: tuple[int, int] = (16, 10),
 ) -> Figure:
@@ -999,7 +999,7 @@ def plot_summary_dashboard(
 
 def plot_function_distribution(data: dict, figsize: tuple[int, int] | None = None) -> Figure:
     """Show which functions appear in each slot for pretraining vs finetuning."""
-    from collections import Counter
+    from collections import Counter  # noqa: PLC0415
 
     bg_pool = data["bg_pool"]
     target_pool = data["target_pool"]
@@ -1062,7 +1062,7 @@ def plot_function_distribution(data: dict, figsize: tuple[int, int] | None = Non
 # ── save full report ──────────────────────────────────────────────────────
 
 
-def save_report(
+def save_report(  # noqa: PLR0913
     pt: dict, ft_results: list[dict] | dict, fg_results: list[dict] | dict,
     out_dir: str | Path, analysis: dict | None = None, prefix: str = "report",
 ) -> None:

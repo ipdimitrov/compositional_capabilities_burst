@@ -171,7 +171,7 @@ def compute_task_vector_transfer(
                 ).items()
             }
 
-            # τ = θ_peak − θ_pre (source)
+            # Task vector: difference between peak and pre-burst weights (source)
             tau = {k: peak_sd[k] - pre_sd[k] for k in peak_sd}
 
             # Apply τ to target pre-burst model and evaluate
@@ -199,7 +199,7 @@ def compute_task_vector_transfer(
 
 
 @torch.no_grad()
-def compute_forgetting_trajectory_dim(
+def compute_forgetting_trajectory_dim(  # noqa: C901
     ckpt_root: Path,
     all_results: list[dict],
     n_seeds: int = 3,
@@ -241,7 +241,7 @@ def compute_forgetting_trajectory_dim(
 
             T = r["config"]["total_steps"]
             rev_steps_all = sorted(s for s in files if s >= T)
-            if len(rev_steps_all) < 3:
+            if len(rev_steps_all) < 3:  # noqa: PLR2004
                 continue
 
             # Subsample evenly to keep runtime tractable
@@ -262,7 +262,7 @@ def compute_forgetting_trajectory_dim(
             W = np.stack(weight_vecs)  # (n_steps, n_params)
             W_centered = W - W.mean(axis=0, keepdims=True)
 
-            # PCA via SVD on the trajectory matrix (n_steps × n_params)
+            # PCA via SVD on the trajectory matrix (n_steps x n_params)
             # Economy SVD — n_steps << n_params
             try:
                 _, sv, _ = np.linalg.svd(W_centered, full_matrices=False)
@@ -287,11 +287,11 @@ def compute_forgetting_trajectory_dim(
 # ---------------------------------------------------------------------------
 
 
-def compute_relearning_efficiency(
+def compute_relearning_efficiency(  # noqa: PLR0913, PLR0915
     ckpt_root: Path,
     all_results: list[dict],
     burst_docs_BL: np.ndarray,
-    other_docs_BL: np.ndarray,
+    _other_docs_BL: np.ndarray,
     prompt_len: int,
     n_seeds: int = 3,
     relearn_steps: int = 50,
@@ -401,11 +401,11 @@ def compute_relearning_efficiency(
 
 
 @torch.no_grad()
-def compute_linear_mode_connectivity(
+def compute_linear_mode_connectivity(  # noqa: PLR0915
     ckpt_root: Path,
     all_results: list[dict],
     burst_docs_BL: np.ndarray,
-    prompt_len: int,
+    _prompt_len: int,
     n_seeds: int = 3,
     n_alphas: int = 11,
 ) -> dict:
@@ -507,7 +507,7 @@ def compute_linear_mode_connectivity(
 
 
 @torch.no_grad()
-def compute_pruning_robustness(
+def compute_pruning_robustness(  # noqa: PLR0913
     ckpt_root: Path,
     all_results: list[dict],
     burst_docs_BL: np.ndarray,
@@ -602,7 +602,7 @@ def compute_pruning_robustness(
 def compute_pairwise_grad_separation(all_results: list[dict]) -> dict:
     """Extract BURST vs ALL_OTHER gradient cosine similarity from pairwise_snapshots.
 
-    The pairwise_snapshots contain a 6×6 matrix at 5 key steps:
+    The pairwise_snapshots contain a 6x6 matrix at 5 key steps:
     labels = [BURST, O_F1, O_F2, O_F3, ALL_OTHER, ALL_DATA]
 
     We extract the BURST↔ALL_OTHER entry (index [0, 4]) at each step.
@@ -682,7 +682,7 @@ def compute_forgetting_speed_decomposition(all_results: list[dict]) -> dict:
             rev_steps = [s - T for s, p in zip(steps, phases, strict=True) if p == PHASE_REVERSION]
             rev_accs = [a for a, p in zip(accs, phases, strict=True) if p == PHASE_REVERSION]
 
-            if len(rev_accs) < 2:
+            if len(rev_accs) < 2:  # noqa: PLR2004
                 continue
 
             peak = r.get(
@@ -694,10 +694,10 @@ def compute_forgetting_speed_decomposition(all_results: list[dict]) -> dict:
             peak_bursts.append(peak)
 
             # Initial slope: linear fit over first 50 reversion steps
-            early_mask = [s <= 50 for s in rev_steps]
+            early_mask = [s <= 50 for s in rev_steps]  # noqa: PLR2004
             early_steps = [s for s, m in zip(rev_steps, early_mask, strict=True) if m]
             early_accs = [a for a, m in zip(rev_accs, early_mask, strict=True) if m]
-            if len(early_steps) >= 2:
+            if len(early_steps) >= 2:  # noqa: PLR2004
                 slope = float(np.polyfit(early_steps, early_accs, 1)[0])
             else:
                 slope = float("nan")
@@ -833,7 +833,7 @@ def compute_grad_interference_temporal(all_results: list[dict]) -> dict:
         # Re-alignment speed: steps until cosine sim first exceeds 0.1
         # (threshold of 0.5 is too high — reversion sims rarely exceed 0.5)
         realign_step = next(
-            (s for s, sim in zip(steps_sorted, mean_sims, strict=True) if sim > 0.1),
+            (s for s, sim in zip(steps_sorted, mean_sims, strict=True) if sim > 0.1),  # noqa: PLR2004
             steps_sorted[-1] if steps_sorted else float("nan"),
         )
 
@@ -864,13 +864,13 @@ _PROJ_KEYS = (
 )
 
 
-def compute_grad_projection_metrics(all_results: list[dict]) -> dict:
+def compute_grad_projection_metrics(all_results: list[dict]) -> dict:  # noqa: C901
     """Aggregate gradient projection time-series from grad_sim_log.
 
     For each schedule, collects per-step:
       interference_magnitude: ||g_burst^parallel||  (absolute interference)
       useful_learning:        ||g_burst^perp||       (orthogonal learning signal)
-      interference_ratio:     ||g_parallel|| / ||g_burst||  (= |cos α|)
+      interference_ratio:     ||g_parallel|| / ||g_burst||  (= |cos alpha|)  # noqa: RUF002
 
     Returns per-schedule mean ± std trajectories over seeds, split by phase.
     """
@@ -953,7 +953,7 @@ def compute_burst_position_comparison(existing_analyses: list[dict]) -> dict:
         for sched in schedules:
             # ADL readability at peak burst
             adl_sched = adl.get(sched, {})
-            peak_steps = [s for s in adl_sched if s <= 499]
+            peak_steps = [s for s in adl_sched if s <= 499]  # noqa: PLR2004
             adl_readability = (
                 adl_sched[max(peak_steps)]["mean_readability"] if peak_steps else float("nan")
             )
@@ -990,7 +990,7 @@ _METRIC_DESCRIPTIONS = {
     "task_vector_transfer": {
         "title": "Task Vector Transfer Accuracy",
         "what": (
-            "Computes τ = θ_post_burst − θ_pre_burst for each model, then adds τ to a "
+            "Computes τ = θ_post_burst − θ_pre_burst for each model, then adds τ to a "  # noqa: RUF001
             "different seed's pre-burst model and measures burst accuracy on that new model. "
             "This tests whether the burst capability is a modular, transferable add-on."
         ),
@@ -1019,7 +1019,7 @@ _METRIC_DESCRIPTIONS = {
             "simultaneously (deep, complex forgetting)."
         ),
         "low": (
-            "Low dimensionality (e.g., 1–2) → the model is simply undoing a single "
+            "Low dimensionality (e.g., 1–2) → the model is simply undoing a single "  # noqa: RUF001
             "direction (shallow wrapper removal)."
         ),
         "limitations": (
@@ -1039,7 +1039,7 @@ _METRIC_DESCRIPTIONS = {
         ),
         "low": "Low AUC → slow recovery (the capability was genuinely restructured — deep).",
         "limitations": (
-            "Uses a reduced learning rate (0.3× original). Results may vary with LR choice. "
+            "Uses a reduced learning rate (0.3x original). Results may vary with LR choice. "
             "Only 50 steps — very fast learners may saturate before differences emerge."
         ),
     },
@@ -1120,7 +1120,7 @@ _METRIC_DESCRIPTIONS = {
             "lost by end of reversion."
         ),
         "limitations": (
-            "Slope estimate is noisy with only ~2–4 data points in the first 50 steps. "
+            "Slope estimate is noisy with only ~2–4 data points in the first 50 steps. "  # noqa: RUF001
             "Plateau is computed from the last 20% of logged steps, not wall-clock time."
         ),
     },
@@ -1183,7 +1183,7 @@ _METRIC_DESCRIPTIONS = {
         ),
         "limitations": (
             "Projection is computed on aggregate (pooled) gradients, not per-example. "
-            "The interference_ratio equals |cos(α)| so it is bounded in [0, 1]. "
+            "The interference_ratio equals |cos(alpha)| so it is bounded in [0, 1]. "
             "A ratio near 0.5 is expected at random initialisation."
         ),
     },
@@ -1208,9 +1208,10 @@ _METRIC_DESCRIPTIONS = {
 }
 
 
-def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Path) -> None:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
+    """Generate HTML dashboard with charts for all new metrics."""
+    import plotly.graph_objects as go  # noqa: PLC0415
+    from plotly.subplots import make_subplots  # noqa: PLC0415
 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
@@ -1579,9 +1580,10 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
     #           and interference ratio over time with error bands
     # ------------------------------------------------------------------
 
-    def _proj_timeseries_fig(
-        gp, schedules, metric_key, title, yaxis_label, hline=None,
-    ):
+    def _proj_timeseries_fig(  # noqa: PLR0913
+        gp: dict, schedules: list[str], metric_key: str,
+        title: str, yaxis_label: str, hline: float | None = None,
+    ) -> go.Figure:
         """Line + shaded-band figure for one projection metric across schedules."""
         fig = go.Figure()
         for sched in schedules:
@@ -1654,9 +1656,9 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                 schedules,
                 "interference_ratio",
                 f"Gradient Interference Ratio — {run_name}<br>"
-                "<sup>||g_parallel|| / ||g_burst|| = |cos α|. "
+                "<sup>||g_parallel|| / ||g_burst|| = |cos α|. "  # noqa: RUF001
                 "Fraction of burst gradient interfering with other-class learning. Range [0,1].</sup>",  # noqa: E501
-                "Interference Ratio (= |cos α|)",
+                "Interference Ratio (= |cos α|)",  # noqa: RUF001
                 hline=0.5,
             ),
         )
@@ -1696,7 +1698,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         )
         fig_bar.update_layout(
             title=f"Mean Gradient Interference Ratio During Burst — {run_name}<br>"
-            "<sup>Mean |cos α| across burst-phase steps. "
+            "<sup>Mean |cos α| across burst-phase steps. "  # noqa: RUF001
             "Lower = burst gradient more orthogonal to other-class gradients.</sup>",
             xaxis_title="Schedule",
             yaxis_title="Mean Interference Ratio",
@@ -1757,7 +1759,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         schedules = sorted(sm.keys(), key=_sched_order)
         burst_pcts = [int(s.replace("burst_", "")) for s in schedules]
 
-        def _get_scalar(metric_dict, sched, key):
+        def _get_scalar(metric_dict: dict, sched: str, key: str) -> float:
             d = metric_dict.get(run_name, {}).get(sched, {})
             return d.get(key, float("nan")) if isinstance(d, dict) else float("nan")
 
@@ -1775,7 +1777,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         )
         colors = [_color(s) for s in schedules]
 
-        def _add_scatter_summary(fig, row, col, y_vals) -> None:
+        def _add_scatter_summary(fig: go.Figure, row: int, col: int, y_vals: list[float]) -> None:
             fig.add_trace(
                 go.Scatter(
                     x=burst_pcts,
@@ -1962,10 +1964,10 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
     html_parts.append("</body></html>")
 
     html_path = out_dir / "dashboard.html"
-    with open(html_path, "w") as f:
+    with html_path.open("w") as f:
         f.write("".join(html_parts))
 
-    from burst.dev.plot_utils import write_text_report
+    from burst.dev.plot_utils import write_text_report  # noqa: PLC0415
 
     write_text_report(
         all_figs,
@@ -1982,28 +1984,28 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
 
 def analyse_run(
     run_dir: Path,
-    existing_analysis: dict,
+    _existing_analysis: dict,
     n_seeds: int = 3,
     n_prune_levels: int = 10,
-    relearn_steps: int = 50,
+    _relearn_steps: int = 50,
 ) -> dict:
     """Run all 10 new metrics on a single run directory."""
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
-    with open(cfg_path) as f:
+    with cfg_path.open() as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
 
-    with open(logs_dir / "_data.pkl", "rb") as f:
-        target_pool, _bg_pool, _, _, _ = pickle.load(f)
+    with (logs_dir / "_data.pkl").open("rb") as f:
+        target_pool, _bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
-    with open(logs_dir / "all_results.pkl", "rb") as f:
-        all_results = pickle.load(f)
+    with (logs_dir / "all_results.pkl").open("rb") as f:
+        all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
     run_name = run_dir.name
@@ -2034,12 +2036,6 @@ def analyse_run(
         ckpt_root, all_results, n_seeds=n_seeds
     )
 
-    # DISABLED — re-enable by uncommenting the block below
-    # print("\n[3/10] Relearning efficiency...", flush=True)
-    # result["relearning_efficiency"] = compute_relearning_efficiency(
-    #     ckpt_root, all_results, burst_docs_BL, other_docs_BL, prompt_len,
-    #     n_seeds=n_seeds, relearn_steps=relearn_steps)
-
     result["linear_mode_connectivity"] = compute_linear_mode_connectivity(
         ckpt_root, all_results, burst_docs_BL, prompt_len, n_seeds=n_seeds
     )
@@ -2057,6 +2053,7 @@ def analyse_run(
 
 
 def main() -> None:
+    """CLI entrypoint for running all 10 new mechanistic metrics."""
     parser = argparse.ArgumentParser(
         description="10 new post-hoc mechanistic metrics for burstiness runs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2074,19 +2071,19 @@ def main() -> None:
     parser.add_argument("--relearn-steps", type=int, default=50)
     args = parser.parse_args()
 
-    with open(args.existing_results, "rb") as f:
-        existing_analyses = pickle.load(f)
+    with args.existing_results.open("rb") as f:
+        existing_analyses = pickle.load(f)  # noqa: S301
 
     existing_by_name = {a["run_name"]: a for a in existing_analyses}
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     per_run_results = []
-    for run_dir in args.run_dirs:
-        run_dir = Path(run_dir)
-        existing = existing_by_name.get(run_dir.name, {})
+    for run_dir_arg in args.run_dirs:
+        run_dir_path = Path(run_dir_arg)
+        existing = existing_by_name.get(run_dir_path.name, {})
         r = analyse_run(
-            run_dir,
+            run_dir_path,
             existing,
             n_seeds=args.n_seeds,
             n_prune_levels=args.n_prune_levels,
@@ -2120,7 +2117,7 @@ def main() -> None:
     new_results["burst_position_comparison"] = bpc
 
     results_path = args.out_dir / "results.pkl"
-    with open(results_path, "wb") as f:
+    with results_path.open("wb") as f:
         pickle.dump({"per_run": per_run_results, "by_metric": new_results}, f)
 
     make_dashboard(new_results, existing_analyses, args.out_dir)

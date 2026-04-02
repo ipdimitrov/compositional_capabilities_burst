@@ -102,7 +102,7 @@ def _plot_lr_curves(bundle: dict, out_dir: Path) -> Path:
     return _save(fig, out_dir / "lr_schedule.png")
 
 
-def _plot_overlay(
+def _plot_overlay(  # noqa: PLR0913
     bundle: dict, out_dir: Path, metric: str, ylabel: str, title: str, filename: str
 ) -> Path:
     """Plot a single metric overlaid across all schedules."""

@@ -61,7 +61,7 @@ Dimension key:
     T: n_token_positions (= L - 1, since model sees tokens :-1)
 """
 
-from burst.core.activations import collect_activations_KPTN
+from burst.core.activations import collect_activations_KPTN  # noqa: E402
 
 GPU_PROBE_LR = 1e-2
 GPU_PROBE_EPOCHS = 200
@@ -161,7 +161,7 @@ def fit_probes_at_checkpoint(
     return {"train_acc_KT": train_acc_KT}
 
 
-def probe_from_checkpoints(
+def probe_from_checkpoints(  # noqa: PLR0913
     job: dict,
     ckpt_dir: Path,
     other_docs_BL: np.ndarray,
@@ -198,7 +198,7 @@ def probe_from_checkpoints(
     }
 
 
-def retrain_and_probe(
+def retrain_and_probe(  # noqa: PLR0913
     job: dict,
     target_pool: dict,
     bg_pool: dict,
@@ -245,9 +245,9 @@ def _worker_main() -> None:
     wargs = parser.parse_args()
 
     with Path(wargs.job_path).open("rb") as f:
-        job = pickle.load(f)
+        job = pickle.load(f)  # noqa: S301
     with Path(wargs.data_path).open("rb") as f:
-        tp, bp, other_docs, burst_docs = pickle.load(f)
+        tp, bp, other_docs, burst_docs = pickle.load(f)  # noqa: S301
 
     ckpt_dir = job.get("ckpt_dir")
     if ckpt_dir and Path(ckpt_dir).exists():
@@ -268,9 +268,9 @@ def _worker_main() -> None:
         pickle.dump(result, f)
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0915
     """Run linear probes across training checkpoints."""
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(
         description="Linear probes for Other-vs-Burst representation analysis"

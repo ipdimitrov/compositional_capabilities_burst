@@ -110,7 +110,7 @@ def _filter_normalise(
 
 
 @torch.no_grad()
-def compute_noise_robustness(
+def compute_noise_robustness(  # noqa: PLR0913, PLR0915
     ckpt_root: Path,
     all_results: list[dict],
     burst_docs_BL: np.ndarray,
@@ -233,7 +233,7 @@ def compute_noise_robustness(
 
 
 @torch.no_grad()
-def compute_directed_noise_robustness(
+def compute_directed_noise_robustness(  # noqa: C901, PLR0912, PLR0913, PLR0915
     ckpt_root: Path,
     all_results: list[dict],
     burst_docs_BL: np.ndarray,
@@ -305,14 +305,14 @@ def compute_directed_noise_robustness(
 
             tau_flat = torch.cat([(sd_peak[k] - sd_pre[k]).view(-1) for k in sd_peak])
             tau_norm = tau_flat.norm()
-            if tau_norm < 1e-10:
+            if tau_norm < _NORM_EPS:
                 continue
             tau_unit = tau_flat / tau_norm
 
             rand_dir = torch.randn_like(tau_flat)
             rand_dir -= (rand_dir @ tau_unit) * tau_unit
             rand_norm = rand_dir.norm()
-            if rand_norm < 1e-10:
+            if rand_norm < _NORM_EPS:
                 continue
             rand_unit = rand_dir / rand_norm
 
@@ -331,12 +331,12 @@ def compute_directed_noise_robustness(
                 sd_undo = {}
                 sd_rand = {}
                 offset = 0
-                for k in sd_peak:
-                    numel = sd_peak[k].numel()
-                    t_chunk = tau_unit[offset : offset + numel].view(sd_peak[k].shape)
-                    r_chunk = rand_unit[offset : offset + numel].view(sd_peak[k].shape)
-                    sd_undo[k] = (sd_peak[k] + eps * t_chunk).to(DEVICE)
-                    sd_rand[k] = (sd_peak[k] + eps * r_chunk).to(DEVICE)
+                for k, v_peak in sd_peak.items():
+                    numel = v_peak.numel()
+                    t_chunk = tau_unit[offset : offset + numel].view(v_peak.shape)
+                    r_chunk = rand_unit[offset : offset + numel].view(v_peak.shape)
+                    sd_undo[k] = (v_peak + eps * t_chunk).to(DEVICE)
+                    sd_rand[k] = (v_peak + eps * r_chunk).to(DEVICE)
                     offset += numel
 
                 net.load_state_dict(sd_undo)
@@ -359,7 +359,7 @@ def compute_directed_noise_robustness(
                 base = mean_undo[0] if mean_undo[0] > 0 else 1.0
                 drop_u = base - u
                 drop_r = base - r
-                narrowness.append(drop_u / (drop_r + 1e-10) if drop_r > 1e-10 else 0.0)
+                narrowness.append(drop_u / (drop_r + _NORM_EPS) if drop_r > _NORM_EPS else 0.0)
         else:
             mean_undo = mean_rand = [float("nan")] * len(epsilons)
             narrowness = [float("nan")] * len(epsilons)
@@ -457,7 +457,8 @@ def compute_weight_drift_correlation(
 
         per_schedule[sched] = {"drifts": drifts, "aucs": aucs}
 
-    r_val = float(np.corrcoef(all_drifts, all_aucs)[0, 1]) if len(all_drifts) >= 2 else float("nan")
+    has_enough = len(all_drifts) >= _MIN_SAMPLES_FOR_CORR
+    r_val = float(np.corrcoef(all_drifts, all_aucs)[0, 1]) if has_enough else float("nan")
 
     return {
         "per_schedule": per_schedule,
@@ -474,7 +475,7 @@ def compute_weight_drift_correlation(
 
 
 @torch.no_grad()
-def compute_loss_surface(
+def compute_loss_surface(  # noqa: PLR0913, PLR0915
     ckpt_root: Path,
     all_results: list[dict],
     burst_docs_BL: np.ndarray,
@@ -617,11 +618,12 @@ def compute_loss_surface(
 # ---------------------------------------------------------------------------
 
 
-def make_dashboard(results: dict, out_dir: Path) -> None:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
+    """Render basin-geometry dashboard to HTML and PNG charts."""
+    import plotly.graph_objects as go  # noqa: PLC0415
+    from plotly.subplots import make_subplots  # noqa: PLC0415
 
-    from burst.dev.plot_utils import save_png as _save_png
+    from burst.dev.plot_utils import save_png as _save_png  # noqa: PLC0415
 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
@@ -752,7 +754,8 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             _add(f"noise_other_delta_{run_name}", fig_other_delta)
 
             # Differential sensitivity: burst drop / other drop at sigma=0.004
-            sigma_idx = NOISE_SIGMAS.index(0.004) if 0.004 in NOISE_SIGMAS else -1
+            has_threshold = NOISE_SIGMA_THRESHOLD in NOISE_SIGMAS
+            sigma_idx = NOISE_SIGMAS.index(NOISE_SIGMA_THRESHOLD) if has_threshold else -1
             if sigma_idx >= 0:
                 burst_drops = [
                     nr[s]["mean_burst_accs"][0] - nr[s]["mean_burst_accs"][sigma_idx]
@@ -1101,7 +1104,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
     with html_path.open("w") as f:
         f.write("".join(html_parts))
 
-    from burst.dev.plot_utils import write_text_report
+    from burst.dev.plot_utils import write_text_report  # noqa: PLC0415
 
     write_text_report(
         all_figs,
@@ -1115,12 +1118,13 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def analyse_run(
+def analyse_run(  # noqa: PLR0913
     run_dir: Path,
     n_seeds: int = 3,
     noise_sigmas: list[float] = NOISE_SIGMAS,
     surface_grid: int = SURFACE_GRID,
     surface_range: float = SURFACE_RANGE,
+    *,
     skip_surface: bool = False,
 ) -> dict:
     """Run all basin metrics on a single run directory."""
@@ -1131,14 +1135,14 @@ def analyse_run(
     parse_run_config(run_cfg)
 
     with logs_dir / "_data.pkl".open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
     with logs_dir / "all_results.pkl".open("rb") as f:
-        all_results = pickle.load(f)
+        all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
     result: dict = {}
@@ -1188,6 +1192,7 @@ def analyse_run(
 
 
 def main() -> None:
+    """CLI entry point for basin geometry metrics."""
     parser = argparse.ArgumentParser(
         description="Basin geometry metrics: noise robustness, weight drift, loss surface.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1205,16 +1210,16 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     all_run_results: dict[str, dict] = {}
-    for run_dir in args.run_dirs:
-        run_dir = Path(run_dir)
+    for run_dir_arg in args.run_dirs:
+        run_path = Path(run_dir_arg)
         r = analyse_run(
-            run_dir,
+            run_path,
             n_seeds=args.n_seeds,
             surface_grid=args.surface_grid,
             surface_range=args.surface_range,
             skip_surface=args.skip_surface,
         )
-        all_run_results[run_dir.name] = r
+        all_run_results[run_path.name] = r
 
     results_path = args.out_dir / "results.pkl"
     with results_path.open("wb") as f:

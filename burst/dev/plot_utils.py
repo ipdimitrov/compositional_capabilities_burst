@@ -24,14 +24,14 @@ def _plotly_to_mpl_color(
     return c
 
 
-def plotly_to_png_matplotlib(
+def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
     fig_plotly: Figure, path: str, width: int = 1200, height: int = 600,
 ) -> None:
     """Render a Plotly figure to PNG via matplotlib."""
-    import matplotlib as mpl
+    import matplotlib as mpl  # noqa: PLC0415
 
     mpl.use("Agg")
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as plt  # noqa: PLC0415
 
     fig_data = fig_plotly.to_dict()
     traces = fig_data.get("data", [])
@@ -127,7 +127,7 @@ def _fmt(v: float | str, precision: int = 5) -> str:
 _INLINE_THRESHOLD = 20
 
 
-def _trace_to_text(trace: dict) -> list[str]:
+def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
     """Convert a single Plotly trace dict to compact text lines."""
     lines: list[str] = []
     ttype = trace.get("type", "scatter")
@@ -242,7 +242,7 @@ def _trace_to_text(trace: dict) -> list[str]:
     return lines
 
 
-def fig_to_text(
+def fig_to_text(  # noqa: C901
     fig: Figure, title: str = "", description: dict | None = None,
 ) -> str:
     """Convert a Plotly figure to a compact machine-readable text block."""

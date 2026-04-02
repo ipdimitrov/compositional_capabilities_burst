@@ -75,7 +75,7 @@ def weight_drift_l2(sd_ref: dict[str, torch.Tensor], sd_now: dict[str, torch.Ten
     per_layer = {}
     total_sq = 0.0
     for k, v_ref in sd_ref.items():
-        assert k in sd_now, f"Missing key {k} in sd_now"
+        assert k in sd_now, f"Missing key {k} in sd_now"  # noqa: S101
         delta = sd_now[k].float() - v_ref.float()
         l2 = delta.norm().item()
         per_layer[_layer_group(k)] = l2
@@ -89,7 +89,7 @@ def weight_cosine_per_layer(
     """Cosine similarity between weight vectors per layer."""
     result = {}
     for k, v_ref in sd_ref.items():
-        assert k in sd_now, f"Missing key {k} in sd_now"
+        assert k in sd_now, f"Missing key {k} in sd_now"  # noqa: S101
         a = v_ref.float().flatten()
         b = sd_now[k].float().flatten()
         cos = F.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
@@ -310,7 +310,7 @@ def analyze(data: dict, pt: dict, ft_results: list[dict], fg_results: list[dict]
     net_pt = load_model(pt["ckpt_path"], compile_model=False, **model_cfg)
 
     results = {}
-    assert len(ft_results) == len(fg_results), "finetune/forget result lists must match"
+    assert len(ft_results) == len(fg_results), "finetune/forget result lists must match"  # noqa: S101
     for ft, fg in zip(ft_results, fg_results, strict=True):
         tag = ft["tag"]
         sd_ft = load_sd(ft["ckpt_path"])

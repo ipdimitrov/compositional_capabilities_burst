@@ -28,7 +28,7 @@ MODEL_DEFAULTS = {
 }
 
 
-def make_model(
+def make_model(  # noqa: PLR0913
     vocab_size: int, context_size: int, *,
     n_layer: int = 6, n_embd: int = 120, n_head: int = 4, compile_model: bool = True,
 ) -> torch.nn.Module:
@@ -49,7 +49,7 @@ def save_model(net: torch.nn.Module, path: str | Path) -> None:
     torch.save(raw.state_dict(), path)
 
 
-def load_model(
+def load_model(  # noqa: PLR0913
     path: str | Path, vocab_size: int, context_size: int, *,
     n_layer: int = 6, n_embd: int = 120, n_head: int = 4, compile_model: bool = True,
 ) -> torch.nn.Module:

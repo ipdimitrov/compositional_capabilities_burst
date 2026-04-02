@@ -108,7 +108,7 @@ def _extract_adam_delta_named(
 _ETA_FLOOR = 1e-12
 
 
-def _eval_loss_at_eta(
+def _eval_loss_at_eta(  # noqa: PLR0913
     net: nanoGPT,
     sd_base: dict[str, torch.Tensor],
     delta: dict[str, torch.Tensor],
@@ -122,11 +122,12 @@ def _eval_loss_at_eta(
     net.load_state_dict(perturbed)
     net.eval()
     with torch.no_grad():
-        logits_BTV = net(inp_BT).float()
-        return F.cross_entropy(logits_BTV.reshape(-1, vocab_size), tgt_BT.reshape(-1)).item()
+        return F.cross_entropy(
+            net(inp_BT).float().reshape(-1, vocab_size), tgt_BT.reshape(-1)
+        ).item()
 
 
-def _critical_lr_line_search(
+def _critical_lr_line_search(  # noqa: PLR0913
     net: nanoGPT,
     sd_base: dict[str, torch.Tensor],
     delta: dict[str, torch.Tensor],
@@ -206,7 +207,7 @@ class SharpnessTrace:
     steps: list[StepSharpness] = field(default_factory=list)
 
 
-def _measure_sharpness_at_step(
+def _measure_sharpness_at_step(  # noqa: PLR0913
     net: nanoGPT,
     optimizer: torch.optim.AdamW,
     burst_inp_BT: torch.Tensor,
@@ -258,7 +259,7 @@ def _measure_sharpness_at_step(
 # ---------------------------------------------------------------------------
 
 
-def compute_sharpness_dynamics(
+def compute_sharpness_dynamics(  # noqa: C901, PLR0913, PLR0915
     job: dict,
     target_pool: dict,
     bg_pool: dict,
@@ -375,7 +376,7 @@ def plot_sharpness_dynamics(
     out_dir: Path,
 ) -> None:
     """Plot per-step critical sharpness for each schedule, with EoS threshold."""
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as plt  # noqa: PLC0415
 
     out_dir.mkdir(parents=True, exist_ok=True)
     schedules = [s for s in SCHEDULE_ORDER if s in traces]
@@ -443,7 +444,7 @@ def _plot_sharpness_vs_eos(
     out_dir: Path,
 ) -> None:
     """Plot lambda_c / EoS_threshold ratio -- values near 1.0 mean Edge of Stability."""
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as plt  # noqa: PLC0415
 
     _fig, ax = plt.subplots(figsize=(14, 5))
     schedules = [s for s in SCHEDULE_ORDER if s in traces]
@@ -480,7 +481,7 @@ def _plot_sharpness_vs_eos(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main() -> None:  # noqa: D103
     parser = argparse.ArgumentParser(description="Per-step critical sharpness dynamics")
     parser.add_argument("run_dirs", nargs="+", help="Run directories")
     parser.add_argument("--n-seeds", type=int, default=3)
@@ -502,13 +503,13 @@ def main() -> None:
         if not pkl_path.exists():
             pkl_path = Path(run_dir) / "all_results.pkl"
         with pkl_path.open("rb") as f:
-            all_results = pickle.load(f)
+            all_results = pickle.load(f)  # noqa: S301
 
         data_path = logs_dir / "_data.pkl"
         if not data_path.exists():
             data_path = Path(run_dir) / "_data.pkl"
         with data_path.open("rb") as f:
-            target_pool, bg_pool, eval_docs, _prompt_len, _ = pickle.load(f)
+            target_pool, bg_pool, eval_docs, _prompt_len, _ = pickle.load(f)  # noqa: S301
 
         burst_eval = eval_docs.get(CLASS_BURST, next(iter(eval_docs.values())))
         other_eval = eval_docs.get(CLASS_OTHER, next(iter(eval_docs.values())))

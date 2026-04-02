@@ -226,7 +226,7 @@ def learned_probe_accuracy_K(  # noqa: N802
     return acc_K
 
 
-def probe_from_checkpoints_at_steps(
+def probe_from_checkpoints_at_steps(  # noqa: PLR0913
     job: dict,
     ckpt_dir: Path,
     probe_steps: list[int],
@@ -263,7 +263,7 @@ def probe_from_checkpoints_at_steps(
     return results_by_step
 
 
-def retrain_and_probe_at_steps(
+def retrain_and_probe_at_steps(  # noqa: PLR0913
     job: dict,
     target_pool: dict,
     bg_pool: dict,
@@ -300,7 +300,7 @@ def retrain_and_probe_at_steps(
 build_regime_docs = build_probe_docs
 
 
-def probe_all_layers(
+def probe_all_layers(  # noqa: PLR0913
     net: nanoGPT,
     other_docs_BL: np.ndarray,
     burst_docs_BL: np.ndarray,
@@ -636,7 +636,7 @@ def plot_combined_diffs(
 
 def _worker_main() -> None:
     """Subprocess entry: load pickled args, run single probe job, save results."""
-    import warnings
+    import warnings  # noqa: PLC0415
 
     warnings.filterwarnings("ignore", message=".*backward hook.*")
 
@@ -652,9 +652,9 @@ def _worker_main() -> None:
     wargs = parser.parse_args()
 
     with Path(wargs.job_path).open("rb") as f:
-        job = pickle.load(f)
+        job = pickle.load(f)  # noqa: S301
     with Path(wargs.data_path).open("rb") as f:
-        tp, bp, other_docs, burst_docs = pickle.load(f)
+        tp, bp, other_docs, burst_docs = pickle.load(f)  # noqa: S301
 
     ckpt_dir = job.get("ckpt_dir")
     if ckpt_dir and Path(ckpt_dir).exists():
@@ -687,7 +687,7 @@ def _worker_main() -> None:
         pickle.dump({"label": job["label"], "step_results": step_results}, f)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0915
     """Run next-token regime probes for a given training run."""
     parser = argparse.ArgumentParser(
         description="Next-token probes (logit lens + learned) for Other vs Burst regimes"
@@ -713,7 +713,7 @@ def main() -> None:
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:

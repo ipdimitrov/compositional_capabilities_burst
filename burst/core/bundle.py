@@ -61,7 +61,7 @@ def build_and_save_core_bundle(run_dir: str | Path) -> Path:
 def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
     """Assemble the full core bundle dict from training results."""
     results, cfg = load_results(run_dir)
-    assert results, "expected at least one result in all_results.pkl"
+    assert results, "expected at least one result in all_results.pkl"  # noqa: S101
 
     grouped = _group_by_schedule(results)
     schedules = ordered_schedules(grouped.keys())
@@ -105,7 +105,7 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
         if not path.exists():
             continue
         with path.open("rb") as f:
-            results = pickle.load(f)
+            results = pickle.load(f)  # noqa: S301
         for result in results:
             grad_log = result.get("grad_sim_log")
             if not grad_log or not grad_log.get("step"):

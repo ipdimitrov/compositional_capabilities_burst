@@ -32,7 +32,7 @@ def _cat(pool: dict[tuple, np.ndarray], fallback_cols: int = 1) -> np.ndarray:
     return np.concatenate(list(pool.values()))
 
 
-def make_data(
+def make_data(  # noqa: PLR0913, PLR0915
     *,
     n_alph: int = N_ALPH,
     seq_len: int = SEQ_LEN,

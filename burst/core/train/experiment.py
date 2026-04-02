@@ -125,12 +125,12 @@ class DepthNData:
       S [FN ... F1] ' ' [input] ' ' [after F1] ' ' ... ' ' [after FN]
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self, n_alph: int, seq_len: int, n_a: int,
         depth: int, burst_pos: int, seed: int,
     ) -> None:
         """Initialise bijections, vocabulary, and task splits."""
-        assert 1 <= burst_pos <= depth, "burst_pos must be in [1, depth]"
+        assert 1 <= burst_pos <= depth, "burst_pos must be in [1, depth]"  # noqa: S101
         self.n_alph = n_alph
         self.seq_len = seq_len
         self.n_a = n_a
@@ -263,7 +263,7 @@ def build_data(
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
 
 
-def run_pretrain(
+def run_pretrain(  # noqa: C901, PLR0913, PLR0915
     cfg: dict,
     pretrain_steps: int,
     bg_pool: dict,
@@ -283,8 +283,8 @@ def run_pretrain(
     Returns a pretrain log dict with step/loss/phase/ACC_OTHER/ACC_BURST lists
     so charts can show the pretraining trajectory.
     """
-    from burst.config import EVAL_KEYS, PHASE_PRE_BURST
-    from burst.core.train.worker import eval_free_gen, eval_loss
+    from burst.config import EVAL_KEYS, PHASE_PRE_BURST  # noqa: PLC0415
+    from burst.core.train.worker import eval_free_gen, eval_loss  # noqa: PLC0415
 
     set_seed(seed)
     net = make_net(cfg)
@@ -371,7 +371,7 @@ def run_pretrain(
     return log
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Run the full burst training experiment."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-tag", default=None)
@@ -478,7 +478,7 @@ def main() -> None:
             eval_every=base_cfg["eval_every"],
             seed=args.seed,
         )
-        assert ACC_OTHER in pretrain_log, f"pretrain_log missing {ACC_OTHER}"
+        assert ACC_OTHER in pretrain_log, f"pretrain_log missing {ACC_OTHER}"  # noqa: S101
         peak_acc_other = max(pretrain_log[ACC_OTHER])
         if peak_acc_other >= PRETRAIN_ACC_THRESHOLD:
             logger.info("  Pretrain OK: peak %s=%.4f", ACC_OTHER, peak_acc_other)
@@ -654,7 +654,7 @@ def main() -> None:
                 reported_jobs.add(label)
                 n_done += 1
                 with rp.open("rb") as f:
-                    r = pickle.load(f)
+                    r = pickle.load(f)  # noqa: S301
                 thresholds = TrainConfig().reversion_thresholds
                 first_key = reversion_life_key(thresholds[0])
                 first_lbl = reversion_life_label(thresholds[0])
@@ -696,7 +696,7 @@ def main() -> None:
         rp = logs_dir / f"{job['label']}.pkl"
         if rp.exists():
             with rp.open("rb") as f:
-                all_results.append(pickle.load(f))
+                all_results.append(pickle.load(f))  # noqa: S301
     with (logs_dir / "all_results.pkl").open("wb") as f:
         pickle.dump(all_results, f)
 

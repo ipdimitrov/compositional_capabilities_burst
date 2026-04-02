@@ -264,9 +264,9 @@ def _worker_main() -> None:
     args = parser.parse_args()
 
     with Path(args.job_path).open("rb") as f:
-        job = pickle.load(f)
+        job = pickle.load(f)  # noqa: S301
     with Path(args.data_path).open("rb") as f:
-        other_docs_BL, burst_docs_BL, prompt_len = pickle.load(f)
+        other_docs_BL, burst_docs_BL, prompt_len = pickle.load(f)  # noqa: S301
 
     cfg = job["cfg"]
     n_a = job["n_a"]
@@ -308,7 +308,7 @@ def _worker_main() -> None:
         pickle.dump(result, f)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Run ADL analysis across all checkpoints in a training run."""
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -317,7 +317,7 @@ def main() -> None:
     args = parser.parse_args()
 
     run_dir = args.run_dir
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
@@ -336,7 +336,7 @@ def main() -> None:
         return
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
@@ -360,7 +360,7 @@ def main() -> None:
         if not pkl_path.exists():
             continue
         with pkl_path.open("rb") as f:
-            result = pickle.load(f)
+            result = pickle.load(f)  # noqa: S301
         cfg = result["config"]
 
         ckpt_files = sorted(
@@ -503,7 +503,7 @@ def main() -> None:
     all_results_path = logs_dir / "all_results.pkl"
     if all_results_path.exists():
         with all_results_path.open("rb") as f:
-            all_results = pickle.load(f)
+            all_results = pickle.load(f)  # noqa: S301
         for r in all_results:
             lbl = r["label"]
             if lbl in per_label:

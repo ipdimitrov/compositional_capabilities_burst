@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 def sched_order(s: str) -> int:
-    assert s in SCHEDULE_ORDER, f"Unknown schedule: {s}"
+    assert s in SCHEDULE_ORDER, f"Unknown schedule: {s}"  # noqa: S101
     return SCHEDULE_ORDER.index(s)
 
 
@@ -45,7 +45,7 @@ def burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
 
 @torch.no_grad()
 def free_gen_acc(net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int) -> float:
-    assert docs_BL.shape[0] > 0, "free_gen_acc called with empty docs"
+    assert docs_BL.shape[0] > 0, "free_gen_acc called with empty docs"  # noqa: S101
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     _B, L = docs_t.shape
@@ -56,7 +56,7 @@ def free_gen_acc(net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int) -> 
 
 @torch.no_grad()
 def cross_entropy_loss(net: torch.nn.Module, docs_BL: np.ndarray, max_docs: int = 256) -> float:
-    assert docs_BL.shape[0] > 0, "cross_entropy_loss called with empty docs"
+    assert docs_BL.shape[0] > 0, "cross_entropy_loss called with empty docs"  # noqa: S101
     net.eval()
     n = min(max_docs, docs_BL.shape[0])
     rng = np.random.default_rng()

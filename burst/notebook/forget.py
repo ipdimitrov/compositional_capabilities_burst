@@ -37,7 +37,7 @@ _rng = np.random.default_rng()
 ACC_NEAR_ZERO = 1e-6
 
 
-def forget(
+def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     data: ExperimentData,
     finetune_ckpt: str | Path,
     out_dir: str | Path,
@@ -88,7 +88,7 @@ def forget(
     sd_ft = state_dict_cpu(net)
     sd_pt = None
     if pretrain_ckpt is not None:
-        from burst.notebook.interp import load_sd
+        from burst.notebook.interp import load_sd  # noqa: PLC0415
 
         sd_pt = load_sd(pretrain_ckpt)
 

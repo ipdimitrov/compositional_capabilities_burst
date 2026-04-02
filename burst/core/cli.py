@@ -60,7 +60,7 @@ class CliCommand:
     gradients_args: list[str]
 
 
-def _parse_args() -> CliCommand:
+def _parse_args() -> CliCommand:  # noqa: C901, PLR0915
     """Parse CLI arguments into a CliCommand."""
     parser = argparse.ArgumentParser(description="Canonical burst pipeline CLI.")
     parser.add_argument("--seed", type=int, default=DEFAULT_REPRO_SEED)
@@ -190,7 +190,7 @@ def main() -> None:
         return
 
     if cmd.mode == "gradients":
-        assert cmd.run_dir is not None
+        assert cmd.run_dir is not None  # noqa: S101
         write_repro_manifest(
             cmd.run_dir,
             mode=cmd.mode,
@@ -215,7 +215,7 @@ def main() -> None:
         )
         return
 
-    assert cmd.run_dir is not None
+    assert cmd.run_dir is not None  # noqa: S101
     bundle_path, chart_paths = run_core_analysis(
         cmd.run_dir,
         build_bundle=cmd.mode in {"bundle", "pipeline"},

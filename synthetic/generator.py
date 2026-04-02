@@ -470,7 +470,7 @@ class SyntheticEvalCombinatorial(SyntheticEval):
         return np.concatenate(document)
 
 
-    def get_task_list(self, depth: int, choices: int) -> dict[tuple[int, int], list[tuple]]:
+    def get_task_list(self, depth: int, choices: int) -> dict[tuple[int, int], list[tuple]]:  # noqa: C901
         """Build task list organized by (num_identity, num_swap)."""
         task_list = {}
 

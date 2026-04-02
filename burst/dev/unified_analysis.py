@@ -21,26 +21,25 @@ Dimension key:
 """
 
 import argparse
+import contextlib
 import json
 import logging
-import os
 import pickle
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from itertools import combinations
-from typing import Any
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-import contextlib
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from burst.config import (
     ACC_BURST,
@@ -50,15 +49,10 @@ from burst.config import (
     parse_run_config,
 )
 from burst.core.train_utils import DEVICE, make_net_bare
-from burst.dev._shared import (
-    free_gen_acc as _free_gen_acc,
-)
-from burst.dev._shared import (
-    sched_color as _color,
-)
-from burst.dev._shared import (
-    sched_order as _sched_order,
-)
+from burst.dev._shared import ckpt_files as _ckpt_files
+from burst.dev._shared import free_gen_acc as _free_gen_acc
+from burst.dev._shared import sched_color as _color
+from burst.dev._shared import sched_order as _sched_order
 from burst.dev.plot_utils import save_png as _save_png
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
@@ -75,6 +69,8 @@ _rng = np.random.default_rng()
 
 @dataclass
 class SeedCheckpoints:
+    """Preloaded checkpoint data for a single seed."""
+
     label: str
     cfg: dict
     r: dict
@@ -91,7 +87,7 @@ class SeedCheckpoints:
 
 
 @torch.no_grad()
-def _batch_eval_hybrids(
+def _batch_eval_hybrids(  # noqa: PLR0913
     cfg: dict,
     hybrid_sds: list[dict[str, torch.Tensor]],
     burst_sub: np.ndarray,
@@ -104,7 +100,7 @@ def _batch_eval_hybrids(
     Returns list of (burst_acc, other_acc) in the same order as hybrid_sds.
     """
     if max_concurrent is None:
-        from burst.core.gpu import gpu_cfg
+        from burst.core.gpu import gpu_cfg  # noqa: PLC0415
 
         max_concurrent = gpu_cfg.frankenstein_workers
 
@@ -140,7 +136,7 @@ def _batch_eval_hybrids(
         nets = [make_net_bare(cfg) for _ in range(n_chunk)]
         streams = [torch.cuda.Stream() for _ in range(n_chunk)]
 
-        for i, (net, sd, stream) in enumerate(zip(nets, chunk, streams, strict=True)):
+        for _i, (net, sd, stream) in enumerate(zip(nets, chunk, streams, strict=True)):
             with torch.cuda.stream(stream):
                 net.load_state_dict(sd)
                 net.eval()
@@ -173,10 +169,7 @@ def _batch_eval_hybrids(
     return results
 
 
-from burst.dev._shared import ckpt_files as _ckpt_files
-
-
-def _get_key_steps(files: dict[int, Path], r: dict):
+def _get_key_steps(files: dict[int, Path], r: dict) -> tuple[int, int, int]:
     """Find pre-burst, peak-burst, and end-of-reversion checkpoint steps.
 
     Checkpoint files are numbered relative to burst start (P=0 in
@@ -310,26 +303,26 @@ def _build_hybrid_sd(
     cut_after_block: int,
 ) -> dict[str, torch.Tensor]:
     hybrid = {}
-    for key in sd_bottom:
+    for key, val in sd_bottom.items():
         if (
             key.startswith(("transformer.wte.", "transformer.wpe.", "transformer.drop."))
         ):
-            hybrid[key] = sd_bottom[key]
+            hybrid[key] = val
         elif key.startswith("transformer.h."):
             block_idx = int(key.split(".")[2])
             if block_idx <= cut_after_block:
-                hybrid[key] = sd_bottom[key]
+                hybrid[key] = val
             else:
                 hybrid[key] = sd_top[key]
         elif key.startswith(("transformer.ln_f.", "LM_head.")):
             hybrid[key] = sd_top[key]
         else:
-            hybrid[key] = sd_bottom[key]
+            hybrid[key] = val
     return hybrid
 
 
 @torch.no_grad()
-def compute_frankenstein(
+def compute_frankenstein(  # noqa: PLR0913
     preloaded: dict[str, list[SeedCheckpoints]],
     burst_sub: np.ndarray,
     other_sub: np.ndarray,
@@ -337,6 +330,7 @@ def compute_frankenstein(
     n_layer: int,
     n_seeds: int = 10,
 ) -> dict:
+    """Evaluate layer-swap Frankenstein hybrids across schedules."""
     cut_points = list(range(-1, n_layer))
     results = {}
 
@@ -371,7 +365,7 @@ def compute_frankenstein(
 
 
 @torch.no_grad()
-def compute_cross_burst_frankenstein(
+def compute_cross_burst_frankenstein(  # noqa: PLR0913
     preloaded: dict[str, list[SeedCheckpoints]],
     burst_sub: np.ndarray,
     other_sub: np.ndarray,
@@ -380,6 +374,7 @@ def compute_cross_burst_frankenstein(
     n_seeds: int = 10,
     schedule_pairs: list[tuple[str, str]] | None = None,
 ) -> dict:
+    """Evaluate cross-schedule Frankenstein layer-swaps."""
     if schedule_pairs is None:
         available = sorted(preloaded.keys(), key=_sched_order)
         schedule_pairs = list(combinations(available, 2))
@@ -441,10 +436,11 @@ def compute_lmc_dual(
     preloaded: dict[str, list[SeedCheckpoints]],
     burst_sub: np.ndarray,
     other_sub: np.ndarray,
-    prompt_len: int,
+    _prompt_len: int,
     n_seeds: int = 10,
     n_alphas: int = 11,
 ) -> dict:
+    """Evaluate LMC loss barriers between checkpoint pairs."""
     alphas = np.linspace(0, 1, n_alphas).tolist()
     burst_t = torch.as_tensor(burst_sub, dtype=torch.long, device=DEVICE)
     other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
@@ -468,17 +464,19 @@ def compute_lmc_dual(
                 for a in alphas
             ]
 
-            def _eval_batch(interps):
+            def _eval_batch(
+                interps: list[dict], _net: nanoGPT = net, _V: int = V,
+            ) -> tuple[list[float], list[float]]:
                 burst_losses, other_losses = [], []
                 for interp in interps:
-                    net.load_state_dict(interp)
-                    net.eval()
+                    _net.load_state_dict(interp)
+                    _net.eval()
                     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
                         bl = F.cross_entropy(
-                            net(burst_inp).float().reshape(-1, V), burst_tgt.reshape(-1)
+                            _net(burst_inp).float().reshape(-1, _V), burst_tgt.reshape(-1)
                         ).item()
                         ol = F.cross_entropy(
-                            net(other_inp).float().reshape(-1, V), other_tgt.reshape(-1)
+                            _net(other_inp).float().reshape(-1, _V), other_tgt.reshape(-1)
                         ).item()
                     burst_losses.append(bl)
                     other_losses.append(ol)
@@ -487,7 +485,7 @@ def compute_lmc_dual(
             pre_peak_burst, pre_peak_other = _eval_batch(all_interps_pre_peak)
             peak_rev_burst, peak_rev_other = _eval_batch(all_interps_peak_rev)
 
-            def _barrier(curve):
+            def _barrier(curve: list[float]) -> float:
                 ep = (curve[0] + curve[-1]) / 2
                 return max(curve) - ep
 
@@ -515,7 +513,7 @@ def compute_lmc_dual(
 
 
 @torch.no_grad()
-def compute_ema_dual(
+def compute_ema_dual(  # noqa: PLR0913
     preloaded: dict[str, list[SeedCheckpoints]],
     burst_sub: np.ndarray,
     other_sub: np.ndarray,
@@ -523,6 +521,7 @@ def compute_ema_dual(
     n_seeds: int = 10,
     n_alphas: int = 51,
 ) -> dict:
+    """Evaluate EMA interpolation paths between checkpoint pairs."""
     alphas = np.linspace(0.0, 1.0, n_alphas).tolist()
     results = {}
 
@@ -540,18 +539,20 @@ def compute_ema_dual(
                 for a in alphas
             ]
 
-            def _eval_path(interps):
+            def _eval_path(
+                interps: list[dict], _net: nanoGPT = net,
+            ) -> tuple[list[float], list[float]]:
                 burst_accs, other_accs = [], []
                 for interp in interps:
-                    net.load_state_dict(interp)
-                    burst_accs.append(_free_gen_acc(net, burst_sub, prompt_len))
-                    other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
+                    _net.load_state_dict(interp)
+                    burst_accs.append(_free_gen_acc(_net, burst_sub, prompt_len))
+                    other_accs.append(_free_gen_acc(_net, other_sub, prompt_len))
                 return burst_accs, other_accs
 
             pre_peak_burst, pre_peak_other = _eval_path(all_pre_peak)
             rev_peak_burst, rev_peak_other = _eval_path(all_rev_peak)
 
-            def _cliff_alpha(accs, threshold: float = 0.5):
+            def _cliff_alpha(accs: list[float], threshold: float = 0.5) -> float:
                 for i, acc in enumerate(accs):
                     if acc > threshold:
                         if i == 0:
@@ -583,7 +584,7 @@ def compute_ema_dual(
 
 
 @torch.no_grad()
-def compute_pruning_dual(
+def compute_pruning_dual(  # noqa: PLR0913
     preloaded: dict[str, list[SeedCheckpoints]],
     burst_sub: np.ndarray,
     other_sub: np.ndarray,
@@ -591,6 +592,7 @@ def compute_pruning_dual(
     n_seeds: int = 10,
     n_prune_levels: int = 10,
 ) -> dict:
+    """Evaluate pruning robustness across sparsity levels."""
     sparsities = np.linspace(0, 0.9, n_prune_levels).tolist()
     results = {}
 
@@ -635,7 +637,7 @@ def compute_weight_drift_per_layer(
     n_layer: int,
     n_seeds: int = 10,
 ) -> dict:
-    """||ΔW_ℓ||_F for each layer, decomposed from total weight drift."""
+    """Frobenius norm of delta-W per layer, decomposed from total weight drift."""
     layer_groups = _build_layer_groups(n_layer)
     layer_group_names = list(layer_groups.keys())
 
@@ -669,7 +671,7 @@ def compute_effective_rank_per_layer(
     n_layer: int,
     n_seeds: int = 10,
 ) -> dict:
-    """Effective rank = exp(H(p)) where p_i = σ_i / Σσ_j for SVD of ΔW_ℓ."""
+    """Effective rank = exp(H(p)) where p_i = sigma_i / sum(sigma_j) for SVD of delta-W."""
     layer_groups = _build_layer_groups(n_layer)
     layer_group_names = list(layer_groups.keys())
 
@@ -683,11 +685,11 @@ def compute_effective_rank_per_layer(
                 for pn in pnames:
                     if pn in sc.sd_peak_cpu and pn in sc.sd_pre_cpu:
                         d = sc.sd_peak_cpu[pn].float() - sc.sd_pre_cpu[pn].float()
-                        if d.dim() >= 2:
+                        if d.dim() >= 2:  # noqa: PLR2004
                             diffs.append(d.view(d.shape[0], -1))
                 if diffs:
                     all_sv = torch.cat([torch.linalg.svdvals(d) for d in diffs])
-                    S = all_sv[all_sv > 1e-10]
+                    S = all_sv[all_sv > 1e-10]  # noqa: PLR2004
                     if S.numel() > 0:
                         p = S / S.sum()
                         eff_rank = float(torch.exp(-(p * p.log()).sum()).item())
@@ -757,11 +759,14 @@ def _collect_layer_acts(
     acts: dict[str, torch.Tensor] = {}
     hooks = []
 
-    def _make_hook(name):
-        def hook_fn(module, input, output) -> None:
-            if isinstance(output, tuple):
-                output = output[0]
-            acts[name] = output.detach().float().mean(dim=1).cpu()
+    def _make_hook(name: str) -> Callable[..., None]:
+        def hook_fn(
+            _module: torch.nn.Module,
+            _input: tuple[torch.Tensor, ...],
+            output: torch.Tensor | tuple[torch.Tensor, ...],
+        ) -> None:
+            out = output[0] if isinstance(output, tuple) else output
+            acts[name] = out.detach().float().mean(dim=1).cpu()
 
         return hook_fn
 
@@ -786,7 +791,7 @@ def _linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
     hsic_xx = (X @ X.T * (X @ X.T)).sum()
     hsic_yy = (Y @ Y.T * (Y @ Y.T)).sum()
     denom = (hsic_xx * hsic_yy).sqrt()
-    if denom < 1e-10:
+    if denom < 1e-10:  # noqa: PLR2004
         return 1.0
     return float((hsic_xy / denom).item())
 
@@ -797,7 +802,7 @@ def _linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
 
 
 @torch.no_grad()
-def compute_directional_pruning(
+def compute_directional_pruning(  # noqa: PLR0913
     preloaded: dict[str, list[SeedCheckpoints]],
     burst_sub: np.ndarray,
     other_sub: np.ndarray,
@@ -805,9 +810,9 @@ def compute_directional_pruning(
     n_seeds: int = 10,
     svd_ks: list[int] | None = None,
 ) -> dict:
-    """Prune by removing top-k SVD components of ΔW = θ_peak − θ_pre.
+    """Prune by removing top-k SVD components of delta-W = theta_peak - theta_pre.
 
-    If the wrapper claim is correct, removing top-5 SVD components of ΔW
+    If the wrapper claim is correct, removing top-5 SVD components of delta-W
     for burst_100 should destroy burst accuracy, while burst_20 needs many more.
     """
     if svd_ks is None:
@@ -832,7 +837,7 @@ def compute_directional_pruning(
                     peak_w = sc.sd_peak[name].float()
                     pre_w = sc.sd_pre[name].float()
                     delta = peak_w - pre_w
-                    if delta.dim() >= 2 and min(delta.shape) > k:
+                    if delta.dim() >= 2 and min(delta.shape) > k:  # noqa: PLR2004
                         U, S, Vh = torch.linalg.svd(
                             delta.view(delta.shape[0], -1), full_matrices=False
                         )
@@ -868,6 +873,7 @@ def compute_transfer_dual(
     prompt_len: int,
     n_seeds: int = 10,
 ) -> dict:
+    """Evaluate task vector transfer across seeds."""
     results = {}
 
     for sched, seeds in preloaded.items():
@@ -897,7 +903,7 @@ def compute_transfer_dual(
 # ---------------------------------------------------------------------------
 
 
-def compute_relearning_dual(
+def compute_relearning_dual(  # noqa: PLR0913
     preloaded: dict[str, list[SeedCheckpoints]],
     burst_docs_BL: np.ndarray,
     burst_sub: np.ndarray,
@@ -906,6 +912,7 @@ def compute_relearning_dual(
     n_seeds: int = 10,
     relearn_steps: int = 50,
 ) -> dict:
+    """Evaluate relearning efficiency after reversion."""
     results = {}
 
     for sched, seeds in preloaded.items():
@@ -973,13 +980,14 @@ def compute_relearning_dual(
 
 
 @torch.no_grad()
-def compute_trajectory_dim(
+def compute_trajectory_dim(  # noqa: C901
     ckpt_root: Path,
     all_results: list[dict],
     n_seeds: int = 10,
     variance_threshold: float = 0.95,
     max_ckpts: int = 15,
 ) -> dict:
+    """Compute PCA trajectory dimensionality from reversion checkpoints."""
     jobs_by_schedule: dict[str, list[dict]] = {}
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
@@ -1005,7 +1013,7 @@ def compute_trajectory_dim(
 
             T = r["config"]["total_steps"]
             rev_steps_all = sorted(s for s in files if s >= T)
-            if len(rev_steps_all) < 3:
+            if len(rev_steps_all) < 3:  # noqa: PLR2004
                 continue
 
             if len(rev_steps_all) > max_ckpts:
@@ -1079,6 +1087,7 @@ ANALYSIS_METRICS: dict[str, bool] = {
 
 
 def compute_forgetting_decomposition(all_results: list[dict]) -> dict:
+    """Decompose forgetting into initial slope and plateau accuracy."""
     jobs_by_schedule: dict[str, list[dict]] = {}
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
@@ -1100,13 +1109,13 @@ def compute_forgetting_decomposition(all_results: list[dict]) -> dict:
                 s - burst_end for s, p in zip(steps, phases, strict=True) if p == PHASE_REVERSION
             ]
             rev_accs = [a for a, p in zip(accs, phases, strict=True) if p == PHASE_REVERSION]
-            if len(rev_accs) < 2:
+            if len(rev_accs) < 2:  # noqa: PLR2004
                 continue
 
-            early_mask = [s <= 50 for s in rev_steps]
+            early_mask = [s <= 50 for s in rev_steps]  # noqa: PLR2004
             early_s = [s for s, m in zip(rev_steps, early_mask, strict=True) if m]
             early_a = [a for a, m in zip(rev_accs, early_mask, strict=True) if m]
-            slope = float(np.polyfit(early_s, early_a, 1)[0]) if len(early_s) >= 2 else float("nan")
+            slope = float(np.polyfit(early_s, early_a, 1)[0]) if len(early_s) >= 2 else float("nan")  # noqa: PLR2004
 
             cutoff = int(len(rev_accs) * 0.8)
             plateau = float(np.mean(rev_accs[cutoff:])) if rev_accs[cutoff:] else float("nan")
@@ -1126,6 +1135,7 @@ def compute_forgetting_decomposition(all_results: list[dict]) -> dict:
 
 
 def compute_grad_temporal(all_results: list[dict]) -> dict:
+    """Compute temporal gradient similarity during reversion."""
     jobs_by_schedule: dict[str, list[dict]] = {}
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
@@ -1158,6 +1168,7 @@ def compute_grad_temporal(all_results: list[dict]) -> dict:
 
 
 def compute_layer_interference(all_results: list[dict]) -> dict:
+    """Compute per-layer gradient interference metrics."""
     jobs_by_schedule: dict[str, list[dict]] = {}
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
@@ -1204,7 +1215,7 @@ def compute_layer_interference(all_results: list[dict]) -> dict:
 def _aggregate_layer_metric(
     all_results: list[dict], key: str, phase_filter: str = PHASE_BURST
 ) -> dict:
-    """Generic aggregator for per-layer time-series dicts stored in grad_sim_log.
+    """Aggregate per-layer time-series dicts stored in grad_sim_log.
 
     Returns {sched: {mean_per_layer, end_per_layer, layer_names}}.
     """
@@ -1362,12 +1373,10 @@ def compute_forgetting_grad_alignment(
     n_layer: int,
     n_seeds: int = 10,
 ) -> dict:
-    """Alignment of other-class gradient at peak-burst with reversion direction
-    τ = θ_pre − θ_peak.
+    """Compute alignment of other-class gradient at peak-burst with reversion direction.
 
-    Computes global and per-layer cosine similarity between the other-class gradient
-    and the reversion direction. The global cosine is near-zero due to high dimensionality
-    (curse of dimensionality), but per-layer values reveal where alignment is concentrated.
+    tau = theta_pre - theta_peak. Computes global and per-layer cosine similarity
+    between the other-class gradient and the reversion direction.
     """
     other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
     other_inp, other_tgt = other_t[:, :-1], other_t[:, 1:]
@@ -1450,7 +1459,7 @@ def compute_forgetting_grad_alignment(
 # ---------------------------------------------------------------------------
 
 
-def _eval_loss_at_eta(
+def _eval_loss_at_eta(  # noqa: PLR0913
     net: nanoGPT,
     sd_base: dict[str, torch.Tensor],
     delta: dict[str, torch.Tensor],
@@ -1459,7 +1468,7 @@ def _eval_loss_at_eta(
     tgt_t: torch.Tensor,
     vocab_size: int,
 ) -> float:
-    """Evaluate L(θ − η·Δθ) with a single forward pass. No gradients needed."""
+    """Evaluate L(theta - eta*delta_theta) with a single forward pass."""
     perturbed = {k: sd_base[k] - eta * delta[k] if k in delta else sd_base[k] for k in sd_base}
     net.load_state_dict(perturbed)
     net.eval()
@@ -1468,7 +1477,7 @@ def _eval_loss_at_eta(
         return F.cross_entropy(logits.reshape(-1, vocab_size), tgt_t.reshape(-1)).item()
 
 
-def _critical_lr_line_search(
+def _critical_lr_line_search(  # noqa: PLR0913
     net: nanoGPT,
     sd_base: dict[str, torch.Tensor],
     delta: dict[str, torch.Tensor],
@@ -1494,7 +1503,7 @@ def _critical_lr_line_search(
     for _ in range(max_exp_iters):
         eta_prev = eta
         eta = eta * (2.0 if direction == +1 else 0.5)
-        if eta < 1e-12:
+        if eta < 1e-12:  # noqa: PLR2004
             eta_lower, eta_upper = eta, eta_prev
             break
         loss_eta = _eval_loss_at_eta(net, sd_base, delta, eta, inp_t, tgt_t, vocab_size)
@@ -1521,16 +1530,16 @@ def _critical_lr_line_search(
     return 0.5 * (eta_lower + eta_upper)
 
 
-def compute_sharpness(
+def compute_sharpness(  # noqa: C901
     preloaded: dict[str, list[SeedCheckpoints]],
     burst_sub: np.ndarray,
     other_sub: np.ndarray,
     n_layer: int,
     n_seeds: int = 10,
 ) -> dict:
-    """Critical sharpness λ_c = 2/η_c via forward-pass line search along the burst direction.
+    """Compute critical sharpness via forward-pass line search along the burst direction.
 
-    The update direction Δθ = θ_peak − θ_pre is the direction the model moved during bursting.
+    The update direction delta_theta = theta_peak - theta_pre is the burst direction.
     η_c is the smallest learning rate that increases loss when stepping along Δθ from θ_peak.
     λ_c = 2/η_c measures the curvature of the loss landscape along the burst direction.
 
@@ -1643,15 +1652,15 @@ def compute_sharpness(
 # ---------------------------------------------------------------------------
 
 
-def _bar_with_seeds(
-    fig,
+def _bar_with_seeds(  # noqa: PLR0913
+    fig: object,
     schedules: list[str],
     per_seed_values: dict[str, list[float]],
     name: str = "",
     row: int | None = None,
     col: int | None = None,
 ) -> None:
-    import plotly.graph_objects as go
+    import plotly.graph_objects as go  # noqa: PLC0415
 
     means = []
     ci95s = []
@@ -1698,9 +1707,10 @@ def _bar_with_seeds(
             fig.add_trace(go.Scatter(**scatter_kwargs))
 
 
-def make_dashboard(results: dict, out_dir: Path) -> None:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
+def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
+    """Build and save the unified burstiness analysis dashboard."""
+    import plotly.graph_objects as go  # noqa: PLC0415
+    from plotly.subplots import make_subplots  # noqa: PLC0415
 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
@@ -1776,18 +1786,18 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 )
             fig.update_layout(
                 title=f"EMA Interpolation: {path_label} — {rn}<br>"
-                f"<sup>α=0: start model, α=1: peak burst. Sharp cliff = shallow wrapper.</sup>",
+                f"<sup>α=0: start model, α=1: peak burst. Sharp cliff = shallow wrapper.</sup>",  # noqa: RUF001
                 template="plotly_white",
                 height=500,
             )
-            fig.update_xaxes(title_text="α")
+            fig.update_xaxes(title_text="α")  # noqa: RUF001
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
             _add(f"ema_{path_key}_{rn}", f"EMA {path_label} ({rn})", fig)
             fig_delta.update_layout(
-                title=f"EMA Interpolation Δ (Burst − Other): {path_label} — {rn}<br>"
-                f"<sup>α=0: start model, α=1: peak burst.</sup>",
-                xaxis_title="α",
+                title=f"EMA Interpolation Δ (Burst − Other): {path_label} — {rn}<br>"  # noqa: RUF001
+                f"<sup>α=0: start model, α=1: peak burst.</sup>",  # noqa: RUF001
+                xaxis_title="α",  # noqa: RUF001
                 yaxis_title="Δ Accuracy",
                 template="plotly_white",
                 height=500,
@@ -1875,14 +1885,14 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 template="plotly_white",
                 height=500,
             )
-            fig.update_xaxes(title_text="α")
+            fig.update_xaxes(title_text="α")  # noqa: RUF001
             fig.update_yaxes(title_text="Cross-Entropy Loss", row=1, col=1)
             fig.update_yaxes(title_text="Cross-Entropy Loss", row=1, col=2)
             _add(f"lmc_{path_key}_{rn}", f"LMC {path_label} ({rn})", fig)
             fig_delta.update_layout(
-                title=f"LMC Loss Barrier Δ (Burst − Other): {path_label} — {rn}<br>"
+                title=f"LMC Loss Barrier Δ (Burst − Other): {path_label} — {rn}<br>"  # noqa: RUF001
                 f"<sup>High barrier = different basins (deep). Low = same ridge (shallow).</sup>",
-                xaxis_title="α",
+                xaxis_title="α",  # noqa: RUF001
                 yaxis_title="Δ Loss",
                 template="plotly_white",
                 height=500,
@@ -1988,7 +1998,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
             _add(f"frank_{direction}_{rn}", f"Frankenstein {dir_label} ({rn})", fig)
             fig_delta.update_layout(
-                title=f"Frankenstein Δ (Burst − Other): {dir_label} — {rn}",
+                title=f"Frankenstein Δ (Burst − Other): {dir_label} — {rn}",  # noqa: RUF001
                 xaxis_title="Last Block from Bottom Model",
                 yaxis_title="Δ Accuracy",
                 template="plotly_white",
@@ -2035,7 +2045,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         fig_gap.add_hline(y=0, line_dash="dash", line_color="gray")
         fig_gap.update_layout(
             title=f"Frankenstein Localisation Gap — {rn}<br>"
-            "<sup>LocGap = (pre-bottom+post-top) − (post-bottom+pre-top) burst acc. "
+            "<sup>LocGap = (pre-bottom+post-top) − (post-bottom+pre-top) burst acc. "  # noqa: RUF001
             "Positive = knowledge in later layers (wrapper). Sign-flip ≈ burst_30.</sup>",
             xaxis_title="Split Depth",
             yaxis_title="Localisation Gap",
@@ -2160,7 +2170,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 )
             )
             fig.update_layout(
-                title=f"Cross-Burst Frankenstein: {sa} × {sb} — {rn}<br>"
+                title=f"Cross-Burst Frankenstein: {sa} × {sb} — {rn}<br>"  # noqa: RUF001
                 "<sup>Swapping layers between post-burst models of different schedules</sup>",
                 template="plotly_white",
                 height=500,
@@ -2168,15 +2178,15 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             fig.update_xaxes(title_text="Last Block from Bottom Model")
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
-            _add(f"xfrank_{pair_key}_{rn}", f"Cross-Frank {sa}×{sb} ({rn})", fig)
+            _add(f"xfrank_{pair_key}_{rn}", f"Cross-Frank {sa}×{sb} ({rn})", fig)  # noqa: RUF001
             fig_delta.update_layout(
-                title=f"Cross-Burst Frankenstein Δ (Burst − Other): {sa} × {sb} — {rn}",
+                title=f"Cross-Burst Frankenstein Δ (Burst − Other): {sa} × {sb} — {rn}",  # noqa: RUF001
                 xaxis_title="Last Block from Bottom Model",
                 yaxis_title="Δ Accuracy",
                 template="plotly_white",
                 height=500,
             )
-            _add(f"xfrank_{pair_key}_delta_{rn}", f"Cross-Frank {sa}×{sb} Δ ({rn})", fig_delta)
+            _add(f"xfrank_{pair_key}_delta_{rn}", f"Cross-Frank {sa}×{sb} Δ ({rn})", fig_delta)  # noqa: RUF001
 
     # ------------------------------------------------------------------
     # Section 5: Task Vector Transfer (dual-class)
@@ -2269,7 +2279,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
         _add(f"pruning_{rn}", f"Pruning Robustness ({rn})", fig)
         fig_delta.update_layout(
-            title=f"Pruning Robustness Δ (Burst − Other) — {rn}",
+            title=f"Pruning Robustness Δ (Burst − Other) — {rn}",  # noqa: RUF001
             xaxis_title="Sparsity (%)",
             yaxis_title="Δ Accuracy",
             template="plotly_white",
@@ -2343,7 +2353,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
         _add(f"relearning_{rn}", f"Relearning ({rn})", fig)
         fig_delta.update_layout(
-            title=f"Relearning After Reversion Δ (Burst − Other) — {rn}",
+            title=f"Relearning After Reversion Δ (Burst − Other) — {rn}",  # noqa: RUF001
             xaxis_title="Relearning Step",
             yaxis_title="Δ Accuracy",
             template="plotly_white",
@@ -2355,10 +2365,10 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         auc_vals = {}
         for sched in schedules:
             ps = rl[sched]["per_seed"]
-            aucs = []
-            for s in ps:
-                if s["steps"]:
-                    aucs.append(float(_trapz(s["burst_accs"], s["steps"])) / max(s["steps"][-1], 1))
+            aucs = [
+                float(_trapz(s["burst_accs"], s["steps"])) / max(s["steps"][-1], 1)
+                for s in ps if s["steps"]
+            ]
             auc_vals[sched] = aucs
 
         fig_auc = go.Figure()
@@ -2564,7 +2574,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             fig_diff = go.Figure()
             _bar_with_seeds(fig_diff, list(diff_vals.keys()), diff_vals)
             fig_diff.update_layout(
-                title=f"Critical Sharpness Δ (Burst − Other) at Peak Burst — {rn}<br>"
+                title=f"Critical Sharpness Δ (Burst − Other) at Peak Burst — {rn}<br>"  # noqa: RUF001
                 "<sup>Positive = burst class has sharper loss landscape along burst direction</sup>",  # noqa: E501
                 xaxis_title="Schedule",
                 yaxis_title="Δ λ_c",
@@ -2667,7 +2677,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             )
         )
         fig_hm_diff.update_layout(
-            title=f"Per-Layer Critical Sharpness Δ (Burst − Other) — {rn}<br>"
+            title=f"Per-Layer Critical Sharpness Δ (Burst − Other) — {rn}<br>"  # noqa: RUF001
             "<sup>Red = burst sharper along burst direction; Blue = other sharper</sup>",
             xaxis_title="Layer Group",
             yaxis_title="Schedule",
@@ -2803,7 +2813,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 )
             )
         fig_diff.update_layout(
-            title=f"Per-Layer Critical Sharpness Δ (Burst − Other) — {rn}<br>"
+            title=f"Per-Layer Critical Sharpness Δ (Burst − Other) — {rn}<br>"  # noqa: RUF001
             "<sup>Positive = burst class has sharper curvature at that layer along burst direction. "  # noqa: E501
             "Ribbon = 95% CI across seeds.</sup>",
             xaxis_title="Layer Group",
@@ -3116,7 +3126,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
             fig.update_layout(
                 title=f"Forgetting Gradient Alignment at Peak Burst — {rn}<br>"
-                "<sup>Cosine similarity between other-class gradient and reversion direction τ = θ_pre − θ_peak. "  # noqa: E501
+                "<sup>Cosine similarity between other-class gradient and reversion direction τ = θ_pre − θ_peak. "  # noqa: E501, RUF001
                 "Positive = gradient points toward forgetting; near-zero expected due to high dimensionality.</sup>",  # noqa: E501
                 xaxis_title="Schedule",
                 yaxis_title="Cosine Similarity (grad · τ)",
@@ -3187,7 +3197,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         )
         fig.update_layout(
             title=f"Per-Layer Weight Drift — {rn}<br>"
-            "<sup>||θ_peak − θ_pre||_F per layer group. "
+            "<sup>||θ_peak − θ_pre||_F per layer group. "  # noqa: RUF001
             "Wrapper → change concentrated in later layers for high burst.</sup>",
             xaxis_title="Layer Group",
             yaxis_title="Schedule",
@@ -3227,7 +3237,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         )
         fig.update_layout(
             title=f"Effective Rank of ΔW Per Layer — {rn}<br>"
-            "<sup>exp(H(σ/Σσ)). Low rank in later layers for high burst = wrapper.</sup>",
+            "<sup>exp(H(σ/Σσ)). Low rank in later layers for high burst = wrapper.</sup>",  # noqa: RUF001
             xaxis_title="Layer Group",
             yaxis_title="Schedule",
             template="plotly_white",
@@ -3379,10 +3389,10 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
     html_parts.append("</body></html>")
 
     html_path = out_dir / "dashboard.html"
-    with open(html_path, "w") as f:
+    with html_path.open("w") as f:
         f.write("".join(html_parts))
 
-    from burst.dev.plot_utils import write_text_report
+    from burst.dev.plot_utils import write_text_report  # noqa: PLC0415
 
     write_text_report(
         all_figs, out_dir / "dashboard.txt", dashboard_title="Unified Burstiness Analysis Dashboard"
@@ -3394,7 +3404,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:
+def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:  # noqa: C901, PLR0912, PLR0915
     """Compute 11 additional scalar metrics + curve data per schedule from training logs.
 
     Dimension key:
@@ -3475,16 +3485,16 @@ def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:
             burst_efficiency_S.append(peak / max(total_special, 1) * 1000)
 
             rev_end = r["reversion_end_burst"]
-            retention_ratio_S.append(rev_end / peak if peak > 1e-6 else 0.0)
+            retention_ratio_S.append(rev_end / peak if peak > 1e-6 else 0.0)  # noqa: PLR2004
 
-            if len(rev_acc) >= 2:
+            if len(rev_acc) >= 2:  # noqa: PLR2004
                 n_early = min(len(rev_acc), max(2, 50 // ev))
                 slope = (rev_acc[n_early - 1] - rev_acc[0]) / max(n_early * ev, 1)
                 reversal_speed_S.append(float(slope))
             else:
                 reversal_speed_S.append(0.0)
 
-            onset_mask = burst_acc > 0.1
+            onset_mask = burst_acc > 0.1  # noqa: PLR2004
             onset_step = (
                 float(burst_steps_loc[onset_mask][0]) if onset_mask.any() else float(T_sched)
             )
@@ -3505,7 +3515,7 @@ def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:
 
             normalized_auc_S.append(r["reversion_auc"] / max(peak * U_sched, 1e-6))
 
-            if len(burst_acc) >= 2:
+            if len(burst_acc) >= 2:  # noqa: PLR2004
                 bl_slope = (burst_acc.max() - burst_acc[0]) / max(len(burst_acc) * ev, 1)
                 burst_learning_rate_S.append(float(bl_slope))
             else:
@@ -3546,15 +3556,15 @@ def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:
     return metrics
 
 
-def _ext_bar_fig(
+def _ext_bar_fig(  # noqa: PLR0913
     schedules: list[str],
     metric_key: str,
     title: str,
     yaxis_title: str,
     metrics: dict[str, dict],
     colors: dict[str, str],
-):
-    import plotly.graph_objects as go
+) -> object:
+    import plotly.graph_objects as go  # noqa: PLC0415
 
     means, cis, all_vals = [], [], []
     for s in schedules:
@@ -3595,16 +3605,16 @@ def _ext_bar_fig(
     return fig
 
 
-def _ext_curve_burst_aligned(
+def _ext_curve_burst_aligned(  # noqa: PLR0913
     schedules: list[str],
     metrics: dict[str, dict],
     colors: dict[str, str],
     curve_key: str,
     title: str,
     yaxis_title: str,
-):
+) -> object:
     """Curve chart aligned to burst start (x=0 at start of burst)."""
-    import plotly.graph_objects as go
+    import plotly.graph_objects as go  # noqa: PLC0415
 
     fig = go.Figure()
     for s in schedules:
@@ -3644,7 +3654,7 @@ def _ext_curve_burst_aligned(
     return fig
 
 
-def _ext_curve_reversal_aligned(
+def _ext_curve_reversal_aligned(  # noqa: PLR0913
     schedules: list[str],
     metrics: dict[str, dict],
     colors: dict[str, str],
@@ -3652,13 +3662,13 @@ def _ext_curve_reversal_aligned(
     rev_curve_key: str,
     title: str,
     yaxis_title: str,
-):
+) -> object:
     """Curve chart aligned to reversal start (x=0 = end of burst / start of reversal).
 
     Burst phase shown on negative x (different schedules start at different negative x
     because burst lengths differ). Reversal shown on positive x (all start at 0).
     """
-    import plotly.graph_objects as go
+    import plotly.graph_objects as go  # noqa: PLC0415
 
     fig = go.Figure()
     for s in schedules:
@@ -3745,11 +3755,11 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
       - out_dir/extended_metrics.html  (interactive Plotly)
       - out_dir/charts/extended_*.png  (static PNG via kaleido if available)
     """
-    import plotly.graph_objects as go
-    import plotly.io as pio
+    import plotly.graph_objects as go  # noqa: PLC0415
+    import plotly.io as pio  # noqa: PLC0415
 
-    from burst.config import SCHED_COLORS, ordered_schedules
-    from burst.core.train_utils import load_results
+    from burst.config import SCHED_COLORS, ordered_schedules  # noqa: PLC0415
+    from burst.core.train_utils import load_results  # noqa: PLC0415
 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(exist_ok=True)
@@ -3759,7 +3769,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
         try:
             results, _ = load_results(run_dir)
             all_results_combined.extend(results)
-        except Exception:
+        except (FileNotFoundError, ValueError, KeyError):
             pass
 
     if not all_results_combined:
@@ -3771,7 +3781,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
 
     scalar_metrics = [
         ("steps_to_peak", "Steps to Peak Burst Accuracy", "Steps"),
-        ("burst_efficiency", "Burst Efficiency (peak / special_examples × 1000)", "Efficiency"),
+        ("burst_efficiency", "Burst Efficiency (peak / special_examples × 1000)", "Efficiency"),  # noqa: RUF001
         ("burst_onset_step", "Burst Onset Step (first step > 0.1 acc)", "Steps"),
         ("other_drop_during_burst", "Other-Class Acc Drop During Burst", "Accuracy Drop"),
         ("burst_learning_rate", "Burst Learning Rate (acc slope during burst)", "Acc/Step"),
@@ -3781,7 +3791,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
 
     all_figs: list[tuple[str, str, Any]] = []
 
-    def _try_save_png(fig, name) -> None:
+    def _try_save_png(fig: object, name: str) -> None:
         with contextlib.suppress(Exception):
             pio.write_image(fig, str(charts_dir / name), width=1200, height=500)
 
@@ -3853,11 +3863,11 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
 <div class="toc"><strong>Contents:</strong>
 """
     ]
-    for i, (key, title, _) in enumerate(all_figs):
+    for i, (_key, title, _) in enumerate(all_figs):
         html_parts.append(f'  <a href="#ext_{i}">{i + 1}. {title}</a>\n')
     html_parts.append("</div>\n")
 
-    for i, (key, title, fig) in enumerate(all_figs):
+    for i, (_key, title, fig) in enumerate(all_figs):
         html_parts.append(f'<div class="chart-container" id="ext_{i}">\n')
         html_parts.append(f"<h2>{i + 1}. {title}</h2>\n")
         html_parts.append(fig.to_html(full_html=False, include_plotlyjs=(i == 0)))
@@ -3866,10 +3876,10 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
     html_parts.append("</body></html>")
 
     html_path = out_dir / "extended_metrics.html"
-    with open(html_path, "w") as f:
+    with html_path.open("w") as f:
         f.write("".join(html_parts))
 
-    from burst.dev.plot_utils import write_text_report
+    from burst.dev.plot_utils import write_text_report  # noqa: PLC0415
 
     write_text_report(
         all_figs, out_dir / "extended_metrics.txt", dashboard_title="Extended Metrics Dashboard"
@@ -3907,7 +3917,7 @@ def _resolve_unified_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
     return config_path, data_path, all_results_path, ckpt_root
 
 
-def analyse_run(
+def analyse_run(  # noqa: PLR0913, C901, PLR0912, PLR0915
     run_dir: Path,
     n_seeds: int = 10,
     n_prune_levels: int = 10,
@@ -3916,25 +3926,25 @@ def analyse_run(
     xfrank_seeds: int = 10,
     subsample_n: int = 256,
 ) -> dict:
-
+    """Run all analysis metrics on a single training run directory."""
     config_path, data_path, all_results_path, ckpt_root = _resolve_unified_paths(run_dir)
 
-    with open(config_path) as f:
+    with config_path.open() as f:
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
     base_cfg = rc["base_cfg"]
     n_layer = base_cfg["n_layer"]
 
-    with open(data_path, "rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+    with data_path.open("rb") as f:
+        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
-    with open(all_results_path, "rb") as f:
-        all_results = pickle.load(f)
+    with all_results_path.open("rb") as f:
+        all_results = pickle.load(f)  # noqa: S301
 
     run_name = run_dir.name
 
@@ -4087,9 +4097,10 @@ def analyse_run(
 
 
 def main() -> None:
+    """Run unified burstiness analysis from the command line."""
     parser = argparse.ArgumentParser(description="Unified burstiness analysis dashboard.")
     parser.add_argument("run_dirs", nargs="+", type=Path)
-    default_out = Path(f"data/{datetime.now().strftime('%Y%m%d-%H%M%S')}_unified_analysis")
+    default_out = Path(f"data/{datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%S')}_unified_analysis")
     parser.add_argument("--out-dir", type=Path, default=default_out)
     parser.add_argument("--n-seeds", type=int, default=10)
     parser.add_argument("--n-prune-levels", type=int, default=10)
@@ -4102,8 +4113,8 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     per_run_results = []
-    for run_dir in args.run_dirs:
-        run_dir = Path(run_dir)
+    for run_dir_arg in args.run_dirs:
+        run_dir = Path(run_dir_arg)
         time.time()
         r = analyse_run(
             run_dir,
@@ -4154,7 +4165,7 @@ def main() -> None:
                 combined[mk][r["run_name"]] = r[mk]
 
     results_path = args.out_dir / "results.pkl"
-    with open(results_path, "wb") as f:
+    with results_path.open("wb") as f:
         pickle.dump(combined, f)
 
     make_dashboard(combined, args.out_dir)

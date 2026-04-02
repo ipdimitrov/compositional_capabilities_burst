@@ -59,8 +59,7 @@ def _detect_gpu() -> tuple[int, int]:
         return 0, 0
 
     name = torch.cuda.get_device_name(0)
-    total_bytes = torch.cuda.get_device_properties(0).total_memory
-    detected_vram = int(total_bytes / (1024**3))
+    detected_vram = int(torch.cuda.get_device_properties(0).total_memory / (1024**3))
 
     for key, spec in GPU_REGISTRY.items():
         if key.lower() in name.lower():
@@ -194,8 +193,11 @@ class GpuConfig:
 def make_gpu_config() -> GpuConfig:
     """Detect GPU and return a frozen GpuConfig."""
     vram, tflops = _detect_gpu()
-    name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
-    return GpuConfig(vram_gb=vram, tflops_bf16=tflops, gpu_name=name)
+    return GpuConfig(
+        vram_gb=vram,
+        tflops_bf16=tflops,
+        gpu_name=torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+    )
 
 
 gpu_cfg = make_gpu_config()

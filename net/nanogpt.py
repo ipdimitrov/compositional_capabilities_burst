@@ -36,7 +36,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config: DictConfig) -> None:
         """Initialize attention projections and dropout."""
         super().__init__()
-        assert config.n_embd % config.n_head == 0
+        assert config.n_embd % config.n_head == 0  # noqa: S101
 
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)

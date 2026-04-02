@@ -13,14 +13,14 @@ import argparse
 import base64
 import json
 import logging
-import os
 import pickle
 import sys
 import traceback
+from collections import defaultdict
+from collections.abc import Callable
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from collections import defaultdict
-from pathlib import Path
 
 import numpy as np
 
@@ -44,7 +44,7 @@ from burst.dev.pres_charts import (  # noqa: E402
 )
 
 
-def _img_tag(path, max_width=900) -> str:
+def _img_tag(path: Path, max_width: int = 900) -> str:
     p = Path(path)
     if not p.exists():
         return ""
@@ -92,14 +92,14 @@ def _verdict_html(verdict: str, explanation: str, kind: str = "supported") -> st
     return f'<div class="vbox {css_class}"><span class="verdict">VERDICT: {verdict}</span> &mdash; {explanation}</div>'  # noqa: E501
 
 
-def _section(title: str, level: int = 2, page_break: bool = True, anchor: str = "") -> str:
+def _section(title: str, level: int = 2, *, page_break: bool = True, anchor: str = "") -> str:
     pb = ' class="page-break"' if page_break else ""
     aid = f' id="{anchor}"' if anchor else ""
     tag = f"h{level}"
     return f"<div{pb}{aid}><{tag}>{title}</{tag}></div>"
 
 
-def _chart(path, max_width=900) -> str:
+def _chart(path: Path | None, max_width: int = 900) -> str:
     if path is None:
         return ""
     tag = _img_tag(path, max_width)
@@ -127,8 +127,8 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         return [(p.stem.replace("_", " ").title(), p) for p in sorted(d.glob("*.png"))]
 
     try:
-        from burst.dev.unified_analysis import analyse_run as ua_analyse
-        from burst.dev.unified_analysis import make_dashboard
+        from burst.dev.unified_analysis import analyse_run as ua_analyse  # noqa: PLC0415
+        from burst.dev.unified_analysis import make_dashboard  # noqa: PLC0415
 
         r = ua_analyse(
             run_dir,
@@ -181,7 +181,7 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         logger.exception("unified dashboard failed for %s", run_dir)
 
     try:
-        from burst.dev.unified_analysis import make_extended_metrics_dashboard
+        from burst.dev.unified_analysis import make_extended_metrics_dashboard  # noqa: PLC0415
 
         tmp = results_dir / "_extended_tmp"
         tmp.mkdir(parents=True, exist_ok=True)
@@ -191,10 +191,10 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         logger.exception("extended dashboard failed for %s", run_dir)
 
     try:
-        from burst.dev.basin_metrics import (
+        from burst.dev.basin_metrics import (  # noqa: PLC0415
             analyse_run as bm_analyse,
         )
-        from burst.dev.basin_metrics import (
+        from burst.dev.basin_metrics import (  # noqa: PLC0415
             make_dashboard as bm_dashboard,
         )
 
@@ -214,11 +214,11 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
 # ---------------------------------------------------------------------------
 
 
-def _build_txt(
+def _build_txt(  # noqa: C901, PLR0912, PLR0915
     rd: Path,
     res: list,
     cfg: dict,
-    cp: dict,
+    _cp: dict,
     gs_records: list,
     analysis_charts: dict[str, list[tuple[str, Path]]] | None = None,
 ) -> str:
@@ -293,10 +293,10 @@ def _build_txt(
                 sims = r["grad_sim_log"]["burst_vs_other"]
                 seed = r.get("seed", "?")
                 lines.append(
-                    f"    seed={seed}: steps={steps[:5]}...{steps[-3:] if len(steps) > 5 else ''}"
+                    f"    seed={seed}: steps={steps[:5]}...{steps[-3:] if len(steps) > 5 else ''}"  # noqa: PLR2004
                 )
                 lines.append(
-                    f"              sims ={[f'{s:.3f}' for s in sims[:5]]}...{[f'{s:.3f}' for s in sims[-3:]] if len(sims) > 5 else ''}"  # noqa: E501
+                    f"              sims ={[f'{s:.3f}' for s in sims[:5]]}...{[f'{s:.3f}' for s in sims[-3:]] if len(sims) > 5 else ''}"  # noqa: E501, PLR2004
                 )
 
             all_end_burst = []
@@ -452,7 +452,8 @@ def _build_txt(
 # ---------------------------------------------------------------------------
 
 
-def build(rd, res, cfg, cp, analysis_charts=None):
+def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None = None) -> Path:  # noqa: C901, PLR0915
+    """Build HTML report for a burst experiment run."""
     rc = parse_run_config(cfg)
     bcfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
@@ -469,10 +470,10 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     parts: list[str] = []
 
-    def _try(fn, label="section") -> None:
+    def _try(fn: Callable[[], None], label: str = "section") -> None:
         try:
             fn()
-        except Exception:
+        except (ValueError, TypeError, KeyError, IndexError, OSError, RuntimeError):
             parts.append(
                 f'<div class="vbox vbox-partial"><b>Skipped {label}</b>: {traceback.format_exc().splitlines()[-1]}</div>'  # noqa: E501
             )
@@ -589,7 +590,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
         parts.append(_section("Result: Peak Special Class Accuracy", anchor="result-peak"))
         parts.append(_chart(cp.get("peak_bars")))
         parts.append('<div class="hbox">H1: All schedules achieve peak special class ~ 1.0</div>')
-        if all(m >= 0.998 for m in pv.values()):
+        if all(m >= 0.998 for m in pv.values()):  # noqa: PLR2004
             parts.append(
                 _verdict_html(
                     "SUPPORTED",
@@ -654,7 +655,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
         parts.append(_section("Result: Other Classes Preservation", anchor="result-other"))
         parts.append(_chart(cp.get("overlay_other")))
         parts.append(_chart(cp.get("overlay_other_aligned_end")))
-        if all(m >= 0.95 for m in ae.values()):
+        if all(m >= 0.95 for m in ae.values()):  # noqa: PLR2004
             parts.append(
                 _verdict_html("SUPPORTED", "All other classes >= 0.95 at end.", "supported")
             )
@@ -671,8 +672,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     def _per_sched() -> None:
         parts.append(_section("Per-Schedule Detail", anchor="per-sched"))
-        for path in cp.get("per_sched") or []:
-            parts.append(_chart(path))
+        parts.extend(_chart(path) for path in cp.get("per_sched") or [])
 
     _try(_per_sched, "Per-Schedule Detail")
 
@@ -716,8 +716,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
             parts.append(_chart(cp["grad_cosine_vs_auc"], 800))
         if cp.get("grad_cosine_per_seed"):
             parts.append("<h3>Per-Seed Traces</h3>")
-            for p_ in cp["grad_cosine_per_seed"]:
-                parts.append(_chart(p_))
+            parts.extend(_chart(p_) for p_ in cp["grad_cosine_per_seed"])
 
     _try(_grad_sim, "Gradient Cosine Similarity")
 
@@ -746,20 +745,16 @@ def build(rd, res, cfg, cp, analysis_charts=None):
             parts.append(_chart(cp["layer_cossim_end_burst_bars"], 1000))
         if cp.get("layer_cossim_layer_sched"):
             parts.append("<h3>Layer x Schedule Heatmaps</h3>")
-            for p_ in cp["layer_cossim_layer_sched"] or []:
-                parts.append(_chart(p_, 900))
+            parts.extend(_chart(p_, 900) for p_ in cp["layer_cossim_layer_sched"] or [])
         if cp.get("layer_cossim_heatmap"):
             parts.append("<h3>Layer x Step Heatmaps</h3>")
-            for p_ in cp["layer_cossim_heatmap"] or []:
-                parts.append(_chart(p_, 1000))
+            parts.extend(_chart(p_, 1000) for p_ in cp["layer_cossim_heatmap"] or [])
         if cp.get("layer_cossim_change"):
             parts.append("<h3>Rate-of-Change Heatmaps</h3>")
-            for p_ in cp["layer_cossim_change"] or []:
-                parts.append(_chart(p_, 1000))
+            parts.extend(_chart(p_, 1000) for p_ in cp["layer_cossim_change"] or [])
         if cp.get("layer_cossim_overlay"):
             parts.append("<h3>Per-Schedule Layer Overlays</h3>")
-            for p_ in cp["layer_cossim_overlay"] or []:
-                parts.append(_chart(p_, 900))
+            parts.extend(_chart(p_, 900) for p_ in cp["layer_cossim_overlay"] or [])
 
     _try(_layer_grad_sim, "Per-Layer Gradient Cosine Similarity")
 
@@ -778,14 +773,12 @@ def build(rd, res, cfg, cp, analysis_charts=None):
             "ALL_OTHER = all other tasks; ALL_DATA = everything.</p>"
         )
         if cp.get("pairwise_evo_by_metric"):
-            for p_ in cp["pairwise_evo_by_metric"] or []:
-                parts.append(_chart(p_))
+            parts.extend(_chart(p_) for p_ in cp["pairwise_evo_by_metric"] or [])
         if cp.get("pairwise_evo_per_schedule"):
             parts.append(_chart(cp["pairwise_evo_per_schedule"], 1000))
         if cp.get("pairwise_heatmaps"):
             parts.append("<h3>Pairwise Heatmaps at Key Steps</h3>")
-            for p_ in cp["pairwise_heatmaps"] or []:
-                parts.append(_chart(p_, 700))
+            parts.extend(_chart(p_, 700) for p_ in cp["pairwise_heatmaps"] or [])
 
     _try(_pairwise_evo, "Pairwise Gradient Similarity")
 
@@ -800,12 +793,10 @@ def build(rd, res, cfg, cp, analysis_charts=None):
             parts.append("<h3>Probe Accuracy Over Training</h3>")
             parts.append(_chart(cp["probe_dynamics"]))
         if cp.get("probe_layer_schedule"):
-            for p_ in cp["probe_layer_schedule"]:
-                parts.append(_chart(p_))
+            parts.extend(_chart(p_) for p_ in cp["probe_layer_schedule"])
         if cp.get("probe_heatmaps"):
             parts.append("<h3>Probe Heatmaps</h3>")
-            for p_ in cp["probe_heatmaps"]:
-                parts.append(_chart(p_))
+            parts.extend(_chart(p_) for p_ in cp["probe_heatmaps"])
 
     _try(_probes, "Probes")
 
@@ -844,7 +835,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
     # Unified / Extended / Basin analysis charts
     if analysis_charts:
 
-        def _analysis_section(key, title, anchor) -> None:
+        def _analysis_section(key: str, title: str, anchor: str) -> None:
             pairs = analysis_charts.get(key, [])
             if not pairs:
                 return
@@ -895,6 +886,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
 
 def main() -> None:
+    """Build combined HTML + TXT report for a burst experiment run."""
     parser = argparse.ArgumentParser(
         description="Build combined HTML + TXT report for a burst experiment run."
     )
@@ -909,7 +901,7 @@ def main() -> None:
 
     rd = args.run_dir or sorted(Path("data").glob("burst_d*"))[-1]
     rd = Path(rd)
-    from burst.core.train_utils import resolve_run_paths
+    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
 
     cfg_path, logs_dir, _ = resolve_run_paths(rd)
 
@@ -917,12 +909,12 @@ def main() -> None:
     if not pkl_path.exists():
         pkl_path = rd / "all_results.pkl"
 
-    with open(cfg_path) as f:
+    with Path(cfg_path).open() as f:
         cfg = json.load(f)
 
     if pkl_path.exists():
-        with open(pkl_path, "rb") as f:
-            results = pickle.load(f)
+        with pkl_path.open("rb") as f:
+            results = pickle.load(f)  # noqa: S301
     else:
         base = cfg.get("base_cfg", cfg)
         results = []

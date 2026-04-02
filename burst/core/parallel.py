@@ -28,7 +28,7 @@ class JobResult:
     elapsed: float = 0.0
 
 
-def run_job_pool(
+def run_job_pool(  # noqa: C901, PLR0912, PLR0913, PLR0915
     jobs: list[dict],
     worker_script: str,
     build_cmd: Callable,
@@ -91,7 +91,7 @@ def run_job_pool(
 
             if proc.returncode == 0 and out_path.exists():
                 with out_path.open("rb") as f:
-                    data = pickle.load(f)
+                    data = pickle.load(f)  # noqa: S301
                 jr = JobResult(label=label, success=True, data=data, elapsed=elapsed)
                 n_done += 1
                 results.append(jr)
