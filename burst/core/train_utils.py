@@ -18,7 +18,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import OmegaConf
 
-from burst.config import N_PROBE_DOCS_PER_TASK
 from burst.core.train.worker import n_target_for_step, sample_batch
 from burst.rng import seed_all
 from net.nanogpt import nanoGPT

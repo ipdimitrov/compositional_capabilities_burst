@@ -39,7 +39,8 @@ def apply_paper_style() -> None:
             "grid.alpha": 0.16,
             "grid.linewidth": 0.5,
             "pdf.fonttype": 42,
-            "figure.figsize": (HALF_COL_WIDTH, 2.0),
+            "figure.figsize": (HALF_COL_WIDTH, HALF_COL_WIDTH / 1.618),
+            "figure.constrained_layout.use": True,
         }
     )
 
@@ -50,9 +51,14 @@ def style_axes(ax: Axes, xlabel: str, ylabel: str) -> None:
     ax.grid(visible=True)
 
 
+def figsize(cols: str = "half", nrows: int = 1) -> tuple[float, float]:
+    w = FULL_COL_WIDTH if cols == "full" else HALF_COL_WIDTH
+    return (w, (w / 1.618) * nrows)
+
+
 def save_figure(fig: Figure, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
+    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)

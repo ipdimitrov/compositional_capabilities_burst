@@ -16,7 +16,15 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
-from burst.config import ACC_BURST, ACC_OTHER, CLASS_BURST, CLASS_OTHER, SCHED_COLORS, SCHED_DISPLAY, reversion_life_label
+from burst.config import (
+    ACC_BURST,
+    ACC_OTHER,
+    CLASS_BURST,
+    CLASS_OTHER,
+    SCHED_COLORS,
+    SCHED_DISPLAY,
+    reversion_life_label,
+)
 from burst.core.charts.style import apply_paper_style, save_figure, style_axes
 
 

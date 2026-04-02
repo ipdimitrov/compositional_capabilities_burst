@@ -28,6 +28,7 @@ from burst.core.data import pad_pools_to_same_length
 from burst.rng import get_rng, seed_all
 from burst.types import ExperimentData
 
+
 def _cat(pool: dict[tuple, np.ndarray], fallback_cols: int = 1) -> np.ndarray:
     if not pool:
         return np.zeros((1, fallback_cols), dtype=np.int64)
