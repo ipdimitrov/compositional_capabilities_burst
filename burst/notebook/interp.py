@@ -306,7 +306,10 @@ def analyze(data: dict, pt: dict, ft_results: list[dict], fg_results: list[dict]
     eval_other = data["eval_other"]
 
     sd_pt = load_sd(pt["ckpt_path"])
-    net_pt = load_model(pt["ckpt_path"], compile_model=False, **model_cfg)
+    net_pt = load_model(
+        pt["ckpt_path"], model_cfg["vocab_size"], model_cfg["context_size"],
+        model_cfg["n_layer"], model_cfg["n_embd"], model_cfg["n_head"], compile_model=False,
+    )
 
     results = {}
     assert len(ft_results) == len(fg_results), "finetune/forget result lists must match"  # noqa: S101
@@ -328,13 +331,19 @@ def analyze(data: dict, pt: dict, ft_results: list[dict], fg_results: list[dict]
         else:
             drift_ft_fg = drift_pt_fg = cosine_ft_fg =             svd_ft_fg = None
 
-        net_ft = load_model(ft["ckpt_path"], compile_model=False, **model_cfg)
+        net_ft = load_model(
+            ft["ckpt_path"], model_cfg["vocab_size"], model_cfg["context_size"],
+            model_cfg["n_layer"], model_cfg["n_embd"], model_cfg["n_head"], compile_model=False,
+        )
         cka_pt_ft_burst = cka_between_models(net_pt, net_ft, eval_burst, prompt_len)
         cka_pt_ft_other = cka_diagonal(net_pt, net_ft, eval_other, prompt_len)
 
         cka_ft_fg_burst = None
         if fg_ckpt:
-            net_fg = load_model(fg_ckpt, compile_model=False, **model_cfg)
+            net_fg = load_model(
+                fg_ckpt, model_cfg["vocab_size"], model_cfg["context_size"],
+                model_cfg["n_layer"], model_cfg["n_embd"], model_cfg["n_head"], compile_model=False,
+            )
             cka_ft_fg_burst = cka_between_models(net_ft, net_fg, eval_burst, prompt_len)
             del net_fg
 

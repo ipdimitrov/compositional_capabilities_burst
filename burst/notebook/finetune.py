@@ -1,9 +1,4 @@
-"""Phase 2: Finetune (burst) — mix special-class examples into background.
-
-Loads a pretrained checkpoint, trains with a given burst fraction, and saves
-the resulting checkpoint + log.  Can be called multiple times with different
-burst_frac values to sweep concentrations.
-"""
+"""Phase 2: Finetune (burst) — mix special-class examples into background."""
 
 from pathlib import Path
 
@@ -11,7 +6,7 @@ import numpy as np
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER
+from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER, TrainConfig
 from burst.notebook.interp import (
     _get_grad_vector,
     grad_norm_entropy,
@@ -20,7 +15,6 @@ from burst.notebook.interp import (
     weight_drift_l2,
 )
 from burst.notebook.model import (
-    MODEL_DEFAULTS,
     cosine_lr,
     eval_accuracy,
     eval_loss,
@@ -31,6 +25,8 @@ from burst.notebook.model import (
 )
 from burst.rng import get_rng, seed_all
 from burst.types import ExperimentData, FinetuneResult
+
+_D = TrainConfig()
 
 
 def _sample_batch(target_pool: dict, bg_pool: dict, n_target: int, batch_size: int) -> np.ndarray:
@@ -62,17 +58,18 @@ def finetune(  # noqa: PLR0913, PLR0915
     *,
     burst_frac: float = 1.0,
     steps: int = 200,
-    lr: float = MODEL_DEFAULTS["lr"],
-    lr_start_frac: float = 0.3,
-    lr_end_frac: float = 0.15,
-    batch_size: int = MODEL_DEFAULTS["batch_size"],
-    eval_every: int = MODEL_DEFAULTS["eval_every"],
-    grad_clip: float = MODEL_DEFAULTS["grad_clip"],
-    beta1: float = MODEL_DEFAULTS["beta1"],
-    beta2: float = MODEL_DEFAULTS["beta2"],
-    n_layer: int = MODEL_DEFAULTS["n_layer"],
-    n_embd: int = MODEL_DEFAULTS["n_embd"],
-    n_head: int = MODEL_DEFAULTS["n_head"],
+    lr: float = _D.lr,
+    lr_start_frac: float = _D.lr_burst_end_frac,
+    lr_end_frac: float = _D.lr_burst_end_frac,
+    batch_size: int = _D.batch_size,
+    eval_every: int = _D.eval_every,
+    grad_clip: float = _D.grad_clip,
+    beta1: float = _D.beta1,
+    beta2: float = _D.beta2,
+    weight_decay: float = _D.weight_decay,
+    n_layer: int = _D.n_layer,
+    n_embd: int = _D.n_embd,
+    n_head: int = _D.n_head,
     tag: str | None = None,
     seed: int = 42,
     quiet: bool = False,
@@ -97,9 +94,11 @@ def finetune(  # noqa: PLR0913, PLR0915
     seed_all(seed)
 
     net = load_model(
-        pretrain_ckpt, vocab_size, context_size, n_layer=n_layer, n_embd=n_embd, n_head=n_head
+        pretrain_ckpt, vocab_size, context_size, n_layer, n_embd, n_head, compile_model=True,
     )
-    optimizer = make_optimizer(net, lr=lr * lr_start_frac, beta1=beta1, beta2=beta2)
+    optimizer = make_optimizer(
+        net, lr=lr * lr_start_frac, beta1=beta1, beta2=beta2, weight_decay=weight_decay,
+    )
 
     sd_ref = state_dict_cpu(net)
 

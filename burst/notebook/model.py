@@ -1,7 +1,4 @@
-"""Model utilities for notebook phases: creation, saving, loading, training step, eval.
-
-Delegates to burst.core.train_utils and burst.core.train.worker where possible.
-"""
+"""Model utilities for notebook phases: creation, saving, loading, training step, eval."""
 
 import math
 from pathlib import Path
@@ -11,26 +8,14 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
+from burst.config import EVAL_BATCH_SIZE
 from burst.core.train_utils import DEVICE, make_net, make_net_bare
 from net.nanogpt import nanoGPT
 
-MODEL_DEFAULTS = {
-    "n_layer": 6,
-    "n_embd": 120,
-    "n_head": 4,
-    "lr": 1e-3,
-    "beta1": 0.9,
-    "beta2": 0.9,
-    "grad_clip": 1.0,
-    "warmup_iters": 50,
-    "batch_size": 128,
-    "eval_every": 25,
-}
-
 
 def make_model(  # noqa: PLR0913
-    vocab_size: int, context_size: int, *,
-    n_layer: int = 6, n_embd: int = 120, n_head: int = 4, compile_model: bool = True,
+    vocab_size: int, context_size: int,
+    n_layer: int, n_embd: int, n_head: int, *, compile_model: bool,
 ) -> torch.nn.Module:
     """Create a nanoGPT model, optionally torch-compiled."""
     cfg = {
@@ -50,8 +35,8 @@ def save_model(net: torch.nn.Module, path: str | Path) -> None:
 
 
 def load_model(  # noqa: PLR0913
-    path: str | Path, vocab_size: int, context_size: int, *,
-    n_layer: int = 6, n_embd: int = 120, n_head: int = 4, compile_model: bool = True,
+    path: str | Path, vocab_size: int, context_size: int,
+    n_layer: int, n_embd: int, n_head: int, *, compile_model: bool,
 ) -> torch.nn.Module:
     """Load a saved nanoGPT checkpoint and optionally compile."""
     net = nanoGPT(
@@ -74,13 +59,12 @@ def load_model(  # noqa: PLR0913
 
 
 def make_optimizer(
-    net: torch.nn.Module, lr: float = 1e-3,
-    beta1: float = 0.9, beta2: float = 0.9,
+    net: torch.nn.Module, lr: float, beta1: float, beta2: float, weight_decay: float,
 ) -> torch.optim.Optimizer:
-    """Build AdamW optimizer — weight_decay=0 since AdamW handles decoupled decay internally."""
+    """Build AdamW with decoupled weight decay."""
     params = [p for p in net.parameters() if p.requires_grad]
     return torch.optim.AdamW(
-        params, lr=lr, betas=(beta1, beta2), weight_decay=0.0, fused=(DEVICE == "cuda"),
+        params, lr=lr, betas=(beta1, beta2), weight_decay=weight_decay, fused=(DEVICE == "cuda"),
     )
 
 
@@ -98,7 +82,7 @@ def reset_optimizer(optimizer: torch.optim.Optimizer) -> None:
                     state[k] = 0
 
 
-def cosine_lr(step: int, total_steps: int, lr_max: float, lr_min: float, warmup: int = 0) -> float:
+def cosine_lr(step: int, total_steps: int, lr_max: float, lr_min: float, warmup: int) -> float:
     """Cosine learning-rate schedule with optional linear warmup."""
     if step <= warmup:
         return lr_max * step / max(warmup, 1)
@@ -114,7 +98,7 @@ def set_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
 
 def train_step(
     net: torch.nn.Module, optimizer: torch.optim.Optimizer, batch_np: np.ndarray,
-    lr: float | None = None, grad_clip: float = 1.0,
+    lr: float | None, grad_clip: float,
 ) -> float:
     """Run one forward + backward pass and return the loss scalar."""
     if lr is not None:
@@ -144,9 +128,8 @@ def eval_accuracy(
     n_new = docs_BL.shape[1] - prompt_len
     dat = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     correct, total = 0, 0
-    bs = 256
-    for i in range(0, dat.shape[0], bs):
-        chunk = dat[i : i + bs]
+    for i in range(0, dat.shape[0], EVAL_BATCH_SIZE):
+        chunk = dat[i : i + EVAL_BATCH_SIZE]
         tgt = chunk[:, 1:]
         full = net.generate(chunk[:, :prompt_len], n_new)
         gen = full[:, eval_start:eval_end]

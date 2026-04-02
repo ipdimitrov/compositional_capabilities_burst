@@ -1,8 +1,4 @@
-"""Phase 3: Forget (reversion) — train on background only, measure forgetting.
-
-Loads a finetuned checkpoint and trains on background data only.  Tracks how
-quickly the model forgets the burst capability.
-"""
+"""Phase 3: Forget (reversion) — train on background only, measure forgetting."""
 
 from pathlib import Path
 
@@ -10,7 +6,7 @@ import numpy as np
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER
+from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER, TrainConfig
 from burst.notebook.interp import (
     _get_grad_vector,
     grad_norm_entropy,
@@ -19,7 +15,6 @@ from burst.notebook.interp import (
     weight_drift_l2,
 )
 from burst.notebook.model import (
-    MODEL_DEFAULTS,
     cosine_lr,
     eval_accuracy,
     eval_loss,
@@ -33,6 +28,7 @@ from burst.rng import get_rng, seed_all
 from burst.types import ExperimentData, ForgetResult
 
 ACC_NEAR_ZERO = 1e-6
+_D = TrainConfig()
 
 
 def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
@@ -42,18 +38,19 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     *,
     pretrain_ckpt: str | Path | None = None,
     steps: int = 500,
-    lr: float = MODEL_DEFAULTS["lr"],
-    lr_start_frac: float = 0.15,
-    lr_end_frac: float = 0.1,
-    batch_size: int = MODEL_DEFAULTS["batch_size"],
-    eval_every: int = MODEL_DEFAULTS["eval_every"],
-    grad_clip: float = MODEL_DEFAULTS["grad_clip"],
-    beta1: float = MODEL_DEFAULTS["beta1"],
-    beta2: float = MODEL_DEFAULTS["beta2"],
-    n_layer: int = MODEL_DEFAULTS["n_layer"],
-    n_embd: int = MODEL_DEFAULTS["n_embd"],
-    n_head: int = MODEL_DEFAULTS["n_head"],
-    thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70),
+    lr: float = _D.lr,
+    lr_start_frac: float = _D.lr_reversion_end_frac,
+    lr_end_frac: float = _D.lr_reversion_end_frac,
+    batch_size: int = _D.batch_size,
+    eval_every: int = _D.eval_every,
+    grad_clip: float = _D.grad_clip,
+    beta1: float = _D.beta1,
+    beta2: float = _D.beta2,
+    weight_decay: float = _D.weight_decay,
+    n_layer: int = _D.n_layer,
+    n_embd: int = _D.n_embd,
+    n_head: int = _D.n_head,
+    thresholds: tuple[float, ...] = _D.reversion_thresholds,
     tag: str | None = None,
     seed: int = 42,
     quiet: bool = False,
@@ -78,9 +75,11 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     seed_all(seed)
 
     net = load_model(
-        finetune_ckpt, vocab_size, context_size, n_layer=n_layer, n_embd=n_embd, n_head=n_head
+        finetune_ckpt, vocab_size, context_size, n_layer, n_embd, n_head, compile_model=True,
     )
-    optimizer = make_optimizer(net, lr=lr * lr_start_frac, beta1=beta1, beta2=beta2)
+    optimizer = make_optimizer(
+        net, lr=lr * lr_start_frac, beta1=beta1, beta2=beta2, weight_decay=weight_decay,
+    )
     reset_optimizer(optimizer)  # fresh momentum for reversion phase
 
     sd_ft = state_dict_cpu(net)

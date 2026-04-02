@@ -1,8 +1,4 @@
-"""Phase 1: Pretrain on background (all-but-special) data.
-
-Trains a model from scratch until loss plateaus (convergence),
-then saves a checkpoint that finetune() can load.
-"""
+"""Phase 1: Pretrain on background (all-but-special) data."""
 
 import logging
 from pathlib import Path
@@ -10,9 +6,8 @@ from pathlib import Path
 import numpy as np
 from tqdm.auto import tqdm
 
-from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER
+from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER, TrainConfig
 from burst.notebook.model import (
-    MODEL_DEFAULTS,
     eval_accuracy,
     eval_loss,
     make_model,
@@ -25,21 +20,24 @@ from burst.types import ExperimentData, PretrainResult
 
 logger = logging.getLogger(__name__)
 
+_D = TrainConfig()
+
 
 def pretrain(  # noqa: PLR0913, PLR0915
     data: ExperimentData,
     out_dir: str | Path,
     *,
-    lr: float = MODEL_DEFAULTS["lr"],
-    batch_size: int = MODEL_DEFAULTS["batch_size"],
-    eval_every: int = MODEL_DEFAULTS["eval_every"],
-    warmup: int = MODEL_DEFAULTS["warmup_iters"],
-    grad_clip: float = MODEL_DEFAULTS["grad_clip"],
-    beta1: float = MODEL_DEFAULTS["beta1"],
-    beta2: float = MODEL_DEFAULTS["beta2"],
-    n_layer: int = MODEL_DEFAULTS["n_layer"],
-    n_embd: int = MODEL_DEFAULTS["n_embd"],
-    n_head: int = MODEL_DEFAULTS["n_head"],
+    lr: float = _D.lr,
+    batch_size: int = _D.batch_size,
+    eval_every: int = _D.eval_every,
+    warmup: int = _D.warmup_iters,
+    grad_clip: float = _D.grad_clip,
+    beta1: float = _D.beta1,
+    beta2: float = _D.beta2,
+    weight_decay: float = _D.weight_decay,
+    n_layer: int = _D.n_layer,
+    n_embd: int = _D.n_embd,
+    n_head: int = _D.n_head,
     patience: int = 5,
     max_steps: int = 5000,
     seed: int = 42,
@@ -69,8 +67,8 @@ def pretrain(  # noqa: PLR0913, PLR0915
 
     seed_all(seed)
 
-    net = make_model(**model_cfg)
-    optimizer = make_optimizer(net, lr=lr, beta1=beta1, beta2=beta2)
+    net = make_model(**model_cfg, compile_model=True)
+    optimizer = make_optimizer(net, lr=lr, beta1=beta1, beta2=beta2, weight_decay=weight_decay)
 
     log = {
         "step": [],
