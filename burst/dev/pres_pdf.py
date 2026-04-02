@@ -18,7 +18,7 @@ import pickle
 import sys
 import traceback
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from collections import defaultdict
 from pathlib import Path
 
@@ -34,7 +34,7 @@ from burst.config import (
 )
 
 logger = logging.getLogger(__name__)
-from burst.dev.pres_charts import (
+from burst.dev.pres_charts import (  # noqa: E402
     SCHED_SHORT,
     _group,
     _group_gs,

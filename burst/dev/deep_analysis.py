@@ -133,7 +133,7 @@ def _free_gen_acc_ablated(
     norms_T = delta_TN.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     delta_unit_TN = delta_TN / norms_T
 
-    def _hook(_module, _input, output):
+    def _hook(_module: Any, _input: Any, output: Any) -> Any:  # noqa: ANN401
         if isinstance(output, tuple):
             x_raw, rest = output[0], output[1:]
         else:
@@ -161,7 +161,7 @@ def _free_gen_acc_ablated(
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
-def compute_adl_for_label(
+def compute_adl_for_label(  # noqa: PLR0913
     label: str,
     ckpt_dir: Path,
     cfg: dict,
@@ -1288,7 +1288,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
             ],
         )
 
-        def _add_scatter(fig, row, col, x, y, colors, labels) -> None:
+        def _add_scatter(fig: Any, row: int, col: int, x: Any, y: Any, colors: Any, labels: Any) -> None:  # noqa: ANN401, PLR0913
             fig.add_trace(
                 go.Scatter(
                     x=x,

@@ -6,7 +6,7 @@ EMA interpolation probe, critical sharpness, weight delta rank).
 New metrics implemented here:
 
 From checkpoints:
-  1. Task Vector Transfer       — does τ = θ_post − θ_pre transfer to a fresh model?
+  1. Task Vector Transfer       -- does tau = theta_post - theta_pre transfer to a fresh model?
   2. Forgetting Trajectory Dim  — PCA dimensionality of the reversion weight path
   3. Relearning Efficiency       — burst accuracy recovery after 50 fine-tune steps
   4. Linear Mode Connectivity    — loss barrier on the straight path peak→reverted
@@ -94,7 +94,7 @@ def compute_task_vector_transfer(
     prompt_len: int,
     n_seeds: int = 3,
 ) -> dict:
-    """Transfer τ = θ_post_burst − θ_pre_burst to a different seed's pre-burst model.
+    """Transfer tau = theta_post_burst - theta_pre_burst to a different seed's pre-burst model.
 
     For a shallow wrapper (burst_100): τ encodes the burst capability as a
     modular add-on — adding it to any model should grant burst accuracy.

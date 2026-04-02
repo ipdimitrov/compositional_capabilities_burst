@@ -70,8 +70,12 @@ from burst.dev._shared import (
 _rng = np.random.default_rng()
 
 NOISE_SIGMAS: list[float] = [0.0, 0.001, 0.002, 0.003, 0.004, 0.006, 0.008, 0.010, 0.015, 0.020]
+NOISE_SIGMA_THRESHOLD: float = 0.004
 SURFACE_GRID: int = 15
 SURFACE_RANGE: float = 0.02
+_MIN_DIM_FOR_FILTER_NORM: int = 2
+_NORM_EPS: float = 1e-10
+_MIN_SAMPLES_FOR_CORR: int = 2
 
 
 def _filter_normalise(
@@ -87,7 +91,7 @@ def _filter_normalise(
     for name, d in direction.items():
         ref = reference[name].float()
         d_f = d.float()
-        if d_f.dim() >= 2:
+        if d_f.dim() >= _MIN_DIM_FOR_FILTER_NORM:
             # Treat first dimension as filter dimension
             d_norms = d_f.view(d_f.shape[0], -1).norm(dim=1, keepdim=True)
             ref_norms = ref.view(ref.shape[0], -1).norm(dim=1, keepdim=True)
