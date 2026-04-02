@@ -472,14 +472,12 @@ def compute_lmc_dual(
                     _net.load_state_dict(interp)
                     _net.eval()
                     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-                        bl = F.cross_entropy(
+                        burst_losses.append(F.cross_entropy(
                             _net(burst_inp).float().reshape(-1, _V), burst_tgt.reshape(-1)
-                        ).item()
-                        ol = F.cross_entropy(
+                        ).item())
+                        other_losses.append(F.cross_entropy(
                             _net(other_inp).float().reshape(-1, _V), other_tgt.reshape(-1)
-                        ).item()
-                    burst_losses.append(bl)
-                    other_losses.append(ol)
+                        ).item())
                 return burst_losses, other_losses
 
             pre_peak_burst, pre_peak_other = _eval_batch(all_interps_pre_peak)
@@ -1394,9 +1392,8 @@ def compute_forgetting_grad_alignment(
             net.zero_grad()
 
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-                logits = net(other_inp).float()
                 loss = F.cross_entropy(
-                    logits.reshape(-1, sc.cfg["vocab_size"]), other_tgt.reshape(-1)
+                    net(other_inp).float().reshape(-1, sc.cfg["vocab_size"]), other_tgt.reshape(-1)
                 )
             loss.backward()
 
@@ -1473,8 +1470,9 @@ def _eval_loss_at_eta(  # noqa: PLR0913
     net.load_state_dict(perturbed)
     net.eval()
     with torch.no_grad():
-        logits = net(inp_t).float()
-        return F.cross_entropy(logits.reshape(-1, vocab_size), tgt_t.reshape(-1)).item()
+        return F.cross_entropy(
+            net(inp_t).float().reshape(-1, vocab_size), tgt_t.reshape(-1)
+        ).item()
 
 
 def _critical_lr_line_search(  # noqa: PLR0913
@@ -1584,13 +1582,11 @@ def compute_sharpness(  # noqa: C901
 
             net.eval()
             with torch.no_grad():
-                logits_burst = net(burst_inp).float()
                 loss_burst_base = F.cross_entropy(
-                    logits_burst.reshape(-1, V), burst_tgt.reshape(-1)
+                    net(burst_inp).float().reshape(-1, V), burst_tgt.reshape(-1)
                 ).item()
-                logits_other = net(other_inp).float()
                 loss_other_base = F.cross_entropy(
-                    logits_other.reshape(-1, V), other_tgt.reshape(-1)
+                    net(other_inp).float().reshape(-1, V), other_tgt.reshape(-1)
                 ).item()
 
             eta_c_burst = _critical_lr_line_search(
