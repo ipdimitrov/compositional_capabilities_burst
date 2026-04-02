@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
-from burst.config import SCHED_COLORS, SCHED_DISPLAY, reversion_life_label
+from burst.config import ACC_BURST, ACC_OTHER, SCHED_COLORS, SCHED_DISPLAY, reversion_life_label
 from burst.core.charts.style import apply_paper_style, save_figure, style_axes
 
 
@@ -32,18 +32,18 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
         _plot_overlay(
             bundle,
             out_dir,
-            "acc_burst",
+            ACC_BURST,
             "Special Accuracy",
             "Special Class Accuracy",
-            "overlay_all_acc_burst.png",
+            f"overlay_all_{ACC_BURST}.png",
         ),
         _plot_overlay(
             bundle,
             out_dir,
-            "acc_other",
+            ACC_OTHER,
             "Other Accuracy",
             "Other Class Accuracy",
-            "overlay_all_acc_other.png",
+            f"overlay_all_{ACC_OTHER}.png",
         ),
         _plot_overlay(bundle, out_dir, "loss", "Loss", "Training Loss", "overlay_all_loss.png"),
         _plot_auc_bars(bundle, out_dir),
@@ -70,7 +70,7 @@ def _plot_schedule_bars(bundle: dict, out_dir: Path) -> Path:
         axes = [axes]
 
     max_len = max(len(bars[schedule]["fractions"]) for schedule in schedules)
-    for ax, schedule in zip(axes, schedules, strict=False):
+    for ax, schedule in zip(axes, schedules, strict=True):
         fracs = np.array(bars[schedule]["fractions"], dtype=float)
         xs = np.arange(len(fracs))
         ax.fill_between(xs, fracs, color=SCHED_COLORS[schedule], alpha=0.78)
@@ -102,7 +102,7 @@ def _plot_lr_curves(bundle: dict, out_dir: Path) -> Path:
     return _save(fig, out_dir / "lr_schedule.png")
 
 
-def _plot_overlay(  # noqa: PLR0913
+def _plot_overlay(
     bundle: dict, out_dir: Path, metric: str, ylabel: str, title: str, filename: str
 ) -> Path:
     """Plot a single metric overlaid across all schedules."""
@@ -203,9 +203,9 @@ def _plot_reversion_zoom(bundle: dict, out_dir: Path) -> Path:
     fig, ax = plt.subplots(figsize=(11, 6))
     for schedule in bundle["config"]["schedules"]:
         schedule_data = bundle["training"][schedule]
-        steps = np.array(schedule_data["acc_burst"]["steps"], dtype=float)
-        mean = np.array(schedule_data["acc_burst"]["mean"], dtype=float)
-        ci = np.array(schedule_data["acc_burst"]["ci"], dtype=float)
+        steps = np.array(schedule_data[ACC_BURST]["steps"], dtype=float)
+        mean = np.array(schedule_data[ACC_BURST]["mean"], dtype=float)
+        ci = np.array(schedule_data[ACC_BURST]["ci"], dtype=float)
         burst_end = schedule_data["pre_steps"] + schedule_data["burst_steps"]
         mask = steps >= burst_end
         local_steps = steps[mask] - burst_end
@@ -460,14 +460,14 @@ def _plot_per_schedule(bundle: dict, out_dir: Path) -> list[Path]:
     paths: list[Path] = []
     for schedule in bundle["config"]["schedules"]:
         schedule_data = bundle["training"][schedule]
-        steps = np.array(schedule_data["acc_burst"]["steps"], dtype=float)
+        steps = np.array(schedule_data[ACC_BURST]["steps"], dtype=float)
         pre_steps = schedule_data["pre_steps"]
         burst_end = pre_steps + schedule_data["burst_steps"]
 
         fig, ax = plt.subplots(figsize=(11, 5.5))
         for metric, color, label in (
-            ("acc_other", "#1565C0", "Other"),
-            ("acc_burst", "#D32F2F", "Special"),
+            (ACC_OTHER, "#1565C0", "Other"),
+            (ACC_BURST, "#D32F2F", "Special"),
         ):
             mean = np.array(schedule_data[metric]["mean"], dtype=float)
             ci = np.array(schedule_data[metric]["ci"], dtype=float)
@@ -501,14 +501,18 @@ def _save(fig: Figure, path: Path) -> Path:
     return path
 
 
+_OVERLAY_BURST_FILENAME = f"overlay_all_{ACC_BURST}.png"
+_OVERLAY_OTHER_FILENAME = f"overlay_all_{ACC_OTHER}.png"
+
+
 def _overlay_aliases(filename: str) -> list[Path]:
     """Return short alias paths for an overlay chart filename."""
-    if filename == "overlay_all_acc_burst.png":
-        return [Path(filename.replace("overlay_all_acc_burst.png", "overlay_burst.png"))]
-    if filename == "overlay_all_acc_other.png":
-        return [Path(filename.replace("overlay_all_acc_other.png", "overlay_other.png"))]
+    if filename == _OVERLAY_BURST_FILENAME:
+        return [Path("overlay_burst.png")]
+    if filename == _OVERLAY_OTHER_FILENAME:
+        return [Path("overlay_other.png")]
     if filename == "overlay_all_loss.png":
-        return [Path(filename.replace("overlay_all_loss.png", "overlay_loss.png"))]
+        return [Path("overlay_loss.png")]
     return []
 
 

@@ -71,7 +71,7 @@ def _jsonable(value: object) -> str | dict | list | int | float | bool | None:
     return value
 
 
-def write_repro_manifest(  # noqa: PLR0913
+def write_repro_manifest(
     run_dir: str | Path,
     *,
     mode: str,

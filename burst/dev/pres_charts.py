@@ -1,107 +1,135 @@
 """Chart generation for the hypothesis-driven presentation."""
 
-import sys
-import os
-import math
-import pickle
+from __future__ import annotations
+
 import json
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-import numpy as np
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from pathlib import Path
+import logging
+import math
+import os
+import pickle
+import sys
 from collections import defaultdict
-from burst.core.train.worker import n_target_for_step
-from burst.core.train_utils import compute_lr_schedule as _compute_lr
+from pathlib import Path
+from typing import Any
+
+import matplotlib as mpl
+import numpy as np
+
+mpl.use("Agg")
+
+import matplotlib.pyplot as plt
+
 from burst.config import (
-    SCHED_COLORS as PALETTE,
-    SCHED_DISPLAY as SCHED_SHORT,
+    ACC_BURST,
+    ACC_OTHER,
+    MODE_CURRENT,
     SCHEDULE_ORDER,
-    ordered_schedules as _ordered,
     TrainConfig,
     reversion_life_key,
     reversion_life_label,
-    burst_steps_for_mode as _burst_T_mode,
-    MODE_CURRENT,
 )
+from burst.config import (
+    SCHED_COLORS as PALETTE,
+)
+from burst.config import (
+    SCHED_DISPLAY as SCHED_SHORT,
+)
+from burst.config import (
+    burst_steps_for_mode as _burst_T_mode,
+)
+from burst.config import (
+    ordered_schedules as _ordered,
+)
+from burst.core.train.worker import n_target_for_step
+from burst.core.train_utils import compute_lr_schedule as _compute_lr
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+logger = logging.getLogger(__name__)
+
+_Cfg = dict[str, Any]
+_Groups = dict[str, list[dict[str, Any]]]
+_PathLike = str | os.PathLike[str]
 
 
-def load_grad_sim_data(run_dir) -> list[dict]:
+def load_grad_sim_data(run_dir: _PathLike) -> list[dict]:
     """Load all grad cosine sim records from the dedicated folder.
 
     Falls back to extracting from all_results.pkl if the folder doesn't exist.
     """
     rd = Path(run_dir)
-    records = []
+    records: list[dict] = []
     for gs_dir in [rd / "results" / "grad_cosine_sim", rd / "grad_cosine_sim"]:
         if gs_dir.is_dir():
             for fp in sorted(gs_dir.glob("*.json")):
-                with open(fp) as f:
+                with fp.open() as f:
                     records.append(json.load(f))
             if records:
                 return records
 
     for pkl in [rd / "logs" / "all_results.pkl", rd / "all_results.pkl"]:
         if pkl.exists():
-            with open(pkl, "rb") as f:
+            with pkl.open("rb") as f:
                 results = pickle.load(f)
-            for r in results:
-                if "grad_sim_log" in r and r["grad_sim_log"]["step"]:
-                    records.append(
-                        {
-                            "schedule": r["schedule"],
-                            "seed": r["seed"],
-                            "label": r.get("label", ""),
-                            "grad_sim_log": r["grad_sim_log"],
-                            "pairwise_snapshots": r.get("pairwise_snapshots", []),
-                        }
-                    )
+            records.extend(
+                {
+                    "schedule": r["schedule"],
+                    "seed": r["seed"],
+                    "label": r.get("label", ""),
+                    "grad_sim_log": r["grad_sim_log"],
+                    "pairwise_snapshots": r.get("pairwise_snapshots", []),
+                }
+                for r in results
+                if "grad_sim_log" in r and r["grad_sim_log"]["step"]
+            )
             if records:
                 return records
     return records
 
 
-def _group_gs(records):
-    g = defaultdict(list)
+def _group_gs(records: list[dict]) -> _Groups:
+    g: _Groups = defaultdict(list)
     for r in records:
         g[r["schedule"]].append(r)
     return g
 
 
-def _group(results):
-    g = defaultdict(list)
+def _group(results: list[dict]) -> _Groups:
+    g: _Groups = defaultdict(list)
     for r in results:
         g[r["schedule"]].append(r)
     return g
 
 
-def _sched_T(groups: dict) -> dict[str, int]:
+def _sched_T(groups: dict) -> dict[str, int]:  # noqa: N802
     """Per-schedule burst length T from the first run's config."""
     return {s: runs[0]["config"]["total_steps"] for s, runs in groups.items()}
 
 
-def _T_for(sched: str, bcfg: dict) -> int:
+def _T_for(sched: str, bcfg: dict) -> int:  # noqa: N802
     """Burst length T for a schedule, using base_steps from bcfg."""
     mode = bcfg.get("_burst_mode", MODE_CURRENT)
     return _burst_T_mode(sched, mode, bcfg["total_steps"])
 
 
-def _style(ax, xl="", yl="", t=""):
+def _style(ax: mpl.axes.Axes, xl: str = "", yl: str = "", t: str = "") -> None:
+    """Apply standard axis styling."""
     ax.set_xlabel(xl, fontsize=13, fontweight="bold")
     ax.set_ylabel(yl, fontsize=13, fontweight="bold")
     if t:
         ax.set_title(t, fontsize=15, fontweight="bold", pad=12)
     ax.tick_params(labelsize=11)
-    ax.grid(True, alpha=0.15, lw=0.5)
+    ax.grid(visible=True, alpha=0.15, lw=0.5)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
 
-def schedule_bars(pdir, results, cfg):
+def schedule_bars(
+    pdir: Path,
+    results: list[dict],
+    cfg: _Cfg,
+) -> Path:
+    """Render schedule bar charts showing fraction of burst data per step."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U, bs, p = bcfg["reversion_steps"], bcfg["batch_size"], bcfg["p_target"]
@@ -155,18 +183,20 @@ def schedule_bars(pdir, results, cfg):
 
 
 def overlay(
-    pdir,
-    results,
-    cfg,
-    key,
-    yl,
-    title,
-    fname,
-    loc="center left",
-    groups=None,
-    align="absolute",
-    clamp_01=None,
-):
+    pdir: Path,
+    results: list[dict],
+    cfg: _Cfg,
+    key: str,
+    yl: str,
+    title: str,
+    fname: str,
+    loc: str = "center left",
+    groups: _Groups | None = None,
+    align: str = "absolute",
+    *,
+    clamp_01: bool | None = None,
+) -> Path:
+    """Render an overlay line chart for a given metric across schedules."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
@@ -174,7 +204,6 @@ def overlay(
         groups = _group(results)
     Ts = _sched_T(groups)
     fig, ax = plt.subplots(figsize=(14, 7))
-    all_vals_flat = []
     for sched in _ordered(groups.keys()):
         runs = groups[sched]
         T_s = Ts[sched]
@@ -187,13 +216,9 @@ def overlay(
         m = np.mean(vals, axis=0)
         n_s = len(runs)
         ci = 1.96 * np.std(vals, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals, axis=0)
-        if align == "end":
-            x = steps - burst_end_s
-        else:
-            x = steps
+        x = steps - burst_end_s if align == "end" else steps
         ax.plot(x, m, color=PALETTE[sched], lw=2.5, label=SCHED_SHORT[sched])
         ax.fill_between(x, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
-        all_vals_flat.extend(m.tolist())
 
     T_max = max(Ts.values())
     burst_end_max = P + T_max
@@ -281,13 +306,24 @@ def overlay(
     return p_
 
 
-def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0, groups=None):
+def bar_chart(
+    pdir: Path,
+    results: list[dict],
+    cfg: _Cfg,
+    metric: str,
+    yl: str,
+    title: str,
+    fname: str,
+    fmt_dec: int = 0,
+    groups: _Groups | None = None,
+) -> Path | None:
+    """Render a bar chart for a scalar metric across schedules."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     if groups is None:
         groups = _group(results)
     if not any(metric in r for r in results):
-        print(f"    [skip] no results contain metric '{metric}'")
+        logger.debug("    [skip] no results contain metric '%s'", metric)
         return None
     scheds = _ordered(groups.keys())
     n = len(scheds)
@@ -328,9 +364,11 @@ def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0, groups=No
             edgecolor="white",
             lw=0.5,
         )
-    for i, (m, ci) in enumerate(zip(means, cis)):
+    for i, (m, ci) in enumerate(zip(means, cis, strict=False)):
         lbl = f"{m:.{fmt_dec}f}" if m < U or fmt_dec > 0 else f">{U}"
-        ax.text(i, m + ci + max(means) * 0.02, lbl, ha="center", fontsize=12, fontweight="bold")
+        ax.text(
+            i, m + ci + max(means) * 0.02, lbl, ha="center", fontsize=12, fontweight="bold"
+        )
     ax.set_xticks(xs)
     ax.set_xticklabels([SCHED_SHORT[s] for s in scheds], fontsize=10, fontweight="bold")
     _style(ax, "", yl, title)
@@ -343,18 +381,27 @@ def bar_chart(pdir, results, cfg, metric, yl, title, fname, fmt_dec=0, groups=No
     return p_
 
 
-def auc_diff(pdir, results, cfg, groups=None):
+def auc_diff(
+    pdir: Path,
+    results: list[dict],
+    _cfg: _Cfg,
+    groups: _Groups | None = None,
+) -> Path:
+    """Render a pairwise reversion AUC difference heatmap."""
     if groups is None:
         groups = _group(results)
     scheds = _ordered(groups.keys())
     n = len(scheds)
     mean_aucs = {s: np.mean([r["reversion_auc"] for r in groups[s]]) for s in scheds}
     grid = np.zeros((n, n))
+    _EPS = 1e-9
     for i, sa in enumerate(scheds):
         for j, sb in enumerate(scheds):
             if i != j:
                 base = mean_aucs[sb]
-                grid[i, j] = ((mean_aucs[sa] - base) / abs(base) * 100) if abs(base) > 1e-9 else 0.0
+                grid[i, j] = (
+                    ((mean_aucs[sa] - base) / abs(base) * 100) if abs(base) > _EPS else 0.0
+                )
     fig, ax = plt.subplots(figsize=(9, 8))
     vmax = max(abs(grid.min()), abs(grid.max()), 1)
     im = ax.imshow(grid, cmap="RdBu_r", vmin=-vmax, vmax=vmax, interpolation="nearest")
@@ -370,9 +417,10 @@ def auc_diff(pdir, results, cfg, groups=None):
         fontsize=14,
         fontweight="bold",
     )
+    _HEATMAP_CONTRAST = 0.55
     for i in range(n):
         for j in range(n):
-            c = "white" if abs(grid[i, j]) > vmax * 0.55 else "black"
+            c = "white" if abs(grid[i, j]) > vmax * _HEATMAP_CONTRAST else "black"
             ax.text(
                 j,
                 i,
@@ -391,7 +439,8 @@ def auc_diff(pdir, results, cfg, groups=None):
     return p_
 
 
-def lr_schedule(pdir, cfg):
+def lr_schedule(pdir: Path, cfg: _Cfg) -> Path:
+    """Render the learning rate schedule chart."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
@@ -450,7 +499,14 @@ def lr_schedule(pdir, cfg):
     return p_
 
 
-def reversion_zoom(pdir, results, cfg, groups=None, fname="reversion_zoom.png"):
+def reversion_zoom(
+    pdir: Path,
+    results: list[dict],
+    cfg: _Cfg,
+    groups: _Groups | None = None,
+    fname: str = "reversion_zoom.png",
+) -> Path:
+    """Render a zoomed-in view of forgetting dynamics during reversion."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
@@ -458,7 +514,7 @@ def reversion_zoom(pdir, results, cfg, groups=None, fname="reversion_zoom.png"):
         groups = _group(results)
     Ts = _sched_T(groups)
     fig, ax = plt.subplots(figsize=(14, 7))
-    burst_log_key = "acc_burst"
+    burst_log_key = ACC_BURST
     for sched in _ordered(groups.keys()):
         runs = groups[sched]
         T_s = Ts[sched]
@@ -497,7 +553,13 @@ def reversion_zoom(pdir, results, cfg, groups=None, fname="reversion_zoom.png"):
     return p_
 
 
-def summary_table(pdir, results, cfg, groups=None):
+def summary_table(
+    pdir: Path,
+    results: list[dict],
+    cfg: _Cfg,
+    groups: _Groups | None = None,
+) -> Path:
+    """Render a summary statistics table as an image."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     if groups is None:
@@ -507,15 +569,18 @@ def summary_table(pdir, results, cfg, groups=None):
     fig_w = max(14, 6 + 2.5 * len(thresholds))
     fig, ax = plt.subplots(figsize=(fig_w, 4))
     ax.axis("off")
-    cols = ["Schedule", "Peak Special\n(mean +/- CI)"]
-    for t in thresholds:
-        cols.append(f"{reversion_life_label(t)}\n(mean +/- CI)")
-    cols += ["Reversion AUC\n(mean +/- CI)", "Other Classes Acc\n(mean +/- CI)"]
+    cols = [
+        "Schedule",
+        "Peak Special\n(mean +/- CI)",
+        *[f"{reversion_life_label(t)}\n(mean +/- CI)" for t in thresholds],
+        "Reversion AUC\n(mean +/- CI)",
+        "Other Classes Acc\n(mean +/- CI)",
+    ]
     rows = []
     for sched in scheds:
         runs = groups[sched]
 
-        def fmt(vals, d=3):
+        def fmt(vals: np.ndarray, d: int = 3) -> str:
             m = vals.mean()
             ci = 1.96 * vals.std() / np.sqrt(len(vals)) if len(vals) > 1 else vals.std()
             return f"{m:.{d}f} +/- {ci:.{d}f}" if d > 0 else f"{m:.0f} +/- {ci:.0f}"
@@ -529,7 +594,7 @@ def summary_table(pdir, results, cfg, groups=None):
             row.append(fmt(np.array([r.get(key, U) for r in runs]), 0))
         row += [
             fmt(np.array([r["reversion_auc"] for r in runs]), 0),
-            fmt(np.array([r["log"]["acc_other"][-1] for r in runs]), 3),
+            fmt(np.array([r["log"][ACC_OTHER][-1] for r in runs]), 3),
         ]
         rows.append(row)
     table = ax.table(
@@ -539,7 +604,7 @@ def summary_table(pdir, results, cfg, groups=None):
         cellLoc="center",
         colColours=["#E0E0E0"] * len(cols),
     )
-    table.auto_set_font_size(False)
+    table.auto_set_font_size(auto=False)
     table.set_fontsize(10)
     table.scale(1, 1.8)
     for (row, col), cell in table.get_celld().items():
@@ -563,7 +628,14 @@ def summary_table(pdir, results, cfg, groups=None):
     return p_
 
 
-def per_sched(pdir, results, cfg, groups=None, align="absolute"):
+def per_sched(
+    pdir: Path,
+    results: list[dict],
+    cfg: _Cfg,
+    groups: _Groups | None = None,
+    align: str = "absolute",
+) -> list[Path]:
+    """Render per-schedule overlay charts of other vs special class accuracy."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
@@ -578,17 +650,14 @@ def per_sched(pdir, results, cfg, groups=None, align="absolute"):
         steps = np.array(runs[0]["log"]["step"])
         fig, ax = plt.subplots(figsize=(14, 6))
         for k, (c, lbl) in [
-            ("acc_other", ("#1565C0", "Other Classes")),
-            ("acc_burst", ("#D32F2F", "Special Class")),
+            (ACC_OTHER, ("#1565C0", "Other Classes")),
+            (ACC_BURST, ("#D32F2F", "Special Class")),
         ]:
             vals = np.array([np.array(r["log"][k]) for r in runs])
             m = np.mean(vals, axis=0)
             n_s = len(runs)
             ci = 1.96 * np.std(vals, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals, axis=0)
-            if align == "end":
-                xp = steps - burst_end_s
-            else:
-                xp = steps
+            xp = steps - burst_end_s if align == "end" else steps
             ax.plot(xp, m, color=c, lw=2.5, label=lbl)
             ax.fill_between(xp, m - ci, m + ci, color=c, alpha=0.15)
         if align == "end":
@@ -620,12 +689,14 @@ def per_sched(pdir, results, cfg, groups=None, align="absolute"):
     return paths
 
 
-def _interp_gs(gs_groups, scheds, key="burst_vs_other"):
+def _interp_gs(
+    gs_groups: _Groups, scheds: list[str], key: str = "burst_vs_other"
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Interpolate grad sim traces to a common step grid, per schedule.
 
     Returns {sched: (steps_ref, vals_arr)} where vals_arr is (n_seeds, n_steps).
     """
-    out = {}
+    out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for sched in scheds:
         runs = [r for r in gs_groups[sched] if r["grad_sim_log"]["step"]]
         if not runs:
@@ -634,7 +705,7 @@ def _interp_gs(gs_groups, scheds, key="burst_vs_other"):
         vals_list = [np.array(r["grad_sim_log"][key]) for r in runs]
         steps_ref = steps_list[0]
         interp_vals = []
-        for s, v in zip(steps_list, vals_list):
+        for s, v in zip(steps_list, vals_list, strict=False):
             if len(s) > 1:
                 interp_vals.append(np.interp(steps_ref, s, v))
         if interp_vals:
@@ -642,7 +713,10 @@ def _interp_gs(gs_groups, scheds, key="burst_vs_other"):
     return out
 
 
-def grad_cosine_sim_overlay(pdir, cfg, gs_records):
+def grad_cosine_sim_overlay(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> Path | None:
+    """Render gradient cosine similarity overlay across schedules."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     gs_groups = _group_gs(gs_records)
@@ -658,7 +732,9 @@ def grad_cosine_sim_overlay(pdir, cfg, gs_records):
         steps_ref, vals_arr = interp[sched]
         m = np.mean(vals_arr, axis=0)
         n_s = len(vals_arr)
-        ci = 1.96 * np.std(vals_arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(vals_arr, axis=0)
+        ci = 1.96 * np.std(vals_arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(
+            vals_arr, axis=0
+        )
         ax.plot(steps_ref, m, color=PALETTE[sched], lw=2, label=SCHED_SHORT[sched])
         ax.fill_between(steps_ref, m - ci, m + ci, color=PALETTE[sched], alpha=0.12)
 
@@ -700,7 +776,10 @@ def grad_cosine_sim_overlay(pdir, cfg, gs_records):
     return p_
 
 
-def grad_cosine_sim_by_schedule(pdir, cfg, gs_records):
+def grad_cosine_sim_by_schedule(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> Path | None:
+    """Render bar chart of gradient cosine similarity at end of burst phase."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
@@ -751,7 +830,7 @@ def grad_cosine_sim_by_schedule(pdir, cfg, gs_records):
             lw=0.5,
         )
     ax.axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
-    for i, (m, ci) in enumerate(zip(means, cis)):
+    for i, (m, ci) in enumerate(zip(means, cis, strict=False)):
         offset = 0.02 if m >= 0 else -0.02
         va = "bottom" if m >= 0 else "top"
         y = (m + ci + offset) if m >= 0 else (m - ci + offset)
@@ -774,8 +853,10 @@ def grad_cosine_sim_by_schedule(pdir, cfg, gs_records):
     return p_
 
 
-def grad_cosine_per_seed(pdir, cfg, gs_records):
-    """Individual seed traces for each schedule — shows variance."""
+def grad_cosine_per_seed(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> list[Path]:
+    """Render individual seed traces for each schedule -- shows variance."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     gs_groups = _group_gs(gs_records)
@@ -812,8 +893,10 @@ def grad_cosine_per_seed(pdir, cfg, gs_records):
     return paths
 
 
-def grad_cosine_rate_of_change(pdir, cfg, gs_records):
-    """Derivative of cosine similarity over time — shows where alignment shifts fastest."""
+def grad_cosine_rate_of_change(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> Path | None:
+    """Render derivative of cosine similarity over time."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     gs_groups = _group_gs(gs_records)
@@ -854,8 +937,10 @@ def grad_cosine_rate_of_change(pdir, cfg, gs_records):
     return p_
 
 
-def grad_cosine_phase_comparison(pdir, cfg, gs_records):
-    """Grouped bar chart: mean cosine sim during burst phase vs reversion phase, per schedule."""
+def grad_cosine_phase_comparison(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> Path | None:
+    """Render grouped bar chart of mean cosine sim during burst vs reversion phase."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
@@ -877,11 +962,16 @@ def grad_cosine_phase_comparison(pdir, cfg, gs_records):
                 b_vals.append(sims[b_mask].mean())
             if r_mask.any():
                 r_vals.append(sims[r_mask].mean())
-        for vals, ms, cs in [(b_vals, burst_means, burst_cis), (r_vals, rev_means, rev_cis)]:
+        for vals, ms, cs in [
+            (b_vals, burst_means, burst_cis),
+            (r_vals, rev_means, rev_cis),
+        ]:
             if vals:
                 arr = np.array(vals)
                 ms.append(arr.mean())
-                cs.append(1.96 * arr.std() / np.sqrt(len(arr)) if len(arr) > 1 else arr.std())
+                cs.append(
+                    1.96 * arr.std() / np.sqrt(len(arr)) if len(arr) > 1 else arr.std()
+                )
             else:
                 ms.append(0.0)
                 cs.append(0.0)
@@ -930,8 +1020,10 @@ def grad_cosine_phase_comparison(pdir, cfg, gs_records):
     return p_
 
 
-def grad_cosine_vs_auc_scatter(pdir, cfg, gs_records, results):
-    """Scatter: end-of-burst cosine similarity vs reversion AUC, one dot per seed x schedule."""
+def grad_cosine_vs_auc_scatter(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict], results: list[dict]
+) -> Path | None:
+    """Render scatter of end-of-burst cosine similarity vs reversion AUC."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     if not gs_records or not results:
         return None
@@ -954,23 +1046,26 @@ def grad_cosine_vs_auc_scatter(pdir, cfg, gs_records, results):
         cs.append(PALETTE.get(rec["schedule"], "gray"))
         labels.append(rec["schedule"])
 
-    if len(xs) < 2:
+    _MIN_SCATTER_PTS = 2
+    if len(xs) < _MIN_SCATTER_PTS:
         return None
 
     fig, ax = plt.subplots(figsize=(10, 8))
-    for x, y, c in zip(xs, ys, cs):
-        ax.scatter(x, y, color=c, s=60, edgecolor="black", lw=0.5, zorder=3)
+    for _x, _y, c in zip(xs, ys, cs, strict=False):
+        ax.scatter(_x, _y, color=c, s=60, edgecolor="black", lw=0.5, zorder=3)
 
-    seen = set()
-    for x, y, c, lbl in zip(xs, ys, cs, labels):
+    seen: set[str] = set()
+    for _x, _y, c, lbl in zip(xs, ys, cs, labels, strict=False):
         if lbl not in seen:
             ax.scatter(
-                [], [], color=c, s=60, edgecolor="black", lw=0.5, label=SCHED_SHORT.get(lbl, lbl)
+                [], [], color=c, s=60, edgecolor="black", lw=0.5,
+                label=SCHED_SHORT.get(lbl, lbl),
             )
             seen.add(lbl)
 
     xs_arr, ys_arr = np.array(xs), np.array(ys)
-    if len(xs_arr) > 2:
+    _MIN_CORR_PTS = 3
+    if len(xs_arr) > _MIN_CORR_PTS:
         corr = np.corrcoef(xs_arr, ys_arr)[0, 1]
         z = np.polyfit(xs_arr, ys_arr, 1)
         xline = np.linspace(xs_arr.min(), xs_arr.max(), 100)
@@ -999,9 +1094,10 @@ def grad_cosine_vs_auc_scatter(pdir, cfg, gs_records, results):
     return p_
 
 
-def grad_cosine_mean_over_phases_bars(pdir, cfg, gs_records):
-    """Stacked-style bar: mean cosine sim at start, mid-burst, end-burst, mid-reversion,
-    end-reversion."""
+def grad_cosine_mean_over_phases_bars(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> Path | None:
+    """Render bar chart of mean cosine sim across training phases."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     gs_groups = _group_gs(gs_records)
@@ -1017,7 +1113,7 @@ def grad_cosine_mean_over_phases_bars(pdir, cfg, gs_records):
     xs = np.arange(len(scheds))
     w = 0.8 / n_cp
 
-    for ci, cp_name in enumerate(cp_names):
+    for ci, _cp_name in enumerate(cp_names):
         means = []
         for sched in scheds:
             T_s = _T_for(sched, bcfg)
@@ -1046,7 +1142,7 @@ def grad_cosine_mean_over_phases_bars(pdir, cfg, gs_records):
             alpha=0.85,
             edgecolor="black",
             lw=0.4,
-            label=cp_names[ci],
+            label=_cp_name,
         )
 
     ax.axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
@@ -1066,7 +1162,16 @@ def grad_cosine_mean_over_phases_bars(pdir, cfg, gs_records):
     return p_
 
 
-def _draw_pairwise_heatmap(ax, mean_matrix, labels, n_burst, n_other_sub, show_error, std_matrix):
+def _draw_pairwise_heatmap(
+    ax: mpl.axes.Axes,
+    mean_matrix: np.ndarray,
+    labels: list[str],
+    n_burst: int,
+    n_other_sub: int,
+    *,
+    show_error: bool,
+    std_matrix: np.ndarray | None,
+) -> mpl.image.AxesImage:
     n = len(labels)
     im = ax.imshow(mean_matrix, cmap="RdBu_r", vmin=-1.0, vmax=1.0, interpolation="nearest")
 
@@ -1086,38 +1191,30 @@ def _draw_pairwise_heatmap(ax, mean_matrix, labels, n_burst, n_other_sub, show_e
         ax.axhline(sep, color="black", lw=1.5)
         ax.axvline(sep, color="black", lw=1.5)
 
+    _CONTRAST = 0.55
     fontsize = 8 if show_error else 9
     for i in range(n):
         for j in range(n):
             val = mean_matrix[i, j]
-            txt_color = "white" if abs(val) > 0.55 else "black"
+            txt_color = "white" if abs(val) > _CONTRAST else "black"
             if show_error and std_matrix is not None:
                 txt = f"{val:.2f}\n+/-{std_matrix[i, j]:.2f}"
                 ax.text(
-                    j,
-                    i,
-                    txt,
-                    ha="center",
-                    va="center",
-                    fontsize=6,
-                    fontweight="bold",
-                    color=txt_color,
+                    j, i, txt, ha="center", va="center",
+                    fontsize=6, fontweight="bold", color=txt_color,
                 )
             else:
                 ax.text(
-                    j,
-                    i,
-                    f"{val:.2f}",
-                    ha="center",
-                    va="center",
-                    fontsize=fontsize,
-                    fontweight="bold",
-                    color=txt_color,
+                    j, i, f"{val:.2f}", ha="center", va="center",
+                    fontsize=fontsize, fontweight="bold", color=txt_color,
                 )
     return im
 
 
-def pairwise_grad_cosine_heatmap(pdir, cfg, gs_records):
+def pairwise_grad_cosine_heatmap(
+    pdir: Path, _cfg: _Cfg, gs_records: list[dict]
+) -> list[Path]:
+    """Render pairwise gradient cosine similarity heatmaps per schedule and step."""
     gs_groups = _group_gs(gs_records)
     scheds = _ordered(gs_groups.keys())
 
@@ -1139,9 +1236,11 @@ def pairwise_grad_cosine_heatmap(pdir, cfg, gs_records):
             if not snaps_at_step:
                 continue
 
-            labels = snaps_at_step[0]["labels"]
-            n = len(labels)
-            matrices = [np.array(s["matrix"]) for s in snaps_at_step if len(s["matrix"]) == n]
+            hm_labels = snaps_at_step[0]["labels"]
+            n = len(hm_labels)
+            matrices = [
+                np.array(s["matrix"]) for s in snaps_at_step if len(s["matrix"]) == n
+            ]
             if not matrices:
                 continue
             stacked = np.array(matrices)
@@ -1170,7 +1269,7 @@ def pairwise_grad_cosine_heatmap(pdir, cfg, gs_records):
                 im = _draw_pairwise_heatmap(
                     ax,
                     mean_matrix,
-                    labels,
+                    hm_labels,
                     n_burst,
                     n_other_sub,
                     show_error=show_error,
@@ -1215,7 +1314,8 @@ def _extract_pairwise_metrics(snap: dict) -> dict[str, float]:
     """
     mat = np.array(snap["matrix"])
     n = mat.shape[0]
-    if n < 2:
+    _MIN_DIM = 2
+    if n < _MIN_DIM:
         return {}
 
     if _is_new_format(snap):
@@ -1269,18 +1369,18 @@ PAIRWISE_METRIC_COLORS = {
 }
 
 
-def _collect_pairwise_series(gs_records, scheds_grouped):
+def _collect_pairwise_series(
+    _gs_records: list[dict], scheds_grouped: _Groups
+) -> dict[str, dict[str, Any]]:
     """Build {sched: {metric: (steps_ref, vals_array_SxT)}} from pairwise snapshots."""
-    result = {}
+    result: dict[str, dict[str, Any]] = {}
     for sched, records in scheds_grouped.items():
-        all_steps_set = sorted(
-            set(
-                snap["step"]
-                for r in records
-                if "pairwise_snapshots" in r
-                for snap in r["pairwise_snapshots"]
-            )
-        )
+        all_steps_set = sorted({
+            snap["step"]
+            for r in records
+            if "pairwise_snapshots" in r
+            for snap in r["pairwise_snapshots"]
+        })
         if not all_steps_set:
             continue
         steps_ref = np.array(all_steps_set)
@@ -1297,7 +1397,8 @@ def _collect_pairwise_series(gs_records, scheds_grouped):
                 seed_steps.append(snap["step"])
                 for k, v in m.items():
                     seed_metrics[k].append(v)
-            if len(seed_steps) < 2:
+            _MIN_INTERP_PTS = 2
+            if len(seed_steps) < _MIN_INTERP_PTS:
                 continue
             s_arr = np.array(seed_steps)
             for k, vals in seed_metrics.items():
@@ -1312,8 +1413,10 @@ def _collect_pairwise_series(gs_records, scheds_grouped):
     return result
 
 
-def pairwise_grad_cosine_evolution_by_metric(pdir, cfg, gs_records):
-    """One plot per metric, one line per schedule, error bars across seeds."""
+def pairwise_grad_cosine_evolution_by_metric(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> list[Path]:
+    """Render one plot per metric, one line per schedule, with error bars across seeds."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
 
@@ -1343,13 +1446,8 @@ def pairwise_grad_cosine_evolution_by_metric(pdir, cfg, gs_records):
             )
             c = PALETTE.get(sched, "gray")
             ax.plot(
-                steps_ref,
-                m,
-                color=c,
-                lw=2,
-                label=SCHED_SHORT.get(sched, sched),
-                marker="o",
-                markersize=4,
+                steps_ref, m, color=c, lw=2,
+                label=SCHED_SHORT.get(sched, sched), marker="o", markersize=4,
             )
             ax.fill_between(steps_ref, m - ci, m + ci, color=c, alpha=0.12)
             any_data = True
@@ -1361,30 +1459,16 @@ def pairwise_grad_cosine_evolution_by_metric(pdir, cfg, gs_records):
         ax.axvline(T_max, color="black", ls="--", lw=2, alpha=0.6)
         ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.4)
         ax.text(
-            T_max * 0.5,
-            -0.12,
-            "BURST",
-            ha="center",
-            fontsize=11,
-            color="gray",
-            fontweight="bold",
-            transform=ax.get_xaxis_transform(),
+            T_max * 0.5, -0.12, "BURST", ha="center", fontsize=11,
+            color="gray", fontweight="bold", transform=ax.get_xaxis_transform(),
         )
         ax.text(
-            T_max + U * 0.5,
-            -0.12,
-            "ALL-BUT-SPECIAL",
-            ha="center",
-            fontsize=11,
-            color="gray",
-            fontweight="bold",
-            transform=ax.get_xaxis_transform(),
+            T_max + U * 0.5, -0.12, "ALL-BUT-SPECIAL", ha="center", fontsize=11,
+            color="gray", fontweight="bold", transform=ax.get_xaxis_transform(),
         )
         ax.set_xlim(0, T_max + U)
         _style(
-            ax,
-            "Step",
-            "Cosine Similarity",
+            ax, "Step", "Cosine Similarity",
             f"{PAIRWISE_METRIC_LABELS[metric]}\n(mean +/- 95% CI per schedule)",
         )
         ax.legend(fontsize=9, loc="best", framealpha=0.9, edgecolor="gray")
@@ -1397,8 +1481,10 @@ def pairwise_grad_cosine_evolution_by_metric(pdir, cfg, gs_records):
     return paths
 
 
-def pairwise_grad_cosine_evolution_per_schedule(pdir, cfg, gs_records):
-    """One subplot per schedule, each showing all metric lines over time."""
+def pairwise_grad_cosine_evolution_per_schedule(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> Path | None:
+    """Render one subplot per schedule, each showing all metric lines over time."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
 
@@ -1436,13 +1522,8 @@ def pairwise_grad_cosine_evolution_per_schedule(pdir, cfg, gs_records):
             )
             c = PAIRWISE_METRIC_COLORS.get(metric, "gray")
             ax.plot(
-                steps_ref,
-                m,
-                color=c,
-                lw=2,
-                label=PAIRWISE_METRIC_LABELS[metric],
-                marker="o",
-                markersize=3,
+                steps_ref, m, color=c, lw=2,
+                label=PAIRWISE_METRIC_LABELS[metric], marker="o", markersize=3,
             )
             ax.fill_between(steps_ref, m - ci, m + ci, color=c, alpha=0.12)
 
@@ -1454,7 +1535,7 @@ def pairwise_grad_cosine_evolution_per_schedule(pdir, cfg, gs_records):
         ax.set_xlabel("Step", fontsize=9)
         ax.set_ylabel("Cosine Sim", fontsize=9)
         ax.tick_params(labelsize=8)
-        ax.grid(True, alpha=0.15, lw=0.5)
+        ax.grid(visible=True, alpha=0.15, lw=0.5)
         if idx == 0:
             ax.legend(fontsize=6, loc="best", framealpha=0.9)
 
@@ -1474,7 +1555,9 @@ def pairwise_grad_cosine_evolution_per_schedule(pdir, cfg, gs_records):
     return p_
 
 
-def _load_probe_data(run_dir):
+def _load_probe_data(
+    run_dir: _PathLike,
+) -> tuple[list[dict] | None, dict | None]:
     """Load probe results if available. Returns (results, meta) or (None, None)."""
     rd = Path(run_dir)
     probe_dir = rd / "probes"
@@ -1483,11 +1566,11 @@ def _load_probe_data(run_dir):
     all_path = probe_dir / "all_probes.pkl"
     if not all_path.exists():
         return None, None
-    with open(all_path, "rb") as f:
+    with all_path.open("rb") as f:
         results = pickle.load(f)
     meta_path = probe_dir / "probe_meta.json"
     if meta_path.exists():
-        with open(meta_path) as f:
+        with meta_path.open() as f:
             meta = json.load(f)
     else:
         r0 = results[0]
@@ -1501,8 +1584,10 @@ def _load_probe_data(run_dir):
     return results, meta
 
 
-def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
-    """Seed-aggregated probe heatmaps at key steps, one per schedule."""
+def probe_heatmap_aggregated(
+    pdir: Path, probe_results: list[dict], meta: dict, cfg: _Cfg
+) -> list[Path]:
+    """Render seed-aggregated probe heatmaps at key steps, one per schedule."""
     if not probe_results:
         return []
 
@@ -1513,21 +1598,25 @@ def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
     token_labels = meta["token_labels"]
     layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
 
-    sched_data = defaultdict(list)
+    sched_data: _Groups = defaultdict(list)
     for r in probe_results:
         sched_data[r["schedule"]].append(r)
 
     key_steps = [T // 2, T, T + U // 2, T + U]
     paths = []
 
+    _STEP_TOLERANCE = 30
+    _PROBE_HI = 0.75
     for sched in _ordered(sched_data.keys()):
         runs = sched_data[sched]
         for target_step in key_steps:
             arrs = []
             actual_step = target_step
             for r in runs:
-                closest = min(r["probes"].keys(), key=lambda s: abs(s - target_step))
-                if abs(closest - target_step) <= 30:
+                closest = min(
+                    r["probes"].keys(), key=lambda s, _t=target_step: abs(s - _t)
+                )
+                if abs(closest - target_step) <= _STEP_TOLERANCE:
                     arrs.append(r["probes"][closest]["train_acc_KT"])
                     actual_step = closest
             if not arrs:
@@ -1540,7 +1629,8 @@ def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
 
             fig, ax = plt.subplots(figsize=(max(14, Tpos * 0.5), max(4, K * 0.6)))
             im = ax.imshow(
-                mean_KT, aspect="auto", cmap="Blues", vmin=0.4, vmax=1.0, interpolation="nearest"
+                mean_KT, aspect="auto", cmap="Blues", vmin=0.4, vmax=1.0,
+                interpolation="nearest",
             )
             ax.set_xticks(range(Tpos))
             ax.set_xticklabels(token_labels[:Tpos], rotation=60, ha="right", fontsize=7)
@@ -1549,7 +1639,7 @@ def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
             ax.set_xlabel("Token Position", fontsize=10)
             ax.set_ylabel("Layer", fontsize=10)
             ax.set_title(
-                f"{SCHED_SHORT.get(sched, sched)} — step {actual_step} ({phase})\n"
+                f"{SCHED_SHORT.get(sched, sched)} -- step {actual_step} ({phase})\n"
                 f"Probe accuracy (Other vs Special), mean over {n_s} seeds",
                 fontsize=12,
                 fontweight="bold",
@@ -1557,8 +1647,10 @@ def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
             for k in range(K):
                 for t in range(Tpos):
                     val = mean_KT[k, t]
-                    color = "white" if val > 0.75 else "black"
-                    ax.text(t, k, f"{val:.2f}", ha="center", va="center", fontsize=5, color=color)
+                    color = "white" if val > _PROBE_HI else "black"
+                    ax.text(
+                        t, k, f"{val:.2f}", ha="center", va="center", fontsize=5, color=color
+                    )
             cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
             cbar.set_label("Probe Accuracy (Other vs Special)", fontsize=9)
             fig.tight_layout()
@@ -1570,8 +1662,10 @@ def probe_heatmap_aggregated(pdir, probe_results, meta, cfg):
     return paths
 
 
-def probe_dynamics_aggregated(pdir, probe_results, meta, cfg):
-    """Mean probe accuracy over training, aggregated across seeds with 95% CI."""
+def probe_dynamics_aggregated(
+    pdir: Path, probe_results: list[dict], meta: dict, cfg: _Cfg
+) -> Path | None:
+    """Render mean probe accuracy over training, aggregated across seeds with 95% CI."""
     if not probe_results:
         return None
 
@@ -1579,14 +1673,14 @@ def probe_dynamics_aggregated(pdir, probe_results, meta, cfg):
     T = meta["total_steps"]
     meta["n_layers"]
 
-    sched_data = defaultdict(list)
+    sched_data: _Groups = defaultdict(list)
     for r in probe_results:
         sched_data[r["schedule"]].append(r)
 
     fig, ax = plt.subplots(figsize=(14, 7))
     for sched in _ordered(sched_data.keys()):
         runs = sched_data[sched]
-        all_steps = set()
+        all_steps: set[int] = set()
         for r in runs:
             all_steps.update(r["probes"].keys())
         steps_sorted = sorted(all_steps)
@@ -1613,7 +1707,7 @@ def probe_dynamics_aggregated(pdir, probe_results, meta, cfg):
 
     ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
     ax.axhline(0.5, color="gray", ls=":", alpha=0.3)
-    ns = len(set(r["seed"] for r in probe_results))
+    ns = len({r["seed"] for r in probe_results})
     _style(
         ax,
         "Step",
@@ -1629,8 +1723,10 @@ def probe_dynamics_aggregated(pdir, probe_results, meta, cfg):
     return p_
 
 
-def probe_layer_schedule_heatmap(pdir, probe_results, meta, cfg):
-    """Layer x Schedule heatmap at end of training + end of reversion."""
+def probe_layer_schedule_heatmap(
+    pdir: Path, probe_results: list[dict], meta: dict, _cfg: _Cfg
+) -> list[Path]:
+    """Render layer x schedule heatmap at end of training + end of reversion."""
     if not probe_results:
         return []
 
@@ -1639,9 +1735,11 @@ def probe_layer_schedule_heatmap(pdir, probe_results, meta, cfg):
     n_layers = meta["n_layers"]
     layer_labels = [f"L{i}" for i in range(n_layers)]
 
-    sched_set = set(r["schedule"] for r in probe_results)
+    sched_set = {r["schedule"] for r in probe_results}
     col_scheds = [s for s in SCHEDULE_ORDER if s in sched_set] or sorted(sched_set)
 
+    _STEP_TOLERANCE = 30
+    _PROBE_HI = 0.75
     paths = []
     for target_step, phase_label in [(T, "end_train"), (T + U, "end_reversion")]:
         grid = np.full((n_layers, len(col_scheds)), np.nan)
@@ -1652,8 +1750,10 @@ def probe_layer_schedule_heatmap(pdir, probe_results, meta, cfg):
             for r in probe_results:
                 if r["schedule"] != sched:
                     continue
-                closest = min(r["probes"].keys(), key=lambda s: abs(s - target_step))
-                if abs(closest - target_step) > 30:
+                closest = min(
+                    r["probes"].keys(), key=lambda s, _t=target_step: abs(s - _t)
+                )
+                if abs(closest - target_step) > _STEP_TOLERANCE:
                     continue
                 acc_KT = r["probes"][closest]["train_acc_KT"]
                 seed_means.append(acc_KT[1:, :].mean(axis=1))
@@ -1664,7 +1764,9 @@ def probe_layer_schedule_heatmap(pdir, probe_results, meta, cfg):
                 if n_s > 1:
                     ci_grid[:, ci_idx] = 1.96 * arr.std(axis=0) / np.sqrt(n_s)
 
-        fig, ax = plt.subplots(figsize=(max(6, len(col_scheds) * 1.4), max(3, n_layers * 0.6)))
+        fig, ax = plt.subplots(
+            figsize=(max(6, len(col_scheds) * 1.4), max(3, n_layers * 0.6))
+        )
         im = ax.imshow(
             grid, aspect="auto", cmap="Blues", vmin=0.4, vmax=1.0, interpolation="nearest"
         )
@@ -1676,9 +1778,9 @@ def probe_layer_schedule_heatmap(pdir, probe_results, meta, cfg):
         ax.set_yticklabels(layer_labels, fontsize=10)
         ax.set_xlabel("Schedule", fontsize=11)
         ax.set_ylabel("Layer", fontsize=11)
-        ns = len(set(r["seed"] for r in probe_results))
+        ns = len({r["seed"] for r in probe_results})
         ax.set_title(
-            f"Layer x Schedule — probe accuracy at {phase_label}\n"
+            f"Layer x Schedule -- probe accuracy at {phase_label}\n"
             f"(mean across tokens & {ns} seeds)",
             fontsize=13,
             fontweight="bold",
@@ -1692,7 +1794,7 @@ def probe_layer_schedule_heatmap(pdir, probe_results, meta, cfg):
                 txt = f"{val:.3f}"
                 if not np.isnan(ci_val):
                     txt += f"\n+/-{ci_val:.3f}"
-                color = "white" if val > 0.75 else "black"
+                color = "white" if val > _PROBE_HI else "black"
                 ax.text(col, row, txt, ha="center", va="center", fontsize=8, color=color)
         fig.colorbar(im, ax=ax, shrink=0.8, pad=0.03, label="Mean Probe Accuracy")
         fig.tight_layout()
@@ -1704,7 +1806,9 @@ def probe_layer_schedule_heatmap(pdir, probe_results, meta, cfg):
     return paths
 
 
-def _load_per_layer_data(gs_records) -> tuple[list[str], dict]:
+def _load_per_layer_data(
+    gs_records: list[dict],
+) -> tuple[list[str], dict[str, dict[str, tuple[np.ndarray, np.ndarray]]]]:
     """Extract per-layer cossim data from gs_records.
 
     Returns (layer_names, {sched: {layer: (steps_arr, vals_SxT)}}).
@@ -1717,10 +1821,10 @@ def _load_per_layer_data(gs_records) -> tuple[list[str], dict]:
             break
 
     gs_groups = _group_gs(gs_records)
-    out: dict[str, dict[str, tuple]] = {}
+    out: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
 
     for sched, records in gs_groups.items():
-        layer_data: dict[str, tuple] = {}
+        layer_data: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for layer in layer_names:
             runs_with_layer = [
                 r for r in records if r["grad_sim_log"].get("per_layer", {}).get(layer)
@@ -1728,10 +1832,12 @@ def _load_per_layer_data(gs_records) -> tuple[list[str], dict]:
             if not runs_with_layer:
                 continue
             steps_list = [np.array(r["grad_sim_log"]["step"]) for r in runs_with_layer]
-            vals_list = [np.array(r["grad_sim_log"]["per_layer"][layer]) for r in runs_with_layer]
+            vals_list = [
+                np.array(r["grad_sim_log"]["per_layer"][layer]) for r in runs_with_layer
+            ]
             steps_ref = steps_list[0]
             interp_vals = []
-            for s, v in zip(steps_list, vals_list):
+            for s, v in zip(steps_list, vals_list, strict=False):
                 if len(s) > 1 and len(v) == len(s):
                     interp_vals.append(np.interp(steps_ref, s, v))
             if interp_vals:
@@ -1742,8 +1848,10 @@ def _load_per_layer_data(gs_records) -> tuple[list[str], dict]:
     return layer_names, out
 
 
-def grad_cosine_per_layer_overlay(pdir, cfg, gs_records):
-    """One chart per schedule: all layers overlaid as lines over time."""
+def grad_cosine_per_layer_overlay(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> list[Path]:
+    """Render one chart per schedule with all layers overlaid as lines over time."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
@@ -1751,7 +1859,9 @@ def grad_cosine_per_layer_overlay(pdir, cfg, gs_records):
         return []
 
     cmap = plt.get_cmap("tab20")
-    layer_colors = {ln: cmap(i / max(len(layer_names) - 1, 1)) for i, ln in enumerate(layer_names)}
+    layer_colors = {
+        ln: cmap(i / max(len(layer_names) - 1, 1)) for i, ln in enumerate(layer_names)
+    }
 
     paths = []
     for sched, layer_data in sched_layer_data.items():
@@ -1793,8 +1903,10 @@ def grad_cosine_per_layer_overlay(pdir, cfg, gs_records):
     return paths
 
 
-def grad_cosine_per_layer_all_scheds(pdir, cfg, gs_records):
-    """One chart per layer: all schedules overlaid — easy cross-schedule comparison."""
+def grad_cosine_per_layer_all_scheds(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> list[Path]:
+    """Render one chart per layer with all schedules overlaid."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
@@ -1828,7 +1940,7 @@ def grad_cosine_per_layer_all_scheds(pdir, cfg, gs_records):
             "Step",
             "Cosine Similarity",
             (
-                f"Layer {layer}: Gradient Cosine Similarity — All Schedules\n"
+                f"Layer {layer}: Gradient Cosine Similarity -- All Schedules\n"
                 "(Special vs Other, mean +/- 95% CI)"
             ),
         )
@@ -1841,11 +1953,10 @@ def grad_cosine_per_layer_all_scheds(pdir, cfg, gs_records):
     return paths
 
 
-def grad_cosine_layer_step_heatmap(pdir, cfg, gs_records):
-    """Heatmap: rows=layers, cols=steps, one chart per schedule.
-
-    Shows how cossim evolves over time for every layer simultaneously.
-    """
+def grad_cosine_layer_step_heatmap(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> list[Path]:
+    """Render heatmap of rows=layers, cols=steps, one chart per schedule."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
@@ -1904,11 +2015,10 @@ def grad_cosine_layer_step_heatmap(pdir, cfg, gs_records):
     return paths
 
 
-def grad_cosine_layer_schedule_heatmap(pdir, cfg, gs_records):
-    """Heatmap: rows=layers, cols=schedules, at key training phases.
-
-    Best for comparing which layers differ most across schedules.
-    """
+def grad_cosine_layer_schedule_heatmap(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> list[Path]:
+    """Render heatmap of rows=layers, cols=schedules, at key training phases."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
@@ -1918,6 +2028,7 @@ def grad_cosine_layer_schedule_heatmap(pdir, cfg, gs_records):
     scheds = _ordered(sched_layer_data.keys())
     phase_labels = ["End-Burst", "End-Rev"]
 
+    _CONTRAST = 0.55
     paths = []
     for phase_label in phase_labels:
         grid = np.full((len(layer_names), len(scheds)), np.nan)
@@ -1961,16 +2072,10 @@ def grad_cosine_layer_schedule_heatmap(pdir, cfg, gs_records):
             for ci_idx in range(len(scheds)):
                 val = grid[ri, ci_idx]
                 if not np.isnan(val):
-                    txt_color = "white" if abs(val) > 0.55 else "black"
+                    txt_color = "white" if abs(val) > _CONTRAST else "black"
                     ax.text(
-                        ci_idx,
-                        ri,
-                        f"{val:.2f}",
-                        ha="center",
-                        va="center",
-                        fontsize=8,
-                        fontweight="bold",
-                        color=txt_color,
+                        ci_idx, ri, f"{val:.2f}", ha="center", va="center",
+                        fontsize=8, fontweight="bold", color=txt_color,
                     )
         fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02, label="Cosine Similarity")
         fig.tight_layout()
@@ -1981,16 +2086,16 @@ def grad_cosine_layer_schedule_heatmap(pdir, cfg, gs_records):
     return paths
 
 
-def grad_cosine_layer_change_heatmap(pdir, cfg, gs_records):
-    """Heatmap: rows=layers, cols=steps, showing rate-of-change of cossim.
-
-    Highlights where and when gradient alignment shifts fastest per layer.
-    """
+def grad_cosine_layer_change_heatmap(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> list[Path]:
+    """Render heatmap showing rate-of-change of cossim per layer over time."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return []
 
+    _MIN_STEPS = 3
     paths = []
     for sched, layer_data in sched_layer_data.items():
         T_s = _T_for(sched, bcfg)
@@ -1998,7 +2103,7 @@ def grad_cosine_layer_change_heatmap(pdir, cfg, gs_records):
         if not layers_present:
             continue
         steps_ref = layer_data[layers_present[0]][0]
-        if len(steps_ref) < 3:
+        if len(steps_ref) < _MIN_STEPS:
             continue
         n_layers = len(layers_present)
         n_steps = len(steps_ref) - 1
@@ -2019,7 +2124,8 @@ def grad_cosine_layer_change_heatmap(pdir, cfg, gs_records):
         fig_h = max(4, n_layers * 0.55)
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
         im = ax.imshow(
-            rate_grid, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax, interpolation="nearest"
+            rate_grid, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax,
+            interpolation="nearest",
         )
 
         burst_col = np.searchsorted(mid_steps, T_s)
@@ -2052,8 +2158,10 @@ def grad_cosine_layer_change_heatmap(pdir, cfg, gs_records):
     return paths
 
 
-def grad_cosine_layer_end_burst_bars(pdir, cfg, gs_records):
-    """Grouped bar chart: one group per layer, bars per schedule — end-of-burst snapshot."""
+def grad_cosine_layer_end_burst_bars(
+    pdir: Path, cfg: _Cfg, gs_records: list[dict]
+) -> Path | None:
+    """Render grouped bar chart of per-layer gradient cosine similarity at end of burst."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     layer_names, sched_layer_data = _load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
@@ -2113,29 +2221,31 @@ def grad_cosine_layer_end_burst_bars(pdir, cfg, gs_records):
     return p_
 
 
-def load_adl_data(run_dir) -> list[dict]:
+def load_adl_data(run_dir: _PathLike) -> list[dict]:
     """Load ADL records from the adl/ folder."""
     rd = Path(run_dir)
     for adl_dir in [rd / "results" / "adl", rd / "adl"]:
         if adl_dir.is_dir():
             records = []
             for fp in sorted(adl_dir.glob("*.json")):
-                with open(fp) as f:
+                with fp.open() as f:
                     records.append(json.load(f))
             if records:
                 return records
     return []
 
 
-def _group_adl(records):
-    g = defaultdict(list)
+def _group_adl(records: list[dict]) -> _Groups:
+    g: _Groups = defaultdict(list)
     for r in records:
         g[r["schedule"]].append(r)
     return g
 
 
-def adl_delta_norm_overlay(pdir, cfg, adl_records):
-    """Mean delta norm (summed over layers) over training steps, one line per schedule."""
+def adl_delta_norm_overlay(
+    pdir: Path, cfg: _Cfg, adl_records: list[dict]
+) -> Path | None:
+    """Render mean delta norm (summed over layers) over training steps."""
     if not adl_records:
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
@@ -2151,7 +2261,9 @@ def adl_delta_norm_overlay(pdir, cfg, adl_records):
         norm_list = [np.sum(r["adl_log"]["delta_norm_K"], axis=-1) for r in runs]
         steps_ref = steps_list[0]
         interp_vals = [
-            np.interp(steps_ref, s, v) for s, v in zip(steps_list, norm_list) if len(s) > 1
+            np.interp(steps_ref, s, v)
+            for s, v in zip(steps_list, norm_list, strict=False)
+            if len(s) > 1
         ]
         if not interp_vals:
             continue
@@ -2177,8 +2289,10 @@ def adl_delta_norm_overlay(pdir, cfg, adl_records):
     return p_
 
 
-def adl_readability_overlay(pdir, cfg, adl_records):
-    """Mean readability (averaged over layers and token positions) over steps."""
+def adl_readability_overlay(
+    pdir: Path, cfg: _Cfg, adl_records: list[dict]
+) -> Path | None:
+    """Render mean readability (averaged over layers and token positions) over steps."""
     if not adl_records:
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
@@ -2194,7 +2308,9 @@ def adl_readability_overlay(pdir, cfg, adl_records):
         read_list = [np.mean(r["adl_log"]["readability_KT"], axis=(-1, -2)) for r in runs]
         steps_ref = steps_list[0]
         interp_vals = [
-            np.interp(steps_ref, s, v) for s, v in zip(steps_list, read_list) if len(s) > 1
+            np.interp(steps_ref, s, v)
+            for s, v in zip(steps_list, read_list, strict=False)
+            if len(s) > 1
         ]
         if not interp_vals:
             continue
@@ -2221,8 +2337,10 @@ def adl_readability_overlay(pdir, cfg, adl_records):
     return p_
 
 
-def adl_causal_ablation_overlay(pdir, cfg, adl_records):
-    """Mean accuracy drop from ablating the delta direction, over steps."""
+def adl_causal_ablation_overlay(
+    pdir: Path, cfg: _Cfg, adl_records: list[dict]
+) -> Path | None:
+    """Render mean accuracy drop from ablating the delta direction, over steps."""
     if not adl_records:
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
@@ -2238,7 +2356,9 @@ def adl_causal_ablation_overlay(pdir, cfg, adl_records):
         drop_list = [np.mean(r["adl_log"]["acc_drop_K"], axis=-1) for r in runs]
         steps_ref = steps_list[0]
         interp_vals = [
-            np.interp(steps_ref, s, v) for s, v in zip(steps_list, drop_list) if len(s) > 1
+            np.interp(steps_ref, s, v)
+            for s, v in zip(steps_list, drop_list, strict=False)
+            if len(s) > 1
         ]
         if not interp_vals:
             continue
@@ -2255,7 +2375,7 @@ def adl_causal_ablation_overlay(pdir, cfg, adl_records):
         ax,
         "Step",
         "Accuracy drop (baseline - ablated)",
-        "ADL: Causal Ablation — Accuracy Drop When delta Projected Out\n(mean +/- 95% CI)",
+        "ADL: Causal Ablation -- Accuracy Drop When delta Projected Out\n(mean +/- 95% CI)",
     )
     ax.legend(fontsize=11, loc="upper left", framealpha=0.9)
     fig.tight_layout()
@@ -2265,8 +2385,10 @@ def adl_causal_ablation_overlay(pdir, cfg, adl_records):
     return p_
 
 
-def adl_end_burst_bars(pdir, cfg, adl_records):
-    """Bar chart: readability and ablation drop at end-of-burst, one bar per schedule."""
+def adl_end_burst_bars(
+    pdir: Path, cfg: _Cfg, adl_records: list[dict]
+) -> Path | None:
+    """Render bar chart of readability and ablation drop at end-of-burst."""
     if not adl_records:
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
@@ -2297,9 +2419,13 @@ def adl_end_burst_bars(pdir, cfg, adl_records):
             rv = np.array(r_vals)
             av = np.array(a_vals)
             readability_means.append(rv.mean())
-            readability_cis.append(1.96 * rv.std() / np.sqrt(len(rv)) if len(rv) > 1 else 0.0)
+            readability_cis.append(
+                1.96 * rv.std() / np.sqrt(len(rv)) if len(rv) > 1 else 0.0
+            )
             ablation_means.append(av.mean())
-            ablation_cis.append(1.96 * av.std() / np.sqrt(len(av)) if len(av) > 1 else 0.0)
+            ablation_cis.append(
+                1.96 * av.std() / np.sqrt(len(av)) if len(av) > 1 else 0.0
+            )
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     xs = np.arange(len(scheds))
@@ -2307,28 +2433,16 @@ def adl_end_burst_bars(pdir, cfg, adl_records):
     labels = [SCHED_SHORT[s] for s in scheds]
 
     axes[0].bar(
-        xs,
-        readability_means,
-        yerr=readability_cis,
-        color=colors,
-        edgecolor="black",
-        lw=0.8,
-        capsize=5,
-        alpha=0.85,
+        xs, readability_means, yerr=readability_cis,
+        color=colors, edgecolor="black", lw=0.8, capsize=5, alpha=0.85,
     )
     axes[0].set_xticks(xs)
     axes[0].set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
     _style(axes[0], "", "Burst-token readability (frac. top-10)", "ADL Readability at End of Burst")
 
     axes[1].bar(
-        xs,
-        ablation_means,
-        yerr=ablation_cis,
-        color=colors,
-        edgecolor="black",
-        lw=0.8,
-        capsize=5,
-        alpha=0.85,
+        xs, ablation_means, yerr=ablation_cis,
+        color=colors, edgecolor="black", lw=0.8, capsize=5, alpha=0.85,
     )
     axes[1].axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
     axes[1].set_xticks(xs)
@@ -2343,8 +2457,10 @@ def adl_end_burst_bars(pdir, cfg, adl_records):
     return p_
 
 
-def adl_readability_vs_auc(pdir, cfg, adl_records, results):
-    """Scatter: end-of-burst ADL readability vs reversion AUC (one dot per seed x schedule)."""
+def adl_readability_vs_auc(
+    pdir: Path, cfg: _Cfg, adl_records: list[dict], results: list[dict]
+) -> Path | None:
+    """Render scatter of end-of-burst ADL readability vs reversion AUC."""
     if not adl_records:
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
@@ -2376,12 +2492,16 @@ def adl_readability_vs_auc(pdir, cfg, adl_records, results):
                 alpha=0.75,
                 edgecolor="white",
                 lw=0.5,
-                label=SCHED_SHORT[sched] if sched not in [s for s in groups if s < sched] else "",
+                label=(
+                    SCHED_SHORT[sched]
+                    if sched not in [s for s in groups if s < sched]
+                    else ""
+                ),
             )
 
     handles, labels_leg = ax.get_legend_handles_labels()
-    seen = {}
-    for handle, label in zip(handles, labels_leg):
+    seen: dict[str, Any] = {}
+    for handle, label in zip(handles, labels_leg, strict=False):
         if label not in seen:
             seen[label] = handle
     ax.legend(seen.values(), seen.keys(), fontsize=10, loc="best", framealpha=0.9)
@@ -2398,76 +2518,61 @@ def adl_readability_vs_auc(pdir, cfg, adl_records, results):
     return p_
 
 
-def generate_all(run_dir, results, cfg):
+def generate_all(
+    run_dir: _PathLike, results: list[dict], cfg: _Cfg
+) -> dict[str, Any]:
+    """Generate all presentation charts and return a dict of chart paths."""
     pdir = Path(run_dir) / "presentation"
     pdir.mkdir(exist_ok=True)
-    cp = {}
-    ns = len(set(r["seed"] for r in results))
+    cp: dict[str, Any] = {}
+    ns = len({r["seed"] for r in results})
     gr = _group(results)
 
     has_training_data = any(r.get("log", {}).get("step") for r in results)
 
     if has_training_data:
-        burst_key = "acc_burst"
-        other_key = "acc_other"
+        burst_key = ACC_BURST
+        other_key = ACC_OTHER
         auc_metric = "reversion_auc"
         peak_metric = "peak_burst"
 
-        print("  Schedule bars...")
+        logger.info("Schedule bars...")
         cp["schedule_bars"] = schedule_bars(pdir, results, cfg)
         for al, al_suffix in [
             ("absolute", ""),
             ("start", "_aligned_start"),
             ("end", "_aligned_end"),
         ]:
-            print(f"  Special class overlay ({al})...")
+            logger.debug("Special class overlay (%s)...", al)
             cp[f"overlay_burst{al_suffix}"] = overlay(
-                pdir,
-                results,
-                cfg,
-                burst_key,
+                pdir, results, cfg, burst_key,
                 "Special Class Accuracy (free generation)",
                 f"Special Class Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
                 f"overlay_burst{al_suffix}.png",
-                groups=gr,
-                align=al,
+                groups=gr, align=al,
             )
-            print(f"  Other classes overlay ({al})...")
+            logger.debug("Other classes overlay (%s)...", al)
             cp[f"overlay_other{al_suffix}"] = overlay(
-                pdir,
-                results,
-                cfg,
-                other_key,
+                pdir, results, cfg, other_key,
                 "Other Classes Accuracy (free generation)",
                 f"Other Classes Accuracy\n(mean +/- 95% CI, n={ns} seeds)",
                 f"overlay_other{al_suffix}.png",
-                loc="lower right",
-                groups=gr,
-                align=al,
+                loc="lower right", groups=gr, align=al,
             )
-            print(f"  Training loss overlay ({al})...")
+            logger.debug("Training loss overlay (%s)...", al)
             cp[f"overlay_loss{al_suffix}"] = overlay(
-                pdir,
-                results,
-                cfg,
-                "loss",
+                pdir, results, cfg, "loss",
                 "Training Loss",
                 f"Training Loss\n(mean +/- 95% CI, n={ns} seeds)",
                 f"overlay_loss{al_suffix}.png",
-                loc="upper right",
-                groups=gr,
-                align=al,
+                loc="upper right", groups=gr, align=al,
             )
-        print("  Reversion AUC bars...")
+        logger.info("Reversion AUC bars...")
         cp["auc_bars"] = bar_chart(
-            pdir,
-            results,
-            cfg,
-            auc_metric,
+            pdir, results, cfg, auc_metric,
             "Reversion AUC (higher = slower forgetting)",
             "Reversion AUC by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-            "auc_bars.png",
-            groups=gr,
+            "auc_bars.png", groups=gr,
         )
         thresholds = TrainConfig().reversion_thresholds
         cp["life_bars"] = {}
@@ -2475,90 +2580,85 @@ def generate_all(run_dir, results, cfg):
             key = reversion_life_key(t)
             label = reversion_life_label(t)
             pct = int(t * 100)
-            print(f"  {label} bars...")
+            logger.debug("%s bars...", label)
             chart = bar_chart(
-                pdir,
-                results,
-                cfg,
-                key,
+                pdir, results, cfg, key,
                 f"{label} (reversion steps to {pct}% of peak)",
                 f"{label} by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-                f"life_{pct}_bars.png",
-                groups=gr,
+                f"life_{pct}_bars.png", groups=gr,
             )
             if chart is not None:
                 cp["life_bars"][t] = chart
-        print("  Peak burst bars...")
+        logger.info("Peak burst bars...")
         cp["peak_bars"] = bar_chart(
-            pdir,
-            results,
-            cfg,
-            peak_metric,
+            pdir, results, cfg, peak_metric,
             "Peak Special Class Accuracy at End of Training",
             "Peak Special Class Accuracy by Schedule\n(mean +/- 95% CI, individual seeds shown)",
-            "peak_b_bars.png",
-            fmt_dec=3,
-            groups=gr,
+            "peak_b_bars.png", fmt_dec=3, groups=gr,
         )
-        print("  AUC diff heatmap...")
+        logger.info("AUC diff heatmap...")
         cp["auc_diff"] = auc_diff(pdir, results, cfg, groups=gr)
-        print("  LR schedule...")
+        logger.info("LR schedule...")
         cp["lr"] = lr_schedule(pdir, cfg)
-        print("  Reversion zoom...")
+        logger.info("Reversion zoom...")
         cp["reversion_zoom"] = reversion_zoom(pdir, results, cfg, groups=gr)
-        print("  Summary table...")
+        logger.info("Summary table...")
         cp["summary_table"] = summary_table(pdir, results, cfg, groups=gr)
-        print("  Per-schedule overlays...")
+        logger.debug("Per-schedule overlays...")
         cp["per_sched"] = per_sched(pdir, results, cfg, groups=gr, align="absolute")
-        print("  Per-schedule overlays (aligned start)...")
+        logger.debug("Per-schedule overlays (aligned start)...")
         cp["per_sched_start"] = per_sched(pdir, results, cfg, groups=gr, align="start")
-        print("  Per-schedule overlays (aligned end)...")
+        logger.debug("Per-schedule overlays (aligned end)...")
         cp["per_sched_end"] = per_sched(pdir, results, cfg, groups=gr, align="end")
     else:
-        print("  (skipping training-data charts — no all_results.pkl)")
+        logger.info("Skipping training-data charts -- no all_results.pkl")
 
     gs_records = load_grad_sim_data(run_dir)
     gs_dir = pdir / "grad_cosine_sim"
     gs_dir.mkdir(exist_ok=True)
 
-    print("  Gradient cosine similarity overlay...")
+    logger.info("Gradient cosine similarity overlay...")
     cp["grad_cosine_overlay"] = grad_cosine_sim_overlay(gs_dir, cfg, gs_records)
-    print("  Gradient cosine similarity bars (end of burst)...")
+    logger.debug("Gradient cosine similarity bars (end of burst)...")
     cp["grad_cosine_bars"] = grad_cosine_sim_by_schedule(gs_dir, cfg, gs_records)
-    print("  Gradient cosine per-seed traces...")
+    logger.debug("Gradient cosine per-seed traces...")
     cp["grad_cosine_per_seed"] = grad_cosine_per_seed(gs_dir, cfg, gs_records)
-    print("  Gradient cosine rate of change...")
+    logger.debug("Gradient cosine rate of change...")
     cp["grad_cosine_rate"] = grad_cosine_rate_of_change(gs_dir, cfg, gs_records)
-    print("  Gradient cosine phase comparison...")
+    logger.debug("Gradient cosine phase comparison...")
     cp["grad_cosine_phase"] = grad_cosine_phase_comparison(gs_dir, cfg, gs_records)
-    print("  Gradient cosine vs AUC scatter...")
+    logger.debug("Gradient cosine vs AUC scatter...")
     cp["grad_cosine_vs_auc"] = grad_cosine_vs_auc_scatter(gs_dir, cfg, gs_records, results)
-    print("  Gradient cosine phase bars...")
+    logger.debug("Gradient cosine phase bars...")
     cp["grad_cosine_phase_bars"] = grad_cosine_mean_over_phases_bars(gs_dir, cfg, gs_records)
-    print("  Pairwise gradient cosine heatmaps...")
+    logger.debug("Pairwise gradient cosine heatmaps...")
     cp["pairwise_heatmaps"] = pairwise_grad_cosine_heatmap(gs_dir, cfg, gs_records)
-    print("  Pairwise gradient cosine evolution (by metric)...")
-    cp["pairwise_evo_by_metric"] = pairwise_grad_cosine_evolution_by_metric(gs_dir, cfg, gs_records)
-    print("  Pairwise gradient cosine evolution (per schedule)...")
+    logger.debug("Pairwise gradient cosine evolution (by metric)...")
+    cp["pairwise_evo_by_metric"] = pairwise_grad_cosine_evolution_by_metric(
+        gs_dir, cfg, gs_records
+    )
+    logger.debug("Pairwise gradient cosine evolution (per schedule)...")
     cp["pairwise_evo_per_schedule"] = pairwise_grad_cosine_evolution_per_schedule(
         gs_dir, cfg, gs_records
     )
 
     layer_gs_dir = pdir / "grad_cosine_sim" / "per_layer"
     layer_gs_dir.mkdir(exist_ok=True)
-    print("  Per-layer cossim overlay (per schedule)...")
+    logger.debug("Per-layer cossim overlay (per schedule)...")
     cp["layer_cossim_overlay"] = grad_cosine_per_layer_overlay(layer_gs_dir, cfg, gs_records)
-    print("  Per-layer cossim all-schedules (per layer)...")
-    cp["layer_cossim_all_scheds"] = grad_cosine_per_layer_all_scheds(layer_gs_dir, cfg, gs_records)
-    print("  Per-layer cossim heatmap (layer x step)...")
+    logger.debug("Per-layer cossim all-schedules (per layer)...")
+    cp["layer_cossim_all_scheds"] = grad_cosine_per_layer_all_scheds(
+        layer_gs_dir, cfg, gs_records
+    )
+    logger.debug("Per-layer cossim heatmap (layer x step)...")
     cp["layer_cossim_heatmap"] = grad_cosine_layer_step_heatmap(layer_gs_dir, cfg, gs_records)
-    print("  Per-layer cossim layer x schedule heatmap...")
+    logger.debug("Per-layer cossim layer x schedule heatmap...")
     cp["layer_cossim_layer_sched"] = grad_cosine_layer_schedule_heatmap(
         layer_gs_dir, cfg, gs_records
     )
-    print("  Per-layer cossim rate-of-change heatmap...")
+    logger.debug("Per-layer cossim rate-of-change heatmap...")
     cp["layer_cossim_change"] = grad_cosine_layer_change_heatmap(layer_gs_dir, cfg, gs_records)
-    print("  Per-layer cossim end-of-burst bars...")
+    logger.debug("Per-layer cossim end-of-burst bars...")
     cp["layer_cossim_end_burst_bars"] = grad_cosine_layer_end_burst_bars(
         layer_gs_dir, cfg, gs_records
     )
@@ -2567,11 +2667,11 @@ def generate_all(run_dir, results, cfg):
     if probe_data:
         probe_dir = pdir / "probes"
         probe_dir.mkdir(exist_ok=True)
-        print("  Probe heatmaps (aggregated)...")
+        logger.debug("Probe heatmaps (aggregated)...")
         cp["probe_heatmaps"] = probe_heatmap_aggregated(probe_dir, probe_data, probe_meta, cfg)
-        print("  Probe dynamics (aggregated)...")
+        logger.debug("Probe dynamics (aggregated)...")
         cp["probe_dynamics"] = probe_dynamics_aggregated(probe_dir, probe_data, probe_meta, cfg)
-        print("  Probe layer x schedule heatmap...")
+        logger.debug("Probe layer x schedule heatmap...")
         cp["probe_layer_schedule"] = probe_layer_schedule_heatmap(
             probe_dir, probe_data, probe_meta, cfg
         )
@@ -2584,16 +2684,18 @@ def generate_all(run_dir, results, cfg):
     if adl_records:
         adl_dir = pdir / "adl"
         adl_dir.mkdir(exist_ok=True)
-        print("  ADL delta norm overlay...")
+        logger.debug("ADL delta norm overlay...")
         cp["adl_delta_norm"] = adl_delta_norm_overlay(adl_dir, cfg, adl_records)
-        print("  ADL readability overlay...")
+        logger.debug("ADL readability overlay...")
         cp["adl_readability"] = adl_readability_overlay(adl_dir, cfg, adl_records)
-        print("  ADL causal ablation overlay...")
+        logger.debug("ADL causal ablation overlay...")
         cp["adl_causal_ablation"] = adl_causal_ablation_overlay(adl_dir, cfg, adl_records)
-        print("  ADL end-of-burst bars...")
+        logger.debug("ADL end-of-burst bars...")
         cp["adl_end_burst_bars"] = adl_end_burst_bars(adl_dir, cfg, adl_records)
-        print("  ADL readability vs AUC scatter...")
-        cp["adl_readability_vs_auc"] = adl_readability_vs_auc(adl_dir, cfg, adl_records, results)
+        logger.debug("ADL readability vs AUC scatter...")
+        cp["adl_readability_vs_auc"] = adl_readability_vs_auc(
+            adl_dir, cfg, adl_records, results
+        )
     else:
         cp["adl_delta_norm"] = None
         cp["adl_readability"] = None

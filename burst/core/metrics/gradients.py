@@ -34,12 +34,12 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-import torch.nn.functional as F  # noqa: E402
-from einops import rearrange  # noqa: E402
+import numpy as np
+import torch
+import torch.nn.functional as F
+from einops import rearrange
 
-from burst.config import (  # noqa: E402
+from burst.config import (
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
     PHASE_BURST,
@@ -47,15 +47,15 @@ from burst.config import (  # noqa: E402
     PHASE_REVERSION,
     parse_run_config,
 )
-from burst.core.gpu import gpu_cfg  # noqa: E402
-from burst.core.parallel import JobResult, run_job_pool  # noqa: E402
-from burst.core.repro import set_reproducibility, write_repro_manifest  # noqa: E402
-from burst.core.train_utils import (  # noqa: E402
+from burst.core.gpu import gpu_cfg
+from burst.core.parallel import JobResult, run_job_pool
+from burst.core.repro import set_reproducibility, write_repro_manifest
+from burst.core.train_utils import (
     DEVICE,
     _cross_entropy_logits_BTV_targets_BT,
     load_net,
 )
-from net.nanogpt import nanoGPT  # noqa: E402
+from net.nanogpt import nanoGPT
 
 warnings.filterwarnings("ignore", message=".*Full backward hook.*no inputs require gradients.*")
 MATRIX_NDIM = 2
@@ -244,7 +244,7 @@ def _grad_snr_per_layer(
     Uses torch.func.vmap + grad to compute all per-example gradients in one
     vectorised call instead of n_examples sequential backward passes.
     """
-    from torch.func import functional_call, grad, vmap  # noqa: PLC0415
+    from torch.func import functional_call, grad, vmap
 
     n = min(n_examples, docs_np.shape[0])
     idx = _rng.choice(docs_np.shape[0], n, replace=False)
@@ -513,13 +513,10 @@ def compute_grad_cosine_sim_per_layer(
     }
 
 
-def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
+def compute_pairwise_grad_sim(
     net: nanoGPT,
     task_docs: dict[Any, np.ndarray],
-    _burst_tasks: list[Any],
-    _other_tasks: list[Any],
     n_samples: int,
-    _depth: int,
     burst_pos: int,
     n_a: int,
 ) -> dict[str, Any]:
@@ -532,7 +529,7 @@ def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
       ALL_OTHER   -- all other-class tasks pooled
       ALL_DATA    -- everything pooled
     """
-    from burst.config import CLASS_BURST  # noqa: PLC0415
+    from burst.config import CLASS_BURST
 
     net.train()
 
@@ -605,7 +602,7 @@ def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
 # ---------------------------------------------------------------------------
 
 
-def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
+def _worker_main() -> None:
     """Run a single gradient-metric job in a subprocess."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
@@ -616,21 +613,20 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
     args = parser.parse_args()
 
     with Path(args.job_path).open("rb") as f:
-        job = pickle.load(f)  # noqa: S301
+        job = pickle.load(f)
     with Path(args.data_path).open("rb") as f:
-        target_pool, bg_pool = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool = pickle.load(f)
 
     cfg = job["cfg"]
-    set_reproducibility(int(cfg.get("seed", 0)), deterministic=bool(job.get("deterministic", True)))
+    set_reproducibility(int(cfg["seed"]), deterministic=bool(job["deterministic"]))
     ckpt_path = job["ckpt_path"]
     step = job["step"]
     phase = job["phase"]
     is_pairwise = job["is_pairwise"]
-    depth = job["depth"]
     burst_pos_val = job["burst_pos"]
     n_a = job["n_a"]
-    prompt_len = job.get("prompt_len", 15)
-    doc_len = job.get("doc_len", cfg.get("context_size", 80))
+    prompt_len = job["prompt_len"]
+    doc_len = job["doc_len"]
     gs_bs = args.grad_sim_batch_size
 
     net = load_net(cfg, str(ckpt_path))
@@ -733,15 +729,10 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
     # --- pairwise ---
     if is_pairwise and GRAD_METRICS.get("pairwise", True):
         task_docs = {**target_pool, **bg_pool}
-        burst_tasks = list(target_pool.keys())
-        other_tasks = list(bg_pool.keys())
         snap = compute_pairwise_grad_sim(
             net,
             task_docs,
-            burst_tasks,
-            other_tasks,
             n_samples=gs_bs,
-            depth=depth,
             burst_pos=burst_pos_val,
             n_a=n_a,
         )
@@ -786,7 +777,7 @@ def _resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915
+def main() -> None:
     """Orchestrate gradient metric computation across all checkpoints."""
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -823,12 +814,13 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     rc = parse_run_config(run_cfg)
     base_cfg, depth, burst_pos, n_a = rc["base_cfg"], rc["depth"], rc["burst_pos"], rc["n_a"]
-    gs_bs = args.grad_sim_batch_size or base_cfg.get("grad_sim_batch_size", 2048)
-    P = base_cfg.get("pre_burst_steps", 0)
+    gs_bs = args.grad_sim_batch_size or base_cfg["grad_sim_batch_size"]
+    P = base_cfg["pre_burst_steps"]
     T = base_cfg["total_steps"]
     U = base_cfg["reversion_steps"]
-    prompt_len = run_cfg.get("task_info", {}).get("prompt_len", 15)
-    doc_len = run_cfg.get("task_info", {}).get("doc_len", base_cfg.get("context_size", 80))
+    task_info = run_cfg["task_info"]
+    prompt_len = task_info["prompt_len"]
+    doc_len = task_info["doc_len"]
 
     pairwise_global_steps = {P, P + T // 2, P + T - 1, P + T + U // 2, P + T + U - 1}
 
@@ -840,15 +832,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     pkl_root = logs_dir if logs_dir.exists() else run_dir
 
     job_entries = run_cfg["jobs"]
-    for j in job_entries:
-        label = j["label"]
-        ckpt_dir = ckpt_root / label
-        if ckpt_dir.exists():
-            sample_cfg_path = pkl_root / f"{label}.pkl"
-            if sample_cfg_path.exists():
-                with sample_cfg_path.open("rb") as f:
-                    pickle.load(f)  # noqa: S301
-            break
 
     n_workers = args.n_workers or gpu_cfg.gradsim_workers
     logger.info("%s", gpu_cfg.summary())
@@ -867,7 +850,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         if not result_path.exists():
             continue
         with result_path.open("rb") as f:
-            result = pickle.load(f)  # noqa: S301
+            result = pickle.load(f)
         cfg = result["config"]
 
         for pt_file in sorted(ckpt_dir.glob("step_*.pt")):
@@ -904,7 +887,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     logger.info("Jobs: %d checkpoints across %d labels", len(jobs), len(job_entries))
 
     with data_path.open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     worker_script = str(Path(__file__))
 
@@ -940,16 +923,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         tmp_prefix="grad_sim_",
     )
 
-    _LIST_KEYS = ("step", "phase", "burst_vs_other")
-    _LAYER_DICT_KEYS = (
-        "per_layer_sim",
-        "grad_norm_ratio",
-        "grad_rank",
-        "grad_snr",
-        "conflict_rate",
-    )
-    _SEQ_KEYS = ("token_pos_grad_norms",)
-    _ATTR_KEYS = ("grad_attribution",)
     _PROJ_KEYS = (
         "interference_magnitude",
         "useful_learning",
@@ -1080,7 +1053,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     if all_results_path.exists():
         with all_results_path.open("rb") as f:
-            all_results = pickle.load(f)  # noqa: S301
+            all_results = pickle.load(f)
         for r in all_results:
             label = r["label"]
             if label in per_label:
@@ -1091,7 +1064,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         logger.info("Updated all_results.pkl with grad-sim data for %d labels", len(per_label))
 
     if args.delete_checkpoints:
-        import shutil  # noqa: PLC0415
+        import shutil
 
         shutil.rmtree(ckpt_root)
         logger.info("Cleaned up checkpoints")

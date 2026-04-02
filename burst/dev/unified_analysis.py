@@ -22,6 +22,7 @@ Dimension key:
 
 import argparse
 import json
+import logging
 import os
 import pickle
 import sys
@@ -42,21 +43,29 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 from burst.config import (
+    ACC_BURST,
+    ACC_OTHER,
     PHASE_BURST,
     PHASE_REVERSION,
-    SCHED_COLORS,
-    SCHEDULE_ORDER,
     parse_run_config,
 )
-from burst.core.train_utils import make_net_bare
+from burst.core.train_utils import DEVICE, make_net_bare
+from burst.dev._shared import (
+    free_gen_acc as _free_gen_acc,
+)
+from burst.dev._shared import (
+    sched_color as _color,
+)
+from burst.dev._shared import (
+    sched_order as _sched_order,
+)
 from burst.dev.plot_utils import save_png as _save_png
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+logger = logging.getLogger(__name__)
+
 _rng = np.random.default_rng()
-SCHEDULES_ORDERED = SCHEDULE_ORDER
-SCHEDULE_COLORS = SCHED_COLORS
 
 
 # ---------------------------------------------------------------------------
@@ -79,16 +88,6 @@ class SeedCheckpoints:
     pre_step: int
     peak_step: int
     rev_step: int
-
-
-@torch.no_grad()
-def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
-    net.eval()
-    docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    _B, L = docs_t.shape
-    target_B6 = docs_t[:, -6:]
-    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
-    return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
 @torch.no_grad()
@@ -141,7 +140,7 @@ def _batch_eval_hybrids(
         nets = [make_net_bare(cfg) for _ in range(n_chunk)]
         streams = [torch.cuda.Stream() for _ in range(n_chunk)]
 
-        for i, (net, sd, stream) in enumerate(zip(nets, chunk, streams, strict=False)):
+        for i, (net, sd, stream) in enumerate(zip(nets, chunk, streams, strict=True)):
             with torch.cuda.stream(stream):
                 net.load_state_dict(sd)
                 net.eval()
@@ -151,14 +150,14 @@ def _batch_eval_hybrids(
         burst_accs = [0.0] * n_chunk
         other_accs = [0.0] * n_chunk
 
-        for i, (net, stream) in enumerate(zip(nets, streams, strict=False)):
+        for i, (net, stream) in enumerate(zip(nets, streams, strict=True)):
             with torch.cuda.stream(stream):
                 gen = net.generate(burst_prompt, n_new)
                 burst_accs[i] = (gen[:, -6:] == burst_target).all(dim=1).float().mean().item()
 
         torch.cuda.synchronize()
 
-        for i, (net, stream) in enumerate(zip(nets, streams, strict=False)):
+        for i, (net, stream) in enumerate(zip(nets, streams, strict=True)):
             with torch.cuda.stream(stream):
                 gen = net.generate(other_prompt, n_new)
                 other_accs[i] = (gen[:, -6:] == other_target).all(dim=1).float().mean().item()
@@ -174,29 +173,7 @@ def _batch_eval_hybrids(
     return results
 
 
-@torch.no_grad()
-def _cross_entropy_loss(net: nanoGPT, docs_BL: np.ndarray) -> float:
-    net.eval()
-    docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    inp, tgt = docs_t[:, :-1], docs_t[:, 1:]
-    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-        logits = net(inp).float()
-    return F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1)).item()
-
-
-def _sched_order(s: str) -> int:
-    try:
-        return SCHEDULES_ORDERED.index(s)
-    except ValueError:
-        return 99
-
-
-def _color(s: str) -> str:
-    return SCHEDULE_COLORS.get(s, "#888888")
-
-
-def _ckpt_files(ckpt_dir: Path) -> dict[int, Path]:
-    return {int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")}
+from burst.dev._shared import ckpt_files as _ckpt_files
 
 
 def _get_key_steps(files: dict[int, Path], r: dict):
@@ -382,7 +359,7 @@ def compute_frankenstein(
                 "post_bottom_burst": [],
                 "post_bottom_other": [],
             }
-            for direction, (b_acc, o_acc) in zip(directions, evals, strict=False):
+            for direction, (b_acc, o_acc) in zip(directions, evals, strict=True):
                 seed_data[f"{direction}_burst"].append(b_acc)
                 seed_data[f"{direction}_other"].append(o_acc)
 
@@ -417,7 +394,7 @@ def compute_cross_burst_frankenstein(
             continue
 
         per_seed: list[dict] = []
-        for sc_a, sc_b in zip(seeds_a, seeds_b, strict=False):
+        for sc_a, sc_b in zip(seeds_a, seeds_b, strict=True):
             if len(per_seed) >= n_seeds:
                 break
 
@@ -437,7 +414,7 @@ def compute_cross_burst_frankenstein(
                 "b_bottom_burst": [],
                 "b_bottom_other": [],
             }
-            for direction, (b_acc, o_acc) in zip(directions, evals, strict=False):
+            for direction, (b_acc, o_acc) in zip(directions, evals, strict=True):
                 seed_data[f"{direction}_burst"].append(b_acc)
                 seed_data[f"{direction}_other"].append(o_acc)
 
@@ -1114,19 +1091,21 @@ def compute_forgetting_decomposition(all_results: list[dict]) -> dict:
         for r in jobs_by_schedule[sched]:
             log = r["log"]
             steps = log["step"]
-            accs = log["acc_burst"]
+            accs = log[ACC_BURST]
             phases = log["phase"]
             T = r["config"]["total_steps"]
 
             burst_end = r.get("burst_end_step", r.get("pre_burst_steps", 0) + T)
-            rev_steps = [s - burst_end for s, p in zip(steps, phases, strict=False) if p == PHASE_REVERSION]
-            rev_accs = [a for a, p in zip(accs, phases, strict=False) if p == PHASE_REVERSION]
+            rev_steps = [
+                s - burst_end for s, p in zip(steps, phases, strict=True) if p == PHASE_REVERSION
+            ]
+            rev_accs = [a for a, p in zip(accs, phases, strict=True) if p == PHASE_REVERSION]
             if len(rev_accs) < 2:
                 continue
 
             early_mask = [s <= 50 for s in rev_steps]
-            early_s = [s for s, m in zip(rev_steps, early_mask, strict=False) if m]
-            early_a = [a for a, m in zip(rev_accs, early_mask, strict=False) if m]
+            early_s = [s for s, m in zip(rev_steps, early_mask, strict=True) if m]
+            early_a = [a for a, m in zip(rev_accs, early_mask, strict=True) if m]
             slope = float(np.polyfit(early_s, early_a, 1)[0]) if len(early_s) >= 2 else float("nan")
 
             cutoff = int(len(rev_accs) * 0.8)
@@ -1163,7 +1142,7 @@ def compute_grad_temporal(all_results: list[dict]) -> dict:
             phases = gsl.get("phase", [])
             T = r["config"]["total_steps"]
             burst_end = r.get("burst_end_step", r.get("pre_burst_steps", 0) + T)
-            for s, sim, ph in zip(steps, sims, phases, strict=False):
+            for s, sim, ph in zip(steps, sims, phases, strict=True):
                 if ph == PHASE_REVERSION:
                     step_sims.setdefault(s - burst_end, []).append(sim)
 
@@ -1197,7 +1176,7 @@ def compute_layer_interference(all_results: list[dict]) -> dict:
             if not layer_names and gsl.get("layer_names"):
                 layer_names = gsl["layer_names"]
             for ln, vals in per_layer.items():
-                burst_vals = [v for v, p in zip(vals, phases, strict=False) if p == PHASE_BURST]
+                burst_vals = [v for v, p in zip(vals, phases, strict=True) if p == PHASE_BURST]
                 if burst_vals:
                     layer_sims.setdefault(ln, []).append(float(np.mean(burst_vals)))
                     layer_end_sims.setdefault(ln, []).append(float(burst_vals[-1]))
@@ -1248,7 +1227,7 @@ def _aggregate_layer_metric(
             if not layer_names and gsl.get("layer_names"):
                 layer_names = gsl["layer_names"]
             for ln, vals in per_layer.items():
-                filtered = [v for v, p in zip(vals, phases, strict=False) if p == phase_filter]
+                filtered = [v for v, p in zip(vals, phases, strict=True) if p == phase_filter]
                 if filtered:
                     arr = np.asarray(filtered)
                     valid = arr[~np.isnan(arr)]
@@ -1312,7 +1291,7 @@ def compute_token_pos_grad(all_results: list[dict]) -> dict:
             gsl = r.get("grad_sim_log", {})
             norms_list = gsl.get("token_pos_grad_norms", [])
             phases = gsl.get("phase", [])
-            for norms, phase in zip(norms_list, phases, strict=False):
+            for norms, phase in zip(norms_list, phases, strict=True):
                 if phase == PHASE_BURST and norms:
                     all_norms.append(norms)
 
@@ -1352,8 +1331,8 @@ def compute_grad_attribution(all_results: list[dict]) -> dict:
             fin_fracs = attr.get("final_frac", [])
             phases = gsl.get("phase", [])
 
-            burst_int = [v for v, p in zip(int_fracs, phases, strict=False) if p == PHASE_BURST]
-            burst_fin = [v for v, p in zip(fin_fracs, phases, strict=False) if p == PHASE_BURST]
+            burst_int = [v for v, p in zip(int_fracs, phases, strict=True) if p == PHASE_BURST]
+            burst_fin = [v for v, p in zip(fin_fracs, phases, strict=True) if p == PHASE_BURST]
 
             if burst_int:
                 seed_intermediate.append(float(np.nanmean(burst_int)))
@@ -1761,7 +1740,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 other_mean = [
                     float(np.mean([s[other_key][i] for s in ps])) for i in range(len(alphas))
                 ]
-                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=True)]
                 fig.add_trace(
                     go.Scatter(
                         x=alphas,
@@ -1856,7 +1835,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 other_mean = [
                     float(np.mean([s[other_key][i] for s in ps])) for i in range(len(alphas))
                 ]
-                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=True)]
                 fig.add_trace(
                     go.Scatter(
                         x=alphas,
@@ -1963,7 +1942,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                 other_mean = [
                     float(np.mean([s[other_key][i] for s in ps])) for i in range(len(cut_points))
                 ]
-                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
+                diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=True)]
                 fig.add_trace(
                     go.Scatter(
                         x=cut_labels,
@@ -2041,7 +2020,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             pre_top_burst = [
                 float(np.mean([s["post_bottom_burst"][i] for s in ps])) for i in range(n_cuts)
             ]
-            loc_gap = [pt - pb for pt, pb in zip(post_top_burst, pre_top_burst, strict=False)]
+            loc_gap = [pt - pb for pt, pb in zip(post_top_burst, pre_top_burst, strict=True)]
             fig_gap.add_trace(
                 go.Scatter(
                     x=cut_labels,
@@ -2113,8 +2092,8 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             b_other = [
                 float(np.mean([s["b_bottom_other"][i] for s in ps])) for i in range(len(cut_points))
             ]
-            a_diff = [b - o for b, o in zip(a_burst, a_other, strict=False)]
-            b_diff = [b - o for b, o in zip(b_burst, b_other, strict=False)]
+            a_diff = [b - o for b, o in zip(a_burst, a_other, strict=True)]
+            b_diff = [b - o for b, o in zip(b_burst, b_other, strict=True)]
 
             fig.add_trace(
                 go.Scatter(
@@ -2246,7 +2225,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             other_mean = [
                 float(np.mean([s["other_accs"][i] for s in ps])) for i in range(len(sparsities))
             ]
-            diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
+            diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=True)]
             fig.add_trace(
                 go.Scatter(
                     x=[s * 100 for s in sparsities],
@@ -2320,7 +2299,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
             other_mean = [
                 float(np.mean([s["other_accs"][i] for s in ps])) for i in range(len(steps))
             ]
-            diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=False)]
+            diff_mean = [b - o for b, o in zip(burst_mean, other_mean, strict=True)]
             fig.add_trace(
                 go.Scatter(
                     x=steps,
@@ -2372,7 +2351,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
         )
         _add(f"relearning_delta_{rn}", f"Relearning Δ ({rn})", fig_delta)
 
-        _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapezoid
+        _trapz = np.trapezoid
         auc_vals = {}
         for sched in schedules:
             ps = rl[sched]["per_seed"]
@@ -2724,8 +2703,14 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     else:
                         means.append(float("nan"))
                         ci95.append(0.0)
-                upper = [m + c if not np.isnan(m) else float("nan") for m, c in zip(means, ci95, strict=False)]
-                lower = [m - c if not np.isnan(m) else float("nan") for m, c in zip(means, ci95, strict=False)]
+                upper = [
+                    m + c if not np.isnan(m) else float("nan")
+                    for m, c in zip(means, ci95, strict=True)
+                ]
+                lower = [
+                    m - c if not np.isnan(m) else float("nan")
+                    for m, c in zip(means, ci95, strict=True)
+                ]
                 col = _color(sched)
                 fig.add_trace(
                     go.Scatter(
@@ -2788,10 +2773,12 @@ def make_dashboard(results: dict, out_dir: Path) -> None:
                     diff_means.append(float("nan"))
                     ci95_diff.append(0.0)
             upper_d = [
-                m + c if not np.isnan(m) else float("nan") for m, c in zip(diff_means, ci95_diff, strict=False)
+                m + c if not np.isnan(m) else float("nan")
+                for m, c in zip(diff_means, ci95_diff, strict=True)
             ]
             lower_d = [
-                m - c if not np.isnan(m) else float("nan") for m, c in zip(diff_means, ci95_diff, strict=False)
+                m - c if not np.isnan(m) else float("nan")
+                for m, c in zip(diff_means, ci95_diff, strict=True)
             ]
             col = _color(sched)
             fig_diff.add_trace(
@@ -3450,8 +3437,8 @@ def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:
         for r in runs:
             log = r["log"]
             steps = np.array(log["step"])
-            acc_burst = np.array(log.get("acc_burst", [0.0] * len(steps)))
-            acc_other = np.array(log.get("acc_other", [0.0] * len(steps)))
+            acc_burst = np.array(log.get(ACC_BURST, [0.0] * len(steps)))
+            acc_other = np.array(log.get(ACC_OTHER, [0.0] * len(steps)))
             loss_arr = np.array(log.get("loss", [float("nan")] * len(steps)))
             phases = log["phase"]
 
@@ -3587,7 +3574,7 @@ def _ext_bar_fig(
             name="Mean ± 95% CI",
         )
     )
-    for i, (s, vals) in enumerate(zip(schedules, all_vals, strict=False)):
+    for i, (s, vals) in enumerate(zip(schedules, all_vals, strict=True)):
         np.random.default_rng(42 + i).uniform(-0.2, 0.2, len(vals))
         fig.add_trace(
             go.Scatter(

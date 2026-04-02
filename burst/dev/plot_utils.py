@@ -24,14 +24,14 @@ def _plotly_to_mpl_color(
     return c
 
 
-def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
+def plotly_to_png_matplotlib(
     fig_plotly: Figure, path: str, width: int = 1200, height: int = 600,
 ) -> None:
     """Render a Plotly figure to PNG via matplotlib."""
-    import matplotlib as mpl  # noqa: PLC0415
+    import matplotlib as mpl
 
     mpl.use("Agg")
-    import matplotlib.pyplot as plt  # noqa: PLC0415
+    import matplotlib.pyplot as plt
 
     fig_data = fig_plotly.to_dict()
     traces = fig_data.get("data", [])
@@ -112,7 +112,7 @@ def save_png(
     """Save a Plotly figure to PNG, falling back to matplotlib."""
     try:
         fig.write_image(path, width=width, height=height, scale=2)
-    except Exception:  # noqa: BLE001
+    except (ValueError, OSError):
         plotly_to_png_matplotlib(fig, path, width=width, height=height)
 
 
@@ -127,7 +127,7 @@ def _fmt(v: float | str, precision: int = 5) -> str:
 _INLINE_THRESHOLD = 20
 
 
-def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
+def _trace_to_text(trace: dict) -> list[str]:
     """Convert a single Plotly trace dict to compact text lines."""
     lines: list[str] = []
     ttype = trace.get("type", "scatter")
@@ -242,7 +242,7 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
     return lines
 
 
-def fig_to_text(  # noqa: C901
+def fig_to_text(
     fig: Figure, title: str = "", description: dict | None = None,
 ) -> str:
     """Convert a Plotly figure to a compact machine-readable text block."""

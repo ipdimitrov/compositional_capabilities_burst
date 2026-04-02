@@ -46,14 +46,11 @@ Dimension key:
 
 import argparse
 import json
-import os
 import pickle
 import sys
-import time
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import numpy as np
 import torch
@@ -61,57 +58,28 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 from burst.config import (
+    ACC_BURST,
     PHASE_BURST,
     PHASE_REVERSION,
-    SCHED_COLORS,
-    SCHEDULE_ORDER,
     parse_run_config,
 )
-from burst.core.train_utils import load_net
+from burst.core.train_utils import DEVICE, load_net
+from burst.dev._shared import (
+    ckpt_files as _ckpt_files,
+)
+from burst.dev._shared import (
+    free_gen_acc as _free_gen_acc,
+)
+from burst.dev._shared import (
+    sched_color as _color,
+)
+from burst.dev._shared import (
+    sched_order as _sched_order,
+)
 from burst.dev.plot_utils import save_png as _save_png
-from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _rng = np.random.default_rng()
-
-SCHEDULES_ORDERED = SCHEDULE_ORDER
-SCHEDULE_COLORS = SCHED_COLORS
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _flat_params(net: nanoGPT) -> torch.Tensor:
-    return torch.cat([p.detach().float().cpu().view(-1) for p in net.parameters()])
-
-
-@torch.no_grad()
-def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
-    net.eval()
-    docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    _B, L = docs_t.shape
-    target_B6 = docs_t[:, -6:]
-    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
-    return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
-
-
-def _sched_order(s: str) -> int:
-    try:
-        return SCHEDULES_ORDERED.index(s)
-    except ValueError:
-        return 99
-
-
-def _color(s: str) -> str:
-    return SCHEDULE_COLORS.get(s, "#888888")
-
-
-def _ckpt_files(ckpt_dir: Path) -> dict[int, Path]:
-    return {int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")}
-
 
 # ---------------------------------------------------------------------------
 # Metric 1: Task Vector Transfer
@@ -405,16 +373,13 @@ def compute_relearning_efficiency(
 
             all_accs.append(accs)
             seeds_done += 1
-            accs[-1][1] if accs else 0
-
         if all_accs:
             steps_common = [a[0] for a in all_accs[0]]
             mean_accs = [
                 float(np.mean([run[i][1] for run in all_accs])) for i in range(len(steps_common))
             ]
-            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapezoid
             auc = (
-                float(_trapz(mean_accs, steps_common)) / max(steps_common[-1], 1)
+                float(np.trapezoid(mean_accs, steps_common)) / max(steps_common[-1], 1)
                 if len(steps_common) > 1
                 else 0.0
             )
@@ -614,7 +579,7 @@ def compute_pruning_robustness(
                 float(np.mean([c[i] for c in all_acc_curves])) for i in range(n_prune_levels)
             ]
             # Area under pruning curve (higher = more robust = deeper)
-            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapezoid
+            _trapz = np.trapezoid
             robustness_auc = float(_trapz(mean_curve, sparsities))
         else:
             mean_curve = [float("nan")] * n_prune_levels
@@ -663,13 +628,12 @@ def compute_pairwise_grad_separation(all_results: list[dict]) -> dict:
                 step = snap["step"]
                 matrix = snap["matrix"]
                 labels = snap["labels"]
-                try:
-                    burst_idx = labels.index("BURST")
-                    other_idx = labels.index("ALL_OTHER")
-                    sim = matrix[burst_idx][other_idx]
-                    step_sims.setdefault(step, []).append(sim)
-                except (ValueError, IndexError):
-                    pass
+                if "BURST" not in labels or "ALL_OTHER" not in labels:
+                    continue
+                burst_idx = labels.index("BURST")
+                other_idx = labels.index("ALL_OTHER")
+                sim = matrix[burst_idx][other_idx]
+                step_sims.setdefault(step, []).append(sim)
 
         steps_sorted = sorted(step_sims.keys())
         results[sched] = {
@@ -711,19 +675,19 @@ def compute_forgetting_speed_decomposition(all_results: list[dict]) -> dict:
         for r in sched_results:
             log = r["log"]
             steps = log["step"]
-            accs = log["acc_burst"]
+            accs = log[ACC_BURST]
             phases = log["phase"]
             T = r["config"]["total_steps"]
 
-            rev_steps = [s - T for s, p in zip(steps, phases, strict=False) if p == PHASE_REVERSION]
-            rev_accs = [a for a, p in zip(accs, phases, strict=False) if p == PHASE_REVERSION]
+            rev_steps = [s - T for s, p in zip(steps, phases, strict=True) if p == PHASE_REVERSION]
+            rev_accs = [a for a, p in zip(accs, phases, strict=True) if p == PHASE_REVERSION]
 
             if len(rev_accs) < 2:
                 continue
 
             peak = r.get(
                 "peak_burst",
-                max(a for a, p in zip(accs, phases, strict=False) if p == PHASE_BURST)
+                max(a for a, p in zip(accs, phases, strict=True) if p == PHASE_BURST)
                 if any(p == PHASE_BURST for p in phases)
                 else 0,
             )
@@ -731,8 +695,8 @@ def compute_forgetting_speed_decomposition(all_results: list[dict]) -> dict:
 
             # Initial slope: linear fit over first 50 reversion steps
             early_mask = [s <= 50 for s in rev_steps]
-            early_steps = [s for s, m in zip(rev_steps, early_mask, strict=False) if m]
-            early_accs = [a for a, m in zip(rev_accs, early_mask, strict=False) if m]
+            early_steps = [s for s, m in zip(rev_steps, early_mask, strict=True) if m]
+            early_accs = [a for a, m in zip(rev_accs, early_mask, strict=True) if m]
             if len(early_steps) >= 2:
                 slope = float(np.polyfit(early_steps, early_accs, 1)[0])
             else:
@@ -797,7 +761,7 @@ def compute_layer_interference_localisation(all_results: list[dict]) -> dict:
                 layer_names = gsl["layer_names"]
 
             for ln, vals in per_layer.items():
-                burst_vals = [v for v, p in zip(vals, phases, strict=False) if p == PHASE_BURST]
+                burst_vals = [v for v, p in zip(vals, phases, strict=True) if p == PHASE_BURST]
                 if burst_vals:
                     layer_sims.setdefault(ln, []).append(float(np.mean(burst_vals)))
 
@@ -854,7 +818,7 @@ def compute_grad_interference_temporal(all_results: list[dict]) -> dict:
             phases = gsl.get("phase", [])
             T = r["config"]["total_steps"]
 
-            for s, sim, ph in zip(steps, sims, phases, strict=False):
+            for s, sim, ph in zip(steps, sims, phases, strict=True):
                 if ph == PHASE_REVERSION:
                     rel_step = s - T
                     step_sims.setdefault(rel_step, []).append(sim)
@@ -869,7 +833,7 @@ def compute_grad_interference_temporal(all_results: list[dict]) -> dict:
         # Re-alignment speed: steps until cosine sim first exceeds 0.1
         # (threshold of 0.5 is too high — reversion sims rarely exceed 0.5)
         realign_step = next(
-            (s for s, sim in zip(steps_sorted, mean_sims, strict=False) if sim > 0.1),
+            (s for s, sim in zip(steps_sorted, mean_sims, strict=True) if sim > 0.1),
             steps_sorted[-1] if steps_sorted else float("nan"),
         )
 
@@ -925,7 +889,7 @@ def compute_grad_projection_metrics(all_results: list[dict]) -> dict:
             steps = gsl.get("step", [])
             if not proj or not steps:
                 continue
-            for i, (step, phase) in enumerate(zip(steps, gsl.get("phase", []), strict=False)):
+            for i, (step, phase) in enumerate(zip(steps, gsl.get("phase", []), strict=True)):
                 step_data.setdefault(step, {k: [] for k in _PROJ_KEYS})
                 step_phases[step] = phase
                 for k in _PROJ_KEYS:
@@ -1615,7 +1579,9 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
     #           and interference ratio over time with error bands
     # ------------------------------------------------------------------
 
-    def _proj_timeseries_fig(gp, schedules, metric_key, title, yaxis_label, hline=None):
+    def _proj_timeseries_fig(
+        gp, schedules, metric_key, title, yaxis_label, hline=None,
+    ):
         """Line + shaded-band figure for one projection metric across schedules."""
         fig = go.Figure()
         for sched in schedules:
@@ -1638,8 +1604,8 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             fig.add_trace(
                 go.Scatter(
                     x=steps + steps[::-1],
-                    y=[v + e for v, e in zip(y, y_std, strict=False)]
-                    + [v - e for v, e in zip(y[::-1], y_std[::-1], strict=False)],
+                    y=[v + e for v, e in zip(y, y_std, strict=True)]
+                    + [v - e for v, e in zip(y[::-1], y_std[::-1], strict=True)],
                     fill="toself",
                     fillcolor=color,
                     opacity=0.15,
@@ -1712,7 +1678,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             d = gp[sched]
             burst_ratios = [
                 r
-                for r, p in zip(d.get("interference_ratio", []), d.get("phases", []), strict=False)
+                for r, p in zip(d.get("interference_ratio", []), d.get("phases", []), strict=True)
                 if p == PHASE_BURST and not np.isnan(r)
             ]
             if burst_ratios:
@@ -2029,12 +1995,10 @@ def analyse_run(
         run_cfg = json.load(f)
 
     rc = parse_run_config(run_cfg)
-    rc["base_cfg"]
 
     with open(logs_dir / "_data.pkl", "rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)
+        target_pool, _bg_pool, _, _, _ = pickle.load(f)
 
-    np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
@@ -2121,7 +2085,6 @@ def main() -> None:
     for run_dir in args.run_dirs:
         run_dir = Path(run_dir)
         existing = existing_by_name.get(run_dir.name, {})
-        time.time()
         r = analyse_run(
             run_dir,
             existing,

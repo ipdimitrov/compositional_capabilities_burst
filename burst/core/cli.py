@@ -60,7 +60,7 @@ class CliCommand:
     gradients_args: list[str]
 
 
-def _parse_args() -> CliCommand:  # noqa: C901, PLR0915
+def _parse_args() -> CliCommand:
     """Parse CLI arguments into a CliCommand."""
     parser = argparse.ArgumentParser(description="Canonical burst pipeline CLI.")
     parser.add_argument("--seed", type=int, default=DEFAULT_REPRO_SEED)

@@ -37,10 +37,15 @@ PHASE_NAMES = [PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION]
 PHASE_FOUNDATION = PHASE_PRE_BURST
 
 # ---------------------------------------------------------------------------
-# Class names
+# Class names & derived metric keys
 # ---------------------------------------------------------------------------
 CLASS_OTHER = "other"
 CLASS_BURST = "burst"
+
+ACC_OTHER = f"acc_{CLASS_OTHER}"
+ACC_BURST = f"acc_{CLASS_BURST}"
+LOSS_OTHER = f"loss_{CLASS_OTHER}"
+LOSS_BURST = f"loss_{CLASS_BURST}"
 
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
@@ -91,11 +96,11 @@ SCHED_COLORS: dict[str, str] = {
 
 SCHED_DISPLAY: dict[str, str] = {_sched_name(p): f"Burst {p}%" for p in _sorted_pcts}
 
-EVAL_KEYS = ["acc_other", "acc_burst"]
+EVAL_KEYS = [ACC_OTHER, ACC_BURST]
 
 CURVE_STYLE = {
-    "acc_other": {"color": "#2196F3", "ls": "-", "label": "Other Classes"},
-    "acc_burst": {"color": "#E91E63", "ls": "-", "label": "Special Class"},
+    ACC_OTHER: {"color": "#2196F3", "ls": "-", "label": "Other Classes"},
+    ACC_BURST: {"color": "#E91E63", "ls": "-", "label": "Special Class"},
 }
 
 # ---------------------------------------------------------------------------
@@ -236,7 +241,7 @@ class ExperimentConfig:
             msg = f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}"
             raise ValueError(msg)
         if self.n_workers == 0:
-            from burst.core.gpu import gpu_cfg  # noqa: PLC0415
+            from burst.core.gpu import gpu_cfg
 
             self.n_workers = gpu_cfg.train_workers
 
@@ -256,21 +261,20 @@ def parse_run_config(cfg: dict[str, Any]) -> dict[str, Any]:
     Raises KeyError if any required field is missing.
     """
     base_cfg = cfg["base_cfg"]
+    task_info = cfg.get("task_info", {})
 
-    depth = cfg.get("depth") or cfg.get("task_info", {}).get("depth")
-    if depth is None:
-        msg = "config missing 'depth' (checked cfg.depth and cfg.task_info.depth)"
-        raise KeyError(msg)
+    def _get(key: str) -> int:
+        v = cfg.get(key)
+        return v if v is not None else task_info.get(key)
 
-    burst_pos = cfg.get("burst_pos") or cfg.get("task_info", {}).get("burst_pos")
-    if burst_pos is None:
-        msg = "config missing 'burst_pos' (checked cfg.burst_pos and cfg.task_info.burst_pos)"
-        raise KeyError(msg)
+    depth = _get("depth")
+    assert depth is not None, "config missing 'depth'"
 
-    n_a = cfg.get("n_a") or cfg.get("task_info", {}).get("n_a")
-    if n_a is None:
-        msg = "config missing 'n_a' (checked cfg.n_a and cfg.task_info.n_a)"
-        raise KeyError(msg)
+    burst_pos = _get("burst_pos")
+    assert burst_pos is not None, "config missing 'burst_pos'"
+
+    n_a = _get("n_a")
+    assert n_a is not None, "config missing 'n_a'"
 
     return {"depth": depth, "burst_pos": burst_pos, "n_a": n_a, "base_cfg": base_cfg}
 
@@ -294,7 +298,5 @@ def ordered_schedules(scheds: Iterable[str]) -> list[str]:
 
 def sched_sort_key(schedule: str) -> int:
     """Return the sort index for a schedule name."""
-    try:
-        return SCHEDULE_ORDER.index(schedule)
-    except ValueError:
-        return len(SCHEDULE_ORDER)
+    assert schedule in SCHEDULE_ORDER, f"Unknown schedule: {schedule}"
+    return SCHEDULE_ORDER.index(schedule)

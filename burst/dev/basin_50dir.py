@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import multiprocessing
 import pickle
 import sys
@@ -29,22 +30,23 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torch import nn
 
 mpl.use("Agg")
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from burst.config import (
-    SCHED_COLORS,
-    SCHED_DISPLAY,
-    SCHEDULE_ORDER,
+    CLASS_BURST,
+    CLASS_OTHER,
     parse_run_config,
 )
 from burst.core.train_utils import load_net, resolve_run_paths
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+logger = logging.getLogger(__name__)
+
+from burst.core.train_utils import DEVICE
+from burst.dev._shared import cross_entropy_loss as _cross_entropy_loss
+
 _rng = np.random.default_rng()
 
 N_DIRECTIONS = 50
@@ -54,19 +56,9 @@ N_EVAL_DOCS = 128
 _MIN_FILTER_DIM = 2
 
 
-def _sched_order(s: str) -> int:
-    try:
-        return SCHEDULE_ORDER.index(s)
-    except ValueError:
-        return 99
-
-
-def _color(s: str) -> str:
-    return SCHED_COLORS.get(s, "#888888")
-
-
-def _label(s: str) -> str:
-    return SCHED_DISPLAY.get(s, s)
+from burst.dev._shared import sched_color as _color
+from burst.dev._shared import sched_label as _label
+from burst.dev._shared import sched_order as _sched_order
 
 
 def _filter_normalise(
@@ -89,23 +81,7 @@ def _filter_normalise(
 
 
 @torch.no_grad()
-def _cross_entropy_loss(net: nn.Module, docs_BL: np.ndarray) -> float:
-    if docs_BL.shape[0] == 0:
-        return float("nan")
-    net.eval()
-    n = min(256, docs_BL.shape[0])
-    idx = _rng.choice(docs_BL.shape[0], n, replace=False)
-    dat = torch.as_tensor(docs_BL[idx], dtype=torch.long, device=DEVICE)
-    inp, tgt = dat[:, :-1], dat[:, 1:]
-    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-        logits = net(inp).float()
-    return F.cross_entropy(
-        logits.reshape(-1, logits.size(-1)), tgt.reshape(-1)
-    ).item()
-
-
-@torch.no_grad()
-def compute_one_seed(  # noqa: PLR0913
+def compute_one_seed(
     cfg: dict,
     ckpt_path: str,
     burst_eval: np.ndarray,
@@ -176,7 +152,7 @@ def plot_mean_and_variance(
     """Plot mean and variance loss curves across random directions."""
     schedules = sorted(results.keys(), key=_sched_order)
 
-    for loss_type in ["burst", "other"]:
+    for loss_type in [CLASS_BURST, CLASS_OTHER]:
         key = f"{loss_type}_losses"
 
         fig_mag, ax_mag = plt.subplots(figsize=(14, 7))
@@ -310,7 +286,7 @@ def plot_sharpness(
     plt.close(fig)
 
 
-def main() -> None:  # noqa: C901, PLR0915
+def main() -> None:
     """Run 50-direction filter-normalised loss basin analysis."""
     parser = argparse.ArgumentParser(
         description=(
@@ -337,7 +313,7 @@ def main() -> None:  # noqa: C901, PLR0915
     parse_run_config(run_cfg)
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     burst_docs = np.concatenate(list(target_pool.values()))
     other_docs = np.concatenate(list(bg_pool.values()))
@@ -353,7 +329,7 @@ def main() -> None:  # noqa: C901, PLR0915
     ]
 
     with (logs_dir / "all_results.pkl").open("rb") as f:
-        all_results = pickle.load(f)  # noqa: S301
+        all_results = pickle.load(f)
 
     ckpt_root = logs_dir / "checkpoints"
     assert ckpt_root.exists(), f"No checkpoints at {ckpt_root}"
@@ -386,33 +362,27 @@ def main() -> None:  # noqa: C901, PLR0915
                 (sched, r["seed"], str(files[peak_step]), r["config"])
             )
 
-    print(f"Run: {run_dir.name}")  # noqa: T201
-    print(  # noqa: T201
-        f"Schedules: {len(schedules)},"
-        f" work items: {len(work_items)}"
+    logger.info("Run: %s", run_dir.name)
+    logger.info("Schedules: %d, work items: %d", len(schedules), len(work_items))
+    logger.info(
+        "Directions: %d, points: %d, epsilon: +/-%.4f",
+        args.n_directions, args.n_points, args.max_epsilon,
     )
-    print(  # noqa: T201
-        f"Directions: {args.n_directions},"
-        f" points: {args.n_points},"
-        f" epsilon: +/-{args.max_epsilon}"
-    )
-    print(f"Workers: {args.max_workers}")  # noqa: T201
-    print(  # noqa: T201
-        f"Eval docs: {n_burst} burst, {n_other} other"
-    )
+    logger.info("Workers: %d", args.max_workers)
+    logger.info("Eval docs: %d burst, %d other", n_burst, n_other)
 
     per_item_fwd = args.n_directions * args.n_points * 2
     total_fwd = len(work_items) * per_item_fwd
     est_seconds = total_fwd * 0.003
-    print(  # noqa: T201
-        f"Estimated: {total_fwd} forward passes,"
-        f" ~{est_seconds:.0f}s ({est_seconds / 60:.1f} min)\n"
+    logger.info(
+        "Estimated: %d forward passes, ~%.0fs (%.1f min)",
+        total_fwd, est_seconds, est_seconds / 60,
     )
 
     t0 = time.time()
 
     raw_results: dict[str, dict] = {
-        s: {"burst": [], "other": [], "seeds": []} for s in schedules
+        s: {CLASS_BURST: [], CLASS_OTHER: [], "seeds": []} for s in schedules
     }
 
     if args.max_workers <= 1:
@@ -421,14 +391,12 @@ def main() -> None:  # noqa: C901, PLR0915
                 cfg, ckpt_path, burst_eval, other_eval,
                 args.n_directions, epsilons,
             )
-            raw_results[sched]["burst"].extend(burst_losses)
-            raw_results[sched]["other"].extend(other_losses)
+            raw_results[sched][CLASS_BURST].extend(burst_losses)
+            raw_results[sched][CLASS_OTHER].extend(other_losses)
             raw_results[sched]["seeds"].append(seed)
             elapsed = time.time() - t0
-            print(  # noqa: T201
-                f"  [{i + 1}/{len(work_items)}]"
-                f" {sched} s{seed} done ({elapsed:.1f}s)",
-                flush=True,
+            logger.debug(
+                "[%d/%d] %s s%d done (%.1fs)", i + 1, len(work_items), sched, seed, elapsed,
             )
     else:
         ctx = multiprocessing.get_context("spawn")
@@ -449,30 +417,25 @@ def main() -> None:  # noqa: C901, PLR0915
             ):
                 sched, seed = futures[fut]
                 burst_losses, other_losses = fut.result()
-                raw_results[sched]["burst"].extend(burst_losses)
-                raw_results[sched]["other"].extend(other_losses)
+                raw_results[sched][CLASS_BURST].extend(burst_losses)
+                raw_results[sched][CLASS_OTHER].extend(other_losses)
                 raw_results[sched]["seeds"].append(seed)
                 elapsed = time.time() - t0
-                print(  # noqa: T201
-                    f"  [{done_count}/{len(work_items)}]"
-                    f" {sched} s{seed}"
-                    f" done ({elapsed:.1f}s)",
-                    flush=True,
+                logger.debug(
+                    "[%d/%d] %s s%d done (%.1fs)",
+                    done_count, len(work_items), sched, seed, elapsed,
                 )
 
     compute_time = time.time() - t0
-    print(  # noqa: T201
-        f"\nCompute done in {compute_time:.1f}s"
-        f" ({compute_time / 60:.1f} min)"
-    )
+    logger.info("Compute done in %.1fs (%.1f min)", compute_time, compute_time / 60)
 
     final: dict[str, dict] = {}
     for sched in schedules:
         rd = raw_results[sched]
         final[sched] = {
             "epsilons": epsilons.tolist(),
-            "burst_losses": rd["burst"],
-            "other_losses": rd["other"],
+            "burst_losses": rd[CLASS_BURST],
+            "other_losses": rd[CLASS_OTHER],
             "n_seeds": len(rd["seeds"]),
             "n_directions": args.n_directions,
         }
@@ -483,16 +446,13 @@ def main() -> None:  # noqa: C901, PLR0915
     with (out_dir / "results.pkl").open("wb") as f:
         pickle.dump(final, f)
 
-    print("Plotting...", flush=True)  # noqa: T201
+    logger.info("Plotting...")
     plot_mean_and_variance(final, out_dir, args.n_directions)
     plot_sharpness(final, out_dir, args.n_directions)
 
     total_time = time.time() - t0
-    print(  # noqa: T201
-        f"\nAll done in {total_time:.1f}s"
-        f" ({total_time / 60:.1f} min)"
-    )
-    print(f"Results: {out_dir}")  # noqa: T201
+    logger.info("All done in %.1fs (%.1f min)", total_time, total_time / 60)
+    logger.info("Results: %s", out_dir)
 
 
 if __name__ == "__main__":

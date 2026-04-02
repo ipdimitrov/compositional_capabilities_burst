@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from einops import reduce
 
+from burst.core.activations import collect_activations_KPTN
 from burst.core.train_utils import load_net, resolve_run_paths
-from burst.dev.probe import collect_activations_KPTN
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -35,7 +35,7 @@ def build_representation_summary(
         return {}
 
     with data_path.open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     other_docs = _subsample_pool(bg_pool, n_docs_per_class, seed=0)
     burst_docs = _subsample_pool(target_pool, n_docs_per_class, seed=1)
@@ -154,6 +154,7 @@ def _subsample_pool(pool: _TaskPool, n_docs: int, *, seed: int) -> np.ndarray:
 
 def _mean_ci_payload(values: np.ndarray) -> dict[str, float]:
     """Return {mean, ci} dict with 95% confidence interval."""
-    mean = float(np.mean(values))
-    ci = 0.0 if values.size <= 1 else float(1.96 * np.std(values) / np.sqrt(values.size))
+    from burst.core.bundle import _mean_ci
+
+    mean, ci = _mean_ci(values)
     return {"mean": mean, "ci": ci}

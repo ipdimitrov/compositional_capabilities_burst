@@ -61,12 +61,12 @@ def configure_optimizers(net: torch.nn.Module, optim_cfg: DictConfig) -> torch.o
     logger.info(
         "num decayed parameter tensors: %s, with %s parameters",
         len(decay_params),
-        "{:,}".format(num_decay_params),
+        f"{num_decay_params:,}",
     )
     logger.info(
         "num non-decayed parameter tensors: %s, with %s parameters",
         len(nodecay_params),
-        "{:,}".format(num_nodecay_params),
+        f"{num_nodecay_params:,}",
     )
 
     fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
@@ -89,7 +89,7 @@ def _cosine_segment(t_frac: float, lr_start: float, lr_end: float) -> float:
     return lr_end + coeff * (lr_start - lr_end)
 
 
-def phase_lr(  # noqa: PLR0913
+def phase_lr(
     global_step: int,
     warmup_steps: int,
     pretrain_steps: int,
@@ -141,7 +141,7 @@ def reset_optimizer_state(optimizer: torch.optim.Optimizer) -> None:
                     state[k] = 0
 
 
-def update_phase_lr(  # noqa: PLR0913
+def update_phase_lr(
     global_step: int,
     optimizer: torch.optim.Optimizer,
     warmup_steps: int,

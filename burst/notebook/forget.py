@@ -8,8 +8,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm.auto import tqdm
 
+from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER
 from burst.notebook.interp import (
     _get_grad_vector,
     grad_norm_entropy,
@@ -28,14 +30,15 @@ from burst.notebook.model import (
     save_model,
     train_step,
 )
+from burst.types import ExperimentData, ForgetResult
 
 _rng = np.random.default_rng()
 
-GRAD_NORM_EPS = 1e-6
+ACC_NEAR_ZERO = 1e-6
 
 
-def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
-    data: dict,
+def forget(
+    data: ExperimentData,
     finetune_ckpt: str | Path,
     out_dir: str | Path,
     *,
@@ -47,7 +50,6 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     batch_size: int = MODEL_DEFAULTS["batch_size"],
     eval_every: int = MODEL_DEFAULTS["eval_every"],
     grad_clip: float = MODEL_DEFAULTS["grad_clip"],
-    weight_decay: float = MODEL_DEFAULTS["weight_decay"],
     beta1: float = MODEL_DEFAULTS["beta1"],
     beta2: float = MODEL_DEFAULTS["beta2"],
     n_layer: int = MODEL_DEFAULTS["n_layer"],
@@ -57,7 +59,7 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     tag: str | None = None,
     seed: int = 42,
     quiet: bool = False,
-) -> dict:
+) -> ForgetResult:
     """Run reversion phase with background-only training and measure forgetting."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -73,22 +75,20 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     eval_other = data["eval_other"]
     eval_burst = data["eval_burst"]
 
-    global _rng
+    global _rng  # noqa: PLW0603
     _rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
     net = load_model(
         finetune_ckpt, vocab_size, context_size, n_layer=n_layer, n_embd=n_embd, n_head=n_head
     )
-    optimizer = make_optimizer(
-        net, lr=lr * lr_start_frac, _weight_decay=weight_decay, beta1=beta1, beta2=beta2
-    )
+    optimizer = make_optimizer(net, lr=lr * lr_start_frac, beta1=beta1, beta2=beta2)
     reset_optimizer(optimizer)  # fresh momentum for reversion phase
 
     sd_ft = state_dict_cpu(net)
     sd_pt = None
     if pretrain_ckpt is not None:
-        from burst.notebook.interp import load_sd  # noqa: PLC0415
+        from burst.notebook.interp import load_sd
 
         sd_pt = load_sd(pretrain_ckpt)
 
@@ -101,10 +101,10 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     log = {
         "step": [],
         "loss": [],
-        "acc_other": [],
-        "acc_burst": [],
-        "loss_other": [],
-        "loss_burst": [],
+        ACC_OTHER: [],
+        ACC_BURST: [],
+        LOSS_OTHER: [],
+        LOSS_BURST: [],
         "lr": [],
         "weight_drift_from_ft": [],
         "weight_drift_from_pt": [],
@@ -138,10 +138,10 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
             lb = eval_loss(net, eval_burst)
             log["step"].append(s)
             log["loss"].append(loss_val)
-            log["acc_other"].append(ao)
-            log["acc_burst"].append(ab)
-            log["loss_other"].append(lo)
-            log["loss_burst"].append(lb)
+            log[ACC_OTHER].append(ao)
+            log[ACC_BURST].append(ab)
+            log[LOSS_OTHER].append(lo)
+            log[LOSS_BURST].append(lb)
             log["lr"].append(cur_lr)
 
             sd_now = state_dict_cpu(net)
@@ -158,9 +158,7 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
             burst_batch = eval_burst[idx]
             g_burst = _get_grad_vector(net, burst_batch)
             log["grad_norm_burst"].append(g_burst.norm().item())
-            import torch.nn.functional as _F  # noqa: PLC0415
-
-            gc = _F.cosine_similarity(g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
+            gc = F.cosine_similarity(g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
             log["grad_cosine_burst_bg"].append(gc)
 
             gc_layers = gradient_cosine_per_layer(net, burst_batch, batch)
@@ -173,15 +171,14 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
             pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}", drift=f"{drift_ft:.3f}")
             net.train()
 
-    accs = log["acc_burst"]
+    accs = log[ACC_BURST]
     steps_arr = log["step"]
-    _trapz = getattr(np, "trapezoid", np.trapz)
-    reversion_auc = float(_trapz(accs, steps_arr)) if len(accs) > 1 else 0.0
+    reversion_auc = float(np.trapezoid(accs, steps_arr)) if len(accs) > 1 else 0.0
 
     life_times = {}
-    if peak_burst > GRAD_NORM_EPS:
+    if peak_burst > ACC_NEAR_ZERO:
         remaining = dict.fromkeys(thresholds, True)
-        for acc_val, step_val in zip(accs, steps_arr, strict=False):
+        for acc_val, step_val in zip(accs, steps_arr, strict=True):
             for t in list(remaining):
                 if acc_val <= peak_burst * t:
                     life_times[f"life_{int(t * 100)}"] = step_val
@@ -195,7 +192,7 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
 
     end_burst = accs[-1] if accs else peak_burst
     dropoff_abs = peak_burst - end_burst
-    dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > GRAD_NORM_EPS else 0.0
+    dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > ACC_NEAR_ZERO else 0.0
 
     ckpt_path = out_dir / f"{tag}_reverted_ckpt.pt"
     save_model(net, ckpt_path)
@@ -214,6 +211,6 @@ def forget(  # noqa: C901, PLR0912, PLR0913, PLR0915
     }
 
 
-def _forget_worker(kwargs: dict) -> dict:
+def _forget_worker(kwargs: dict) -> ForgetResult:
     """Pickle-able entry point for multiprocessing."""
     return forget(**kwargs)

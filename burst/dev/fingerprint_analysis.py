@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import pickle
 import sys
 import time
@@ -44,56 +45,32 @@ import torch
 import torch.nn.functional as F
 
 from burst.config import (
-    SCHED_COLORS,
-    SCHEDULE_ORDER,
     parse_run_config,
 )
+from burst.core.activations import collect_activations_KPTN
 from burst.core.train_utils import load_net
 from burst.dev.plot_utils import save_png
-from burst.dev.probe import collect_activations_KPTN
 
 if TYPE_CHECKING:
     from net.nanogpt import nanoGPT
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+from burst.core.train_utils import DEVICE
+from burst.dev._shared import (
+    burst_token_ids as _burst_token_ids,
+)
+from burst.dev._shared import (
+    free_gen_acc as _free_gen_acc,
+)
+from burst.dev._shared import (
+    sched_color as _color,
+)
+from burst.dev._shared import (
+    sched_order as _sched_order,
+)
+
+logger = logging.getLogger(__name__)
+
 _rng = np.random.default_rng()
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
-    n_alphabets = cfg.get("n_alphabets", 10)
-    vocab_size = cfg.get("vocab_size", 128)
-    special_count = 3
-    alphabet_start = special_count
-    func_start = alphabet_start + n_alphabets
-    burst_func_id = func_start + n_a * depth + 1
-    value_ids = list(range(alphabet_start, alphabet_start + n_alphabets))
-    return [i for i in [burst_func_id, *value_ids] if i < vocab_size]
-
-
-def _sched_order(s: str) -> int:
-    try:
-        return SCHEDULE_ORDER.index(s)
-    except ValueError:
-        return 99
-
-
-def _color(s: str) -> str:
-    return SCHED_COLORS.get(s, "#888888")
-
-
-@torch.no_grad()
-def _free_gen_acc(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
-    net.eval()
-    docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    _B, L = docs_t.shape
-    target_B6 = docs_t[:, -6:]
-    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
-    return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +104,7 @@ def logit_lens_on_delta(
     delta_KTN: torch.Tensor,
     burst_token_ids: list[int],
     top_k: int = 20,
-    use_ln: bool = True,  # noqa: FBT001, FBT002
+    use_ln: bool = True,
 ) -> dict:
     """Project d_bar through [ln_f +] W_U and measure burst-token presence in top-k.
 
@@ -209,7 +186,7 @@ def logit_lens_compare_methods(
 
 
 @torch.no_grad()
-def steering_experiment(  # noqa: PLR0913
+def steering_experiment(
     net: nanoGPT,
     delta_KTN: torch.Tensor,
     other_docs_BL: np.ndarray,
@@ -243,7 +220,7 @@ def steering_experiment(  # noqa: PLR0913
 
     delta_TN = delta_KTN[steer_layer].to(DEVICE).float()
     delta_norm = delta_TN.norm()
-    if delta_norm < 1e-8:  # noqa: PLR2004
+    if delta_norm < 1e-8:
         return {
             "alphas": alphas,
             "burst_acc_on_other": [0.0] * len(alphas),
@@ -337,7 +314,7 @@ def _measure_burst_acc_on_other(
 
 
 @torch.no_grad()
-def steering_sweep_layers(  # noqa: PLR0913
+def steering_sweep_layers(
     net: nanoGPT,
     delta_KTN: torch.Tensor,
     other_docs_BL: np.ndarray,
@@ -381,7 +358,7 @@ def steering_sweep_layers(  # noqa: PLR0913
 # ---------------------------------------------------------------------------
 
 
-def analyse_run(  # noqa: C901, PLR0915
+def analyse_run(
     run_dir: Path,
     n_seeds: int = 3,
     n_samples: int = 256,
@@ -389,11 +366,9 @@ def analyse_run(  # noqa: C901, PLR0915
     steering_alphas: list[float] | None = None,
 ) -> dict:
     """Run Logit Lens + Steering analysis on a single run directory."""
-    print(f"\n{'=' * 60}", flush=True)  # noqa: T201
-    print(f"Fingerprint analysis: {run_dir.name}", flush=True)  # noqa: T201
-    print(f"{'=' * 60}", flush=True)  # noqa: T201
+    logger.info("Fingerprint analysis: %s", run_dir.name)
 
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
+    from burst.core.train_utils import resolve_run_paths
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
@@ -406,14 +381,14 @@ def analyse_run(  # noqa: C901, PLR0915
     T = base_cfg["total_steps"]
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
     prompt_len = run_cfg["task_info"]["prompt_len"]
 
     with (logs_dir / "all_results.pkl").open("rb") as f:
-        all_results = pickle.load(f)  # noqa: S301
+        all_results = pickle.load(f)
 
     ckpt_root = logs_dir / "checkpoints"
     schedules_present = sorted({r["schedule"] for r in all_results})
@@ -452,7 +427,7 @@ def analyse_run(  # noqa: C901, PLR0915
 
             ckpt_files = {int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")}
             available = sorted(ckpt_files.keys())
-            if len(available) < 2:  # noqa: PLR2004
+            if len(available) < 2:
                 continue
 
             cfg = r["config"]
@@ -461,7 +436,7 @@ def analyse_run(  # noqa: C901, PLR0915
             pre_step = available[0]
             peak_step = min(available, key=lambda x: abs(x - (T - 1)))
 
-            print(f"  [{sched}] {label}: pre={pre_step}, peak={peak_step}", flush=True)  # noqa: T201
+            logger.debug("[%s] %s: pre=%d, peak=%d", sched, label, pre_step, peak_step)
 
             net_pre = load_net(cfg, str(ckpt_files[pre_step]))
             net_peak = load_net(cfg, str(ckpt_files[peak_step]))
@@ -475,10 +450,9 @@ def analyse_run(  # noqa: C901, PLR0915
                 ll_mean_rank_agg[method].append(ll_result[method]["mean_rank_KT"])
                 ll_entropy_agg[method].append(ll_result[method]["entropy_KT"])
 
-            print(  # noqa: T201
-                f"    Logit Lens readability (with LN): "
-                f"mean={ll_result['with_ln']['readability_KT'].mean():.3f}",
-                flush=True,
+            logger.debug(
+                "  Logit Lens readability (with LN): mean=%.3f",
+                ll_result["with_ln"]["readability_KT"].mean(),
             )
 
             # --- Steering (best layer = middle) ---
@@ -637,10 +611,10 @@ _METRIC_DESCRIPTIONS = {
 }
 
 
-def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
+def make_dashboard(analyses: list[dict], out_dir: Path) -> None:
     """Build an interactive HTML dashboard from fingerprint analyses."""
-    import plotly.graph_objects as go  # noqa: PLC0415
-    from plotly.subplots import make_subplots  # noqa: PLC0415
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
@@ -1198,8 +1172,8 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     html_path = out_dir / "dashboard.html"
     with html_path.open("w") as f:
         f.write("".join(html_parts))
-    print(f"\nDashboard saved: {html_path}", flush=True)  # noqa: T201
-    print(f"Charts saved: {charts_dir}", flush=True)  # noqa: T201
+    logger.info("Dashboard saved: %s", html_path)
+    logger.info("Charts saved: %s", charts_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1237,11 +1211,11 @@ def main() -> None:
     if args.all:
         run_dirs = _find_all_run_dirs(args.data_root)
         if not run_dirs:
-            print(f"No valid run directories found under {args.data_root}", flush=True)  # noqa: T201
+            logger.info("No valid run directories found under %s", args.data_root)
             return
-        print(f"Found {len(run_dirs)} valid run directories:", flush=True)  # noqa: T201
+        logger.info("Found %d valid run directories", len(run_dirs))
         for d in run_dirs:
-            print(f"  {d}", flush=True)  # noqa: T201
+            logger.info("  %s", d)
     elif args.run_dirs:
         run_dirs = [Path(d) for d in args.run_dirs]
     else:
@@ -1260,16 +1234,16 @@ def main() -> None:
             top_k=args.top_k,
         )
         analyses.append(analysis)
-        print(f"  Completed {run_dir.name} in {time.time() - t0:.1f}s", flush=True)  # noqa: T201
+        logger.info("Completed %s in %.1fs", run_dir.name, time.time() - t0)
 
     results_path = out_dir / "results.pkl"
     with results_path.open("wb") as f:
         pickle.dump(analyses, f)
-    print(f"\nResults saved: {results_path}", flush=True)  # noqa: T201
+    logger.info("Results saved: %s", results_path)
 
-    print("\nGenerating dashboard...", flush=True)  # noqa: T201
+    logger.info("Generating dashboard...")
     make_dashboard(analyses, out_dir)
-    print("\nDone.", flush=True)  # noqa: T201
+    logger.info("Done.")
 
 
 if __name__ == "__main__":

@@ -12,10 +12,10 @@ Usage:
 import argparse
 import base64
 import json
+import logging
 import os
 import pickle
 import sys
-import time
 import traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -24,7 +24,16 @@ from pathlib import Path
 
 import numpy as np
 
-from burst.config import TrainConfig, parse_run_config, reversion_life_key, reversion_life_label
+from burst.config import (
+    ACC_BURST,
+    ACC_OTHER,
+    TrainConfig,
+    parse_run_config,
+    reversion_life_key,
+    reversion_life_label,
+)
+
+logger = logging.getLogger(__name__)
 from burst.dev.pres_charts import (
     SCHED_SHORT,
     _group,
@@ -121,7 +130,6 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         from burst.dev.unified_analysis import analyse_run as ua_analyse
         from burst.dev.unified_analysis import make_dashboard
 
-        time.time()
         r = ua_analyse(
             run_dir,
             n_seeds=n_seeds,
@@ -170,7 +178,7 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         make_dashboard(combined, tmp)
         out["unified"] = _pngs(tmp / "charts")
     except Exception:
-        pass
+        logger.exception("unified dashboard failed for %s", run_dir)
 
     try:
         from burst.dev.unified_analysis import make_extended_metrics_dashboard
@@ -180,7 +188,7 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         make_extended_metrics_dashboard([run_dir], tmp)
         out["extended"] = _pngs(tmp / "charts")
     except Exception:
-        pass
+        logger.exception("extended dashboard failed for %s", run_dir)
 
     try:
         from burst.dev.basin_metrics import (
@@ -190,14 +198,13 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
             make_dashboard as bm_dashboard,
         )
 
-        time.time()
         r = bm_analyse(run_dir, n_seeds=n_seeds, skip_surface=False)
         tmp = results_dir / "_basin_tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         bm_dashboard({run_dir.name: r}, tmp)
         out["basin"] = _pngs(tmp / "charts")
     except Exception:
-        pass
+        logger.exception("basin dashboard failed for %s", run_dir)
 
     return out
 
@@ -262,7 +269,7 @@ def _build_txt(
             vals = np.array([r.get(key, U) for r in runs])
             row += f" {vals.mean():>9.0f}"
         try:
-            other_end = np.array([r["log"]["acc_other"][-1] for r in runs])
+            other_end = np.array([r["log"][ACC_OTHER][-1] for r in runs])
             row += f" {other_end.mean():>9.3f}"
         except (KeyError, IndexError):
             row += f" {'N/A':>9}"
@@ -458,7 +465,7 @@ def build(rd, res, cfg, cp, analysis_charts=None):
 
     auc_key = "reversion_auc"
     peak_key = "peak_burst"
-    other_log_key = "acc_other"
+    other_log_key = ACC_OTHER
 
     parts: list[str] = []
 
@@ -930,7 +937,7 @@ def main() -> None:
                         "total_steps": j.get("total_steps", base.get("total_steps", 500)),
                         "batch_size": j.get("batch_size", base.get("batch_size", 128)),
                     },
-                    "log": {"step": [], "loss": [], "acc_burst": [], "acc_other": []},
+                    "log": {"step": [], "loss": [], ACC_BURST: [], ACC_OTHER: []},
                 }
             )
 

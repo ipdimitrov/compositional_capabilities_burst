@@ -1,8 +1,4 @@
-"""Shared training utilities: model creation, optimizer setup, training step.
-
-Eliminates duplication across _worker.py, probe.py, and
-scripts/probe_next_token_regimes.py.
-"""
+"""Shared training utilities: model creation, optimizer setup, training step."""
 
 from __future__ import annotations
 
@@ -93,7 +89,7 @@ def make_scaler() -> torch.amp.GradScaler:
     return torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
 
 
-def train_step(  # noqa: PLR0913
+def train_step(
     batch_np: np.ndarray,
     net: nanoGPT,
     optimizer: torch.optim.Optimizer,
@@ -105,7 +101,7 @@ def train_step(  # noqa: PLR0913
     """Single training step with phase-aware LR. Returns loss_value."""
     tokens_BL = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
     inputs_BT, targets_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
-    P = cfg.get("pre_burst_steps", 0)
+    P = cfg["pre_burst_steps"]
     T = cfg["total_steps"]
     U = cfg["reversion_steps"]
     update_phase_lr(
@@ -116,9 +112,9 @@ def train_step(  # noqa: PLR0913
         T,
         U,
         cfg["lr"],
-        cfg.get("lr_pretrain_end_frac", 0.3),
-        cfg.get("lr_burst_end_frac", 0.1),
-        cfg.get("lr_reversion_end_frac", 0.01),
+        cfg["lr_pretrain_end_frac"],
+        cfg["lr_burst_end_frac"],
+        cfg["lr_reversion_end_frac"],
     )
     optimizer.zero_grad(set_to_none=True)
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
@@ -152,7 +148,7 @@ def retrain_with_callbacks(
     optimizer = configure_optimizers(net, optim_cfg)
     scaler = make_scaler()
 
-    P = cfg.get("pre_burst_steps", 0)
+    P = cfg["pre_burst_steps"]
     T, U = cfg["total_steps"], cfg["reversion_steps"]
     bs, p = cfg["batch_size"], cfg["p_target"]
     effective_max = max_step if max_step is not None else (P + T + U)
@@ -209,7 +205,7 @@ def load_results(run_dir: str | Path) -> tuple[list[dict], dict]:
         pkl_path = Path(run_dir) / "all_results.pkl"
 
     with pkl_path.open("rb") as f:
-        results = pickle.load(f)  # noqa: S301
+        results = pickle.load(f)
     with cfg_path.open() as f:
         cfg = json.load(f)
     return results, cfg
@@ -251,14 +247,14 @@ def compute_lr_schedule(
     cfg: dict, pretrain_steps: int | None = None, burst_steps: int | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute three-phase LR schedule arrays. Returns (steps, lrs)."""
-    P = pretrain_steps if pretrain_steps is not None else cfg.get("pre_burst_steps", 0)
+    P = pretrain_steps if pretrain_steps is not None else cfg["pre_burst_steps"]
     T = burst_steps if burst_steps is not None else cfg["total_steps"]
     U = cfg["reversion_steps"]
     warmup = cfg["warmup_iters"]
     lr_max = cfg["lr"]
-    lr_pe = cfg.get("lr_pretrain_end_frac", 0.3)
-    lr_be = cfg.get("lr_burst_end_frac", 0.1)
-    lr_re = cfg.get("lr_reversion_end_frac", 0.01)
+    lr_pe = cfg["lr_pretrain_end_frac"]
+    lr_be = cfg["lr_burst_end_frac"]
+    lr_re = cfg["lr_reversion_end_frac"]
 
     total = P + T + U
     steps = np.arange(1, total + 1)

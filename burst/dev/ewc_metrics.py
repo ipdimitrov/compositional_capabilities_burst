@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import pickle
 import sys
 from pathlib import Path
@@ -36,21 +37,17 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from burst.config import SCHED_COLORS, SCHEDULE_ORDER, parse_run_config
+from burst.config import SCHED_COLORS, parse_run_config
 from burst.core.metrics.gradients import _layer_groups
-from burst.core.train_utils import load_net, resolve_run_paths
+from burst.core.train_utils import DEVICE, load_net, resolve_run_paths
 from burst.dev.plot_utils import save_png as _save_png
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+logger = logging.getLogger(__name__)
 _rng = np.random.default_rng()
 
 
-def _sched_order(s: str) -> int:
-    return SCHEDULE_ORDER.index(s) if s in SCHEDULE_ORDER else 99
-
-
-def _ckpt_files(d: Path) -> dict[int, Path]:
-    return {int(p.stem.split("_")[1]): p for p in d.glob("step_*.pt")}
+from burst.dev._shared import ckpt_files as _ckpt_files
+from burst.dev._shared import sched_order as _sched_order
 
 
 def compute_diagonal_fisher(
@@ -110,7 +107,7 @@ def compute_fisher_displacement(
     return {"total_D": sum(per_layer_D.values()), "per_layer_D": per_layer_D}
 
 
-def run_ewc_analysis(  # noqa: C901, PLR0915
+def run_ewc_analysis(
     run_dir: Path,
     n_fisher_batches: int = 200,
     n_seeds: int = 3,
@@ -124,13 +121,13 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
     base_cfg = rc["base_cfg"]
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        _, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+        _, bg_pool, _, _, _ = pickle.load(f)
     with (logs_dir / "all_results.pkl").open("rb") as f:
-        all_results = pickle.load(f)  # noqa: S301
+        all_results = pickle.load(f)
 
     ckpt_root = logs_dir / "checkpoints"
     if not ckpt_root.exists():
-        print(f"  No checkpoints in {run_dir} — skipping EWC.", flush=True)  # noqa: T201
+        logger.info("No checkpoints in %s — skipping EWC.", run_dir)
         return {}
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
@@ -138,15 +135,15 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
     pretrain_ckpt = logs_dir / "pretrain_ckpt.pt"
     if pretrain_ckpt.exists():
         fisher_ckpt = str(pretrain_ckpt)
-        print("  Computing Fisher at pretrain checkpoint...", flush=True)  # noqa: T201
+        logger.info("Computing Fisher at pretrain checkpoint...")
     else:
         first_label = run_cfg["jobs"][0]["label"]
         first_files = _ckpt_files(ckpt_root / first_label)
         if not first_files:
-            print("  No checkpoints found — skipping EWC.", flush=True)  # noqa: T201
+            logger.info("No checkpoints found — skipping EWC.")
             return {}
         fisher_ckpt = str(first_files[min(first_files)])
-        print("  pretrain_ckpt.pt not found — using first checkpoint.", flush=True)  # noqa: T201
+        logger.info("pretrain_ckpt.pt not found — using first checkpoint.")
 
     net_fisher = load_net(base_cfg, fisher_ckpt)
     fisher = compute_diagonal_fisher(net_fisher, other_docs_BL, n_fisher_batches, fisher_batch_size)
@@ -192,7 +189,7 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
             for ln, d in disp["per_layer_D"].items():
                 layer_Ds.setdefault(ln, []).append(d)
             seeds_done += 1
-            print(f"  {label}: total_D={disp['total_D']:.4e}", flush=True)  # noqa: T201
+            logger.debug("%s: total_D=%.4e", label, disp["total_D"])
 
         per_schedule[sched] = {
             "total_Ds": total_Ds,
@@ -214,7 +211,7 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
 
 def make_ewc_plots(result: dict, out_dir: Path) -> None:
     """Generate EWC displacement plots."""
-    import plotly.graph_objects as go  # noqa: PLC0415
+    import plotly.graph_objects as go
 
     out_dir.mkdir(parents=True, exist_ok=True)
     per_schedule = result.get("per_schedule", {})
@@ -298,7 +295,7 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
         )
         _save(fig, "ewc_stacked_by_layer.png")
 
-    print(f"  EWC plots saved to {out_dir}", flush=True)  # noqa: T201
+    logger.info("EWC plots saved to %s", out_dir)
 
 
 def main() -> None:
@@ -312,20 +309,20 @@ def main() -> None:
     args = parser.parse_args()
 
     out_dir = args.out_dir or (args.run_dir / "results" / "ewc_metrics")
-    print(f"EWC analysis: {args.run_dir}", flush=True)  # noqa: T201
+    logger.info("EWC analysis: %s", args.run_dir)
     result = run_ewc_analysis(
         args.run_dir, args.n_fisher_batches, args.n_seeds, args.fisher_batch_size
     )
 
     if not result:
-        print("No results — exiting.", flush=True)  # noqa: T201
+        logger.info("No results — exiting.")
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "ewc_results.pkl").open("wb") as f:
         pickle.dump(result, f)
     make_ewc_plots(result, out_dir)
-    print(f"EWC done. Results: {out_dir}", flush=True)  # noqa: T201
+    logger.info("EWC done. Results: %s", out_dir)
 
 
 if __name__ == "__main__":

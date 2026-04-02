@@ -15,6 +15,8 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 
+from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER
+
 logger = logging.getLogger(__name__)
 
 def _smooth(vals: list[float], alpha: float = 0.3) -> list[float]:
@@ -29,7 +31,7 @@ def _smooth(vals: list[float], alpha: float = 0.3) -> list[float]:
 
 def _frac_color(frac: float) -> str:
     """Map burst fraction to a red-to-blue colour hex string."""
-    import colorsys  # noqa: PLC0415
+    import colorsys
 
     h = 0.0 + (1.0 - frac) * 0.58
     r, g, b = colorsys.hls_to_rgb(h, 0.42, 0.72)
@@ -38,15 +40,9 @@ def _frac_color(frac: float) -> str:
 
 def _tag_to_frac(tag: str) -> float:
     """Extract burst fraction from a tag string like 'burst_50'."""
-    try:
-        return int(tag.split("_")[1]) / 100
-    except (IndexError, ValueError):
-        return 0.5
-
-
-def _tag_color(tag: str) -> str:
-    """Get colour for a tag string."""
-    return _frac_color(_tag_to_frac(tag))
+    parts = tag.split("_")
+    assert len(parts) >= 2, f"unexpected tag format: {tag!r}"
+    return int(parts[1]) / 100
 
 
 def _pair_ft_fg(
@@ -78,8 +74,8 @@ def plot_pretrain(pretrain_result: dict, ax: Axes | None = None) -> Axes:
     log = pretrain_result["log"]
     if ax is None:
         _, ax = plt.subplots(1, 1, figsize=(8, 4))
-    ax.plot(log["step"], log["acc_other"], label="Other (background)", color="#2196F3")
-    ax.plot(log["step"], log["acc_burst"], label="Burst (special)", color="#E91E63")
+    ax.plot(log["step"], log[ACC_OTHER], label="Other (background)", color="#2196F3")
+    ax.plot(log["step"], log[ACC_BURST], label="Burst (special)", color="#E91E63")
     ax.set_xlabel("Step")
     ax.set_ylabel("Accuracy")
     ax.set_title("Pretrain Phase")
@@ -100,16 +96,16 @@ def plot_accuracy(
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
         ax_burst.plot(
-            ft_log["step"], ft_log["acc_burst"], color=color, linewidth=2, label=ft["tag"]
+            ft_log["step"], ft_log[ACC_BURST], color=color, linewidth=2, label=ft["tag"]
         )
         ax_other.plot(
-            ft_log["step"], ft_log["acc_other"], color=color, linewidth=2, label=ft["tag"]
+            ft_log["step"], ft_log[ACC_OTHER], color=color, linewidth=2, label=ft["tag"]
         )
         if fg is not None:
             fg_log = fg["log"]
             fg_steps = _offset_fg_steps(ft_log, fg_log)
-            ax_burst.plot(fg_steps, fg_log["acc_burst"], color=color, linewidth=2)
-            ax_other.plot(fg_steps, fg_log["acc_other"], color=color, linewidth=2)
+            ax_burst.plot(fg_steps, fg_log[ACC_BURST], color=color, linewidth=2)
+            ax_other.plot(fg_steps, fg_log[ACC_OTHER], color=color, linewidth=2)
         if not drawn_boundary:
             _phase_boundary(ax_burst, ft_log)
             _phase_boundary(ax_other, ft_log)
@@ -137,16 +133,16 @@ def plot_loss(
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
         ax_burst.plot(
-            ft_log["step"], ft_log["loss_burst"], color=color, linewidth=2, label=ft["tag"]
+            ft_log["step"], ft_log[LOSS_BURST], color=color, linewidth=2, label=ft["tag"]
         )
         ax_other.plot(
-            ft_log["step"], ft_log["loss_other"], color=color, linewidth=2, label=ft["tag"]
+            ft_log["step"], ft_log[LOSS_OTHER], color=color, linewidth=2, label=ft["tag"]
         )
         if fg is not None:
             fg_log = fg["log"]
             fg_steps = _offset_fg_steps(ft_log, fg_log)
-            ax_burst.plot(fg_steps, fg_log["loss_burst"], color=color, linewidth=2)
-            ax_other.plot(fg_steps, fg_log["loss_other"], color=color, linewidth=2)
+            ax_burst.plot(fg_steps, fg_log[LOSS_BURST], color=color, linewidth=2)
+            ax_other.plot(fg_steps, fg_log[LOSS_OTHER], color=color, linewidth=2)
         if not drawn_boundary:
             _phase_boundary(ax_burst, ft_log)
             _phase_boundary(ax_other, ft_log)
@@ -162,7 +158,7 @@ def plot_loss(
     return fig
 
 
-def plot_full_trajectory(  # noqa: C901, PLR0915
+def plot_full_trajectory(
     pretrain_result: dict, finetune_results: list[dict] | dict,
     forget_results: list[dict] | dict, figsize: tuple[int, int] = (18, 10),
 ) -> Figure:
@@ -179,10 +175,10 @@ def plot_full_trajectory(  # noqa: C901, PLR0915
     for ft, fg in _pair_ft_fg(finetune_results, forget_results):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
-        ax.plot(ft_log["step"], ft_log["acc_burst"], color=color, linewidth=2, label=ft["tag"])
+        ax.plot(ft_log["step"], ft_log[ACC_BURST], color=color, linewidth=2, label=ft["tag"])
         if fg is not None:
             fg_steps = _offset_fg_steps(ft_log, fg["log"])
-            ax.plot(fg_steps, fg["log"]["acc_burst"], color=color, linewidth=2)
+            ax.plot(fg_steps, fg["log"][ACC_BURST], color=color, linewidth=2)
         if not drawn:
             _phase_boundary(ax, ft_log)
             drawn = True
@@ -198,10 +194,10 @@ def plot_full_trajectory(  # noqa: C901, PLR0915
     for ft, fg in _pair_ft_fg(finetune_results, forget_results):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
-        ax.plot(ft_log["step"], ft_log["acc_other"], color=color, linewidth=2, label=ft["tag"])
+        ax.plot(ft_log["step"], ft_log[ACC_OTHER], color=color, linewidth=2, label=ft["tag"])
         if fg is not None:
             fg_steps = _offset_fg_steps(ft_log, fg["log"])
-            ax.plot(fg_steps, fg["log"]["acc_other"], color=color, linewidth=2)
+            ax.plot(fg_steps, fg["log"][ACC_OTHER], color=color, linewidth=2)
         if not drawn:
             _phase_boundary(ax, ft_log)
             drawn = True
@@ -217,10 +213,10 @@ def plot_full_trajectory(  # noqa: C901, PLR0915
     for ft, fg in _pair_ft_fg(finetune_results, forget_results):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
-        ax.plot(ft_log["step"], ft_log["loss_burst"], color=color, linewidth=2, label=ft["tag"])
+        ax.plot(ft_log["step"], ft_log[LOSS_BURST], color=color, linewidth=2, label=ft["tag"])
         if fg is not None:
             fg_steps = _offset_fg_steps(ft_log, fg["log"])
-            ax.plot(fg_steps, fg["log"]["loss_burst"], color=color, linewidth=2)
+            ax.plot(fg_steps, fg["log"][LOSS_BURST], color=color, linewidth=2)
         if not drawn:
             _phase_boundary(ax, ft_log)
             drawn = True
@@ -235,10 +231,10 @@ def plot_full_trajectory(  # noqa: C901, PLR0915
     for ft, fg in _pair_ft_fg(finetune_results, forget_results):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
-        ax.plot(ft_log["step"], ft_log["loss_other"], color=color, linewidth=2, label=ft["tag"])
+        ax.plot(ft_log["step"], ft_log[LOSS_OTHER], color=color, linewidth=2, label=ft["tag"])
         if fg is not None:
             fg_steps = _offset_fg_steps(ft_log, fg["log"])
-            ax.plot(fg_steps, fg["log"]["loss_other"], color=color, linewidth=2)
+            ax.plot(fg_steps, fg["log"][LOSS_OTHER], color=color, linewidth=2)
         if not drawn:
             _phase_boundary(ax, ft_log)
             drawn = True
@@ -350,8 +346,8 @@ def plot_bg_loss_vs_forgetting(
         if fg is None:
             continue
         log = ft["log"]
-        end_bg_loss.append(log["loss_other"][-1])
-        end_bg_acc.append(log["acc_other"][-1])
+        end_bg_loss.append(log[LOSS_OTHER][-1])
+        end_bg_acc.append(log[ACC_OTHER][-1])
         drop_pcts.append(fg["dropoff_pct"])
         fracs.append(ft["burst_frac"])
         colors.append(_frac_color(ft["burst_frac"]))
@@ -467,7 +463,7 @@ def plot_weight_drift(
     return fig
 
 
-def plot_grad_norms(  # noqa: C901, PLR0915
+def plot_grad_norms(
     ft_results: list[dict] | dict, fg_results: list[dict] | dict,
     figsize: tuple[int, int] = (14, 8),
 ) -> Figure:
@@ -525,7 +521,7 @@ def plot_grad_norms(  # noqa: C901, PLR0915
             continue
         ratio = [
             b / (g + 1e-10)
-            for b, g in zip(log["grad_norm_burst"], log["grad_norm_bg"], strict=False)
+            for b, g in zip(log["grad_norm_burst"], log["grad_norm_bg"], strict=True)
         ]
         ax.plot(
             log["step"],
@@ -623,10 +619,10 @@ def plot_grad_alignment_norm(
         cos_ft = ft_log["grad_cosine_burst_bg"]
 
         if "grad_norm_bg" in ft_log:
-            prod_bg = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_bg"], strict=False)]
+            prod_bg = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_bg"], strict=True)]
             ax_bg.plot(ft_log["step"], _smooth(prod_bg), color=color, linewidth=2, label=ft["tag"])
         if "grad_norm_burst" in ft_log:
-            prod_burst = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_burst"], strict=False)]
+            prod_burst = [c * n for c, n in zip(cos_ft, ft_log["grad_norm_burst"], strict=True)]
             ax_burst.plot(
                 ft_log["step"], _smooth(prod_burst), color=color, linewidth=2, label=ft["tag"]
             )
@@ -636,11 +632,11 @@ def plot_grad_alignment_norm(
             fg_steps = _offset_fg_steps(ft_log, fg_log)
             cos_fg = fg_log.get("grad_cosine_burst_bg", [])
             if cos_fg and "grad_norm" in fg_log:
-                prod_bg_fg = [c * n for c, n in zip(cos_fg, fg_log["grad_norm"], strict=False)]
+                prod_bg_fg = [c * n for c, n in zip(cos_fg, fg_log["grad_norm"], strict=True)]
                 ax_bg.plot(fg_steps, _smooth(prod_bg_fg), color=color, linewidth=2)
             if cos_fg and "grad_norm_burst" in fg_log and fg_log["grad_norm_burst"]:
                 prod_burst_fg = [
-                    c * n for c, n in zip(cos_fg, fg_log["grad_norm_burst"], strict=False)
+                    c * n for c, n in zip(cos_fg, fg_log["grad_norm_burst"], strict=True)
                 ]
                 ax_burst.plot(fg_steps, _smooth(prod_burst_fg), color=color, linewidth=2)
 
@@ -897,7 +893,7 @@ def plot_cka_matrices(analysis: dict, figsize: tuple[int, int] = (5, 5)) -> Figu
     return fig
 
 
-def plot_summary_dashboard(  # noqa: PLR0915
+def plot_summary_dashboard(
     ft_results: list[dict] | dict, fg_results: list[dict] | dict,
     analysis: dict, figsize: tuple[int, int] = (16, 10),
 ) -> Figure:
@@ -920,9 +916,15 @@ def plot_summary_dashboard(  # noqa: PLR0915
 
     ax = fig.add_subplot(gs[0, 1])
     fg_by_tag = {r["tag"]: r for r in fg_list}
-    drops = [fg_by_tag[t]["dropoff_pct"] for t in tags if t in fg_by_tag]
-    ax.scatter(fracs[: len(drops)], drops, c=colors[: len(drops)], s=80, zorder=3)
-    ax.plot(fracs[: len(drops)], drops, color="gray", alpha=0.4)
+    paired = [
+        (f, c, fg_by_tag[t]["dropoff_pct"])
+        for f, c, t in zip(fracs, colors, tags, strict=True)
+        if t in fg_by_tag
+    ]
+    if paired:
+        p_fracs, p_colors, drops = zip(*paired, strict=True)
+        ax.scatter(p_fracs, drops, c=p_colors, s=80, zorder=3)
+        ax.plot(p_fracs, drops, color="gray", alpha=0.4)
     ax.set_xlabel("Burst Fraction")
     ax.set_ylabel("Accuracy Drop (%)")
     ax.set_title("Forgetting Severity")
@@ -997,7 +999,7 @@ def plot_summary_dashboard(  # noqa: PLR0915
 
 def plot_function_distribution(data: dict, figsize: tuple[int, int] | None = None) -> Figure:
     """Show which functions appear in each slot for pretraining vs finetuning."""
-    from collections import Counter  # noqa: PLC0415
+    from collections import Counter
 
     bg_pool = data["bg_pool"]
     target_pool = data["target_pool"]
@@ -1060,7 +1062,7 @@ def plot_function_distribution(data: dict, figsize: tuple[int, int] | None = Non
 # ── save full report ──────────────────────────────────────────────────────
 
 
-def save_report(  # noqa: PLR0913
+def save_report(
     pt: dict, ft_results: list[dict] | dict, fg_results: list[dict] | dict,
     out_dir: str | Path, analysis: dict | None = None, prefix: str = "report",
 ) -> None:

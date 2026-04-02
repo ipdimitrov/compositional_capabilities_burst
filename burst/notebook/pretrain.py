@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
+from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER
 from burst.notebook.model import (
     MODEL_DEFAULTS,
     eval_accuracy,
@@ -20,14 +21,15 @@ from burst.notebook.model import (
     save_model,
     train_step,
 )
+from burst.types import ExperimentData, PretrainResult
 
 logger = logging.getLogger(__name__)
 
 _rng = np.random.default_rng()
 
 
-def pretrain(  # noqa: PLR0913, PLR0915
-    data: dict,
+def pretrain(
+    data: ExperimentData,
     out_dir: str | Path,
     *,
     lr: float = MODEL_DEFAULTS["lr"],
@@ -35,7 +37,6 @@ def pretrain(  # noqa: PLR0913, PLR0915
     eval_every: int = MODEL_DEFAULTS["eval_every"],
     warmup: int = MODEL_DEFAULTS["warmup_iters"],
     grad_clip: float = MODEL_DEFAULTS["grad_clip"],
-    weight_decay: float = MODEL_DEFAULTS["weight_decay"],
     beta1: float = MODEL_DEFAULTS["beta1"],
     beta2: float = MODEL_DEFAULTS["beta2"],
     n_layer: int = MODEL_DEFAULTS["n_layer"],
@@ -45,7 +46,7 @@ def pretrain(  # noqa: PLR0913, PLR0915
     max_steps: int = 5000,
     seed: int = 42,
     quiet: bool = False,
-) -> dict:
+) -> PretrainResult:
     """Pretrain on background data until convergence and save checkpoint."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -66,20 +67,20 @@ def pretrain(  # noqa: PLR0913, PLR0915
         "n_head": n_head,
     }
 
-    global _rng
+    global _rng  # noqa: PLW0603
     _rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
     net = make_model(**model_cfg)
-    optimizer = make_optimizer(net, lr=lr, _weight_decay=weight_decay, beta1=beta1, beta2=beta2)
+    optimizer = make_optimizer(net, lr=lr, beta1=beta1, beta2=beta2)
 
     log = {
         "step": [],
         "loss": [],
-        "acc_other": [],
-        "acc_burst": [],
-        "loss_other": [],
-        "loss_burst": [],
+        ACC_OTHER: [],
+        ACC_BURST: [],
+        LOSS_OTHER: [],
+        LOSS_BURST: [],
         "lr": [],
     }
 
@@ -110,10 +111,10 @@ def pretrain(  # noqa: PLR0913, PLR0915
             lb = eval_loss(net, eval_burst)
             log["step"].append(s)
             log["loss"].append(loss_val)
-            log["acc_other"].append(ao)
-            log["acc_burst"].append(ab)
-            log["loss_other"].append(lo)
-            log["loss_burst"].append(lb)
+            log[ACC_OTHER].append(ao)
+            log[ACC_BURST].append(ab)
+            log[LOSS_OTHER].append(lo)
+            log[LOSS_BURST].append(lb)
             log["lr"].append(cur_lr)
             pbar.set_postfix(step=s, loss=f"{loss_val:.4f}", acc_o=f"{ao:.3f}")
             pbar.update(eval_every)
@@ -136,10 +137,10 @@ def pretrain(  # noqa: PLR0913, PLR0915
     pbar.close()
 
     if not quiet:
-        peak = max(log["acc_other"]) if log["acc_other"] else 0
+        peak = max(log[ACC_OTHER]) if log[ACC_OTHER] else 0
         logger.info(
             "Pretrain done: peak acc_other=%.4f, final loss_other=%.4f",
-            peak, log["loss_other"][-1],
+            peak, log[LOSS_OTHER][-1],
         )
 
     ckpt_path = out_dir / "pretrain_ckpt.pt"

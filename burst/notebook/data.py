@@ -10,6 +10,7 @@ import numpy as np
 
 from burst.config import CLASS_BURST, CLASS_OTHER, DATA_SEED, N_A
 from burst.core.data import pad_pools_to_same_length
+from burst.types import ExperimentData
 
 N_ALPH = 10
 SEQ_LEN = 6
@@ -18,6 +19,9 @@ BURST_POS = 3
 N_BURST = 4
 N_DOCS = 100
 N_EVAL = 100
+
+VOCAB_SLACK = 10
+CONTEXT_SLACK = 5
 
 _rng = np.random.default_rng()
 
@@ -39,7 +43,7 @@ def make_data(
     seed: int = DATA_SEED,
     n_docs: int = N_DOCS,
     n_eval: int = N_EVAL,
-) -> dict:
+) -> ExperimentData:
     """Build all data needed for the 3-phase experiment.
 
     Returns a dict with keys:
@@ -88,7 +92,7 @@ def make_data(
             fns.insert(burst_pos - 1, bf)
             burst_tasks.append((CLASS_BURST, *tuple(fns)))
 
-    global _rng
+    global _rng  # noqa: PLW0603
     _rng = np.random.default_rng(seed)
 
     def _make_doc(task: tuple) -> np.ndarray:
@@ -130,8 +134,8 @@ def make_data(
         "eval_other": eval_other,
         "eval_burst": eval_burst,
         "prompt_len": prompt_len,
-        "vocab_size": vocab_size + 10,
-        "context_size": ref.shape[1] + 5,
+        "vocab_size": vocab_size + VOCAB_SLACK,
+        "context_size": ref.shape[1] + CONTEXT_SLACK,
         "task_info": {
             "n_alph": n_alph,
             "seq_len": seq_len,

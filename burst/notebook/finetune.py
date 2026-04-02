@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
+from burst.config import ACC_BURST, ACC_OTHER, LOSS_BURST, LOSS_OTHER
 from burst.notebook.interp import (
     _get_grad_vector,
     grad_norm_entropy,
@@ -29,13 +30,14 @@ from burst.notebook.model import (
     save_model,
     train_step,
 )
+from burst.types import ExperimentData, FinetuneResult
 
 _rng = np.random.default_rng()
 
 
 def _sample_batch(target_pool: dict, bg_pool: dict, n_target: int, batch_size: int) -> np.ndarray:
     """Assemble a mixed batch of n_target special + rest background."""
-    global _rng
+    global _rng  # noqa: PLW0602
     t_ids = list(target_pool.keys())
     b_ids = list(bg_pool.keys())
     parts = []
@@ -56,8 +58,8 @@ def _sample_batch(target_pool: dict, bg_pool: dict, n_target: int, batch_size: i
     return np.concatenate(parts)[_rng.permutation(batch_size)]
 
 
-def finetune(  # noqa: PLR0913, PLR0915
-    data: dict,
+def finetune(
+    data: ExperimentData,
     pretrain_ckpt: str | Path,
     out_dir: str | Path,
     *,
@@ -69,7 +71,6 @@ def finetune(  # noqa: PLR0913, PLR0915
     batch_size: int = MODEL_DEFAULTS["batch_size"],
     eval_every: int = MODEL_DEFAULTS["eval_every"],
     grad_clip: float = MODEL_DEFAULTS["grad_clip"],
-    weight_decay: float = MODEL_DEFAULTS["weight_decay"],
     beta1: float = MODEL_DEFAULTS["beta1"],
     beta2: float = MODEL_DEFAULTS["beta2"],
     n_layer: int = MODEL_DEFAULTS["n_layer"],
@@ -78,7 +79,7 @@ def finetune(  # noqa: PLR0913, PLR0915
     tag: str | None = None,
     seed: int = 42,
     quiet: bool = False,
-) -> dict:
+) -> FinetuneResult:
     """Run burst-phase finetuning and return log, checkpoint path, and metrics."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -94,26 +95,24 @@ def finetune(  # noqa: PLR0913, PLR0915
     eval_other = data["eval_other"]
     eval_burst = data["eval_burst"]
 
-    global _rng
+    global _rng  # noqa: PLW0603
     _rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
     net = load_model(
         pretrain_ckpt, vocab_size, context_size, n_layer=n_layer, n_embd=n_embd, n_head=n_head
     )
-    optimizer = make_optimizer(
-        net, lr=lr * lr_start_frac, _weight_decay=weight_decay, beta1=beta1, beta2=beta2
-    )
+    optimizer = make_optimizer(net, lr=lr * lr_start_frac, beta1=beta1, beta2=beta2)
 
     sd_ref = state_dict_cpu(net)
 
     log = {
         "step": [],
         "loss": [],
-        "acc_other": [],
-        "acc_burst": [],
-        "loss_other": [],
-        "loss_burst": [],
+        ACC_OTHER: [],
+        ACC_BURST: [],
+        LOSS_OTHER: [],
+        LOSS_BURST: [],
         "lr": [],
         "weight_drift": [],
         "grad_norm_burst": [],
@@ -146,10 +145,10 @@ def finetune(  # noqa: PLR0913, PLR0915
             lb = eval_loss(net, eval_burst)
             log["step"].append(s)
             log["loss"].append(loss_val)
-            log["acc_other"].append(ao)
-            log["acc_burst"].append(ab)
-            log["loss_other"].append(lo)
-            log["loss_burst"].append(lb)
+            log[ACC_OTHER].append(ao)
+            log[ACC_BURST].append(ab)
+            log[LOSS_OTHER].append(lo)
+            log[LOSS_BURST].append(lb)
             log["lr"].append(cur_lr)
 
             sd_now = state_dict_cpu(net)
@@ -190,7 +189,7 @@ def finetune(  # noqa: PLR0913, PLR0915
     save_model(net, ckpt_path)
     np.savez(out_dir / f"{tag}_log.npz", **{k: np.array(v) for k, v in log.items()})
 
-    peak_burst = max(log["acc_burst"]) if log["acc_burst"] else 0.0
+    peak_burst = max(log[ACC_BURST]) if log[ACC_BURST] else 0.0
 
     return {
         "log": log,
@@ -202,6 +201,6 @@ def finetune(  # noqa: PLR0913, PLR0915
     }
 
 
-def _finetune_worker(kwargs: dict) -> dict:
+def _finetune_worker(kwargs: dict) -> FinetuneResult:
     """Pickle-able entry point for multiprocessing."""
     return finetune(**kwargs)

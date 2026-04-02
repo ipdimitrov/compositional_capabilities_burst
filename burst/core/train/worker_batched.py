@@ -19,9 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 import torch
 
 from burst.core.train.worker import run
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
+from burst.core.train_utils import DEVICE
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -32,12 +30,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with Path(args.jobs_path).open("rb") as f:
-        jobs = pickle.load(f)  # noqa: S301
+        jobs = pickle.load(f)
 
     for job in jobs:
         try:
             run(job, args.data_path, args.run_dir, args.progress_dir)
+        except torch.cuda.OutOfMemoryError:
+            logging.getLogger(__name__).exception("CUDA OOM on %s", job.get("label", "?"))
         except Exception:
             logging.getLogger(__name__).exception("WORKER FAIL %s", job.get("label", "?"))
+            raise
         if DEVICE == "cuda":
             torch.cuda.empty_cache()

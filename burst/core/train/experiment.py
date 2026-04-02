@@ -52,6 +52,7 @@ import torch
 from tqdm import tqdm
 
 from burst.config import (
+    ACC_OTHER,
     BURST_BASE_STEPS,
     BURST_MODES,
     CLASS_BURST,
@@ -59,6 +60,8 @@ from burst.config import (
     DATA_SEED,
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
+    LOSS_BURST,
+    LOSS_OTHER,
     MODE_CURRENT,
     N_A,
     ExperimentConfig,
@@ -122,7 +125,7 @@ class DepthNData:
       S [FN ... F1] ' ' [input] ' ' [after F1] ' ' ... ' ' [after FN]
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self, n_alph: int, seq_len: int, n_a: int,
         depth: int, burst_pos: int, seed: int,
     ) -> None:
@@ -260,7 +263,7 @@ def build_data(
     return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
 
 
-def run_pretrain(  # noqa: C901, PLR0913, PLR0915
+def run_pretrain(
     cfg: dict,
     pretrain_steps: int,
     bg_pool: dict,
@@ -277,11 +280,11 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
 
     Uses the provided seed (default DATA_SEED).
 
-    Returns a pretrain log dict with step/loss/phase/acc_other/acc_burst lists
+    Returns a pretrain log dict with step/loss/phase/ACC_OTHER/ACC_BURST lists
     so charts can show the pretraining trajectory.
     """
-    from burst.config import EVAL_KEYS, PHASE_PRE_BURST  # noqa: PLC0415
-    from burst.core.train.worker import eval_free_gen, eval_loss  # noqa: PLC0415
+    from burst.config import EVAL_KEYS, PHASE_PRE_BURST
+    from burst.core.train.worker import eval_free_gen, eval_loss
 
     set_seed(seed)
     net = make_net(cfg)
@@ -291,15 +294,15 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
     P = pretrain_steps
     warmup = cfg["warmup_iters"]
     lr_max = cfg["lr"]
-    lr_pe = cfg.get("lr_pretrain_end_frac", 0.3)
-    lr_be = cfg.get("lr_burst_end_frac", 0.1)
-    lr_re = cfg.get("lr_reversion_end_frac", 0.01)
-    T_dummy, U_dummy = cfg.get("total_steps", 80), cfg["reversion_steps"]
+    lr_pe = cfg["lr_pretrain_end_frac"]
+    lr_be = cfg["lr_burst_end_frac"]
+    lr_re = cfg["lr_reversion_end_frac"]
+    T_dummy, U_dummy = cfg["total_steps"], cfg["reversion_steps"]
 
     bg_ids = list(bg_pool.keys())
     bs = cfg["batch_size"]
 
-    log: dict[str, list] = {"step": [], "loss": [], "loss_other": [], "loss_burst": [], "phase": []}
+    log: dict[str, list] = {"step": [], "loss": [], LOSS_OTHER: [], LOSS_BURST: [], "phase": []}
     for k in EVAL_KEYS:
         log[k] = []
 
@@ -348,8 +351,8 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
             for ek in EVAL_KEYS:
                 pool_key = ek.removeprefix("acc_")
                 log[ek].append(eval_free_gen(net, eval_docs[pool_key], prompt_len))
-            log["loss_other"].append(eval_loss(net, eval_docs["other"]))
-            log["loss_burst"].append(eval_loss(net, eval_docs["burst"]))
+            log[LOSS_OTHER].append(eval_loss(net, eval_docs[CLASS_OTHER]))
+            log[LOSS_BURST].append(eval_loss(net, eval_docs[CLASS_BURST]))
             net.train()
 
         if (s + 1) % 100 == 0 or s == pretrain_steps - 1:
@@ -368,7 +371,7 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
     return log
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915
+def main() -> None:
     """Run the full burst training experiment."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-tag", default=None)
@@ -475,11 +478,12 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             eval_every=base_cfg["eval_every"],
             seed=args.seed,
         )
-        peak_acc_other = max(pretrain_log.get("acc_other", [0.0]))
+        assert ACC_OTHER in pretrain_log, f"pretrain_log missing {ACC_OTHER}"
+        peak_acc_other = max(pretrain_log[ACC_OTHER])
         if peak_acc_other >= PRETRAIN_ACC_THRESHOLD:
-            logger.info("  Pretrain OK: peak acc_other=%.4f", peak_acc_other)
+            logger.info("  Pretrain OK: peak %s=%.4f", ACC_OTHER, peak_acc_other)
             break
-        logger.info("  Pretrain acc_other=%.4f < 0.99, retrying...", peak_acc_other)
+        logger.info("  Pretrain %s=%.4f < 0.99, retrying...", ACC_OTHER, peak_acc_other)
     with (logs_dir / "pretrain_log.pkl").open("wb") as f:
         pickle.dump(pretrain_log, f)
 
@@ -650,7 +654,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 reported_jobs.add(label)
                 n_done += 1
                 with rp.open("rb") as f:
-                    r = pickle.load(f)  # noqa: S301
+                    r = pickle.load(f)
                 thresholds = TrainConfig().reversion_thresholds
                 first_key = reversion_life_key(thresholds[0])
                 first_lbl = reversion_life_label(thresholds[0])
@@ -692,7 +696,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         rp = logs_dir / f"{job['label']}.pkl"
         if rp.exists():
             with rp.open("rb") as f:
-                all_results.append(pickle.load(f))  # noqa: S301
+                all_results.append(pickle.load(f))
     with (logs_dir / "all_results.pkl").open("wb") as f:
         pickle.dump(all_results, f)
 

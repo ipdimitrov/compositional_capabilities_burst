@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import pickle
 import sys
 from pathlib import Path
@@ -39,18 +40,20 @@ import numpy as np
 import torch
 
 from burst.config import PHASE_BURST, PHASE_PRE_BURST, PHASE_REVERSION, parse_run_config
+from burst.core.activations import collect_activations_KPTN
 from burst.core.gpu import gpu_cfg
 from burst.core.parallel import JobResult, run_job_pool
 from burst.core.train_utils import load_net
-from burst.dev.probe import collect_activations_KPTN
 
 if TYPE_CHECKING:
     from net.nanogpt import nanoGPT
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_rng = np.random.default_rng()
+from burst.core.train_utils import DEVICE
+from burst.dev._shared import free_gen_acc as _free_gen_acc
 
-ADL_ENABLED = False
+logger = logging.getLogger(__name__)
+
+_rng = np.random.default_rng()
 
 
 @torch.no_grad()
@@ -168,14 +171,7 @@ def causal_ablation_accuracy(
     }
 
 
-@torch.no_grad()
-def _free_gen_accuracy(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
-    net.eval()
-    docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
-    _B, L = docs_t.shape
-    target_B6 = docs_t[:, -6:]
-    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
-    return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
+_free_gen_accuracy = _free_gen_acc
 
 
 @torch.no_grad()
@@ -244,8 +240,8 @@ def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     We return the function token for b* plus all value tokens (X0..X9),
     since burst accuracy is measured on output value tokens.
     """
-    n_alphabets = cfg.get("n_alphabets", 10)
-    vocab_size = cfg.get("vocab_size", 128)
+    n_alphabets = cfg["n_alphabets"]
+    vocab_size = cfg["vocab_size"]
 
     special_count = 3
     alphabet_start = special_count
@@ -268,9 +264,9 @@ def _worker_main() -> None:
     args = parser.parse_args()
 
     with Path(args.job_path).open("rb") as f:
-        job = pickle.load(f)  # noqa: S301
+        job = pickle.load(f)
     with Path(args.data_path).open("rb") as f:
-        other_docs_BL, burst_docs_BL, prompt_len = pickle.load(f)  # noqa: S301
+        other_docs_BL, burst_docs_BL, prompt_len = pickle.load(f)
 
     cfg = job["cfg"]
     n_a = job["n_a"]
@@ -312,7 +308,7 @@ def _worker_main() -> None:
         pickle.dump(result, f)
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915
+def main() -> None:
     """Run ADL analysis across all checkpoints in a training run."""
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -321,7 +317,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     args = parser.parse_args()
 
     run_dir = args.run_dir
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
+    from burst.core.train_utils import resolve_run_paths
 
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
@@ -332,50 +328,26 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     depth = rc["depth"]
     _burst_pos = rc["burst_pos"]
     n_a = rc["n_a"]
-    P = base_cfg.get("pre_burst_steps", 0)
+    P = base_cfg["pre_burst_steps"]
     T = base_cfg["total_steps"]
-    base_cfg["reversion_steps"]
-
     ckpt_root = logs_dir / "checkpoints"
     if not ckpt_root.exists():
-        print(  # noqa: T201
-            f"No checkpoints directory in {logs_dir}, nothing to do.",
-            flush=True,
-        )
+        logger.info("No checkpoints directory in %s, nothing to do.", logs_dir)
         return
 
     with (logs_dir / "_data.pkl").open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool, _, _, _ = pickle.load(f)
 
     other_docs_BL = np.concatenate(list(bg_pool.values()))
     burst_docs_BL = np.concatenate(list(target_pool.values()))
 
-    prompt_len = run_cfg.get("task_info", {}).get("prompt_len")
-    if prompt_len is None:
-        msg = "prompt_len not found in config.json task_info"
-        raise ValueError(msg)
+    prompt_len = run_cfg["task_info"]["prompt_len"]
 
     job_entries = run_cfg["jobs"]
-    {
-        **base_cfg,
-        "vocab_size": base_cfg.get("vocab_size", 128),
-        "context_size": base_cfg.get("context_size", 80),
-    }
-    for j in job_entries:
-        label = j["label"]
-        pkl_path = logs_dir / f"{label}.pkl"
-        if pkl_path.exists():
-            with pkl_path.open("rb") as f:
-                r = pickle.load(f)  # noqa: S301
-            r["config"]
-            break
 
     n_workers = args.n_workers or max(1, gpu_cfg.probe_workers)
-    print(f"{gpu_cfg.summary()}", flush=True)  # noqa: T201
-    print(  # noqa: T201
-        f"ADL: batch_size={args.adl_batch_size}, workers={n_workers}",
-        flush=True,
-    )
+    logger.info("%s", gpu_cfg.summary())
+    logger.info("ADL: batch_size=%d, workers=%d", args.adl_batch_size, n_workers)
 
     jobs = []
     for j in job_entries:
@@ -388,7 +360,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         if not pkl_path.exists():
             continue
         with pkl_path.open("rb") as f:
-            result = pickle.load(f)  # noqa: S301
+            result = pickle.load(f)
         cfg = result["config"]
 
         ckpt_files = sorted(
@@ -428,13 +400,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             )
 
     if not jobs:
-        print("No checkpoint jobs found.", flush=True)  # noqa: T201
+        logger.info("No checkpoint jobs found.")
         return
 
-    print(  # noqa: T201
-        f"ADL jobs: {len(jobs)} checkpoints across {len(job_entries)} labels",
-        flush=True,
-    )
+    logger.info("ADL jobs: %d checkpoints across %d labels", len(jobs), len(job_entries))
 
     worker_script = str(Path(__file__))
 
@@ -457,10 +426,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     def on_done(jr: JobResult, _n_done: int, _n_total: int) -> None:
         status = "ok" if jr.success else f"FAIL: {jr.error[:80]}"
-        print(  # noqa: T201
-            f"  [{_n_done}/{_n_total}] {jr.label}: {status}",
-            flush=True,
-        )
+        logger.info("[%d/%d] %s: %s", _n_done, _n_total, jr.label, status)
 
     results = run_job_pool(
         jobs=jobs,
@@ -537,22 +503,18 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     all_results_path = logs_dir / "all_results.pkl"
     if all_results_path.exists():
         with all_results_path.open("rb") as f:
-            all_results = pickle.load(f)  # noqa: S301
+            all_results = pickle.load(f)
         for r in all_results:
             lbl = r["label"]
             if lbl in per_label:
                 r["adl_log"] = per_label[lbl]["adl_log"]
         with all_results_path.open("wb") as f:
             pickle.dump(all_results, f)
-        print(  # noqa: T201
-            f"Updated all_results.pkl with ADL data for {len(per_label)} labels",
-            flush=True,
-        )
+        logger.info("Updated all_results.pkl with ADL data for %d labels", len(per_label))
 
-    print(  # noqa: T201
-        f"ADL done: {len(per_label)} labels, "
-        f"{sum(jr.success for jr in results)}/{len(results)} ok",
-        flush=True,
+    logger.info(
+        "ADL done: %d labels, %d/%d ok",
+        len(per_label), sum(jr.success for jr in results), len(results),
     )
 
 

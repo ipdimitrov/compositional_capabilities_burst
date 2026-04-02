@@ -14,14 +14,11 @@ from omegaconf import OmegaConf
 from burst.core.train_utils import DEVICE, make_net, make_net_bare
 from net.nanogpt import nanoGPT
 
-MATRIX_NDIM = 2
-
 MODEL_DEFAULTS = {
     "n_layer": 6,
     "n_embd": 120,
     "n_head": 4,
     "lr": 1e-3,
-    "weight_decay": 1e-3,
     "beta1": 0.9,
     "beta2": 0.9,
     "grad_clip": 1.0,
@@ -35,6 +32,7 @@ def make_model(
     vocab_size: int, context_size: int, *,
     n_layer: int = 6, n_embd: int = 120, n_head: int = 4, compile_model: bool = True,
 ) -> torch.nn.Module:
+    """Create a nanoGPT model, optionally torch-compiled."""
     cfg = {
         "vocab_size": vocab_size,
         "context_size": context_size,
@@ -46,6 +44,7 @@ def make_model(
 
 
 def save_model(net: torch.nn.Module, path: str | Path) -> None:
+    """Save model state dict, unwrapping torch.compile if needed."""
     raw = getattr(net, "_orig_mod", net)
     torch.save(raw.state_dict(), path)
 
@@ -54,6 +53,7 @@ def load_model(
     path: str | Path, vocab_size: int, context_size: int, *,
     n_layer: int = 6, n_embd: int = 120, n_head: int = 4, compile_model: bool = True,
 ) -> torch.nn.Module:
+    """Load a saved nanoGPT checkpoint and optionally compile."""
     net = nanoGPT(
         OmegaConf.create({
             "compile": False,
@@ -74,19 +74,18 @@ def load_model(
 
 
 def make_optimizer(
-    net: torch.nn.Module, lr: float = 1e-3, _weight_decay: float = 1e-3,
+    net: torch.nn.Module, lr: float = 1e-3,
     beta1: float = 0.9, beta2: float = 0.9,
 ) -> torch.optim.Optimizer:
-    decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() >= MATRIX_NDIM]
-    no_decay = [p for _, p in net.named_parameters() if p.requires_grad and p.dim() < MATRIX_NDIM]
-    groups = [
-        {"params": decay, "weight_decay": 0.0},
-        {"params": no_decay, "weight_decay": 0.0},
-    ]
-    return torch.optim.AdamW(groups, lr=lr, betas=(beta1, beta2), fused=(DEVICE == "cuda"))
+    """Build AdamW optimizer — weight_decay=0 since AdamW handles decoupled decay internally."""
+    params = [p for p in net.parameters() if p.requires_grad]
+    return torch.optim.AdamW(
+        params, lr=lr, betas=(beta1, beta2), weight_decay=0.0, fused=(DEVICE == "cuda"),
+    )
 
 
 def reset_optimizer(optimizer: torch.optim.Optimizer) -> None:
+    """Zero all optimizer state (momentum, step counters)."""
     for group in optimizer.param_groups:
         for p in group["params"]:
             state = optimizer.state.get(p)
@@ -100,6 +99,7 @@ def reset_optimizer(optimizer: torch.optim.Optimizer) -> None:
 
 
 def cosine_lr(step: int, total_steps: int, lr_max: float, lr_min: float, warmup: int = 0) -> float:
+    """Cosine learning-rate schedule with optional linear warmup."""
     if step <= warmup:
         return lr_max * step / max(warmup, 1)
     t = (step - warmup) / max(total_steps - warmup, 1)
@@ -107,6 +107,7 @@ def cosine_lr(step: int, total_steps: int, lr_max: float, lr_min: float, warmup:
 
 
 def set_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+    """Set learning rate for all parameter groups."""
     for pg in optimizer.param_groups:
         pg["lr"] = lr
 
@@ -115,6 +116,7 @@ def train_step(
     net: torch.nn.Module, optimizer: torch.optim.Optimizer, batch_np: np.ndarray,
     lr: float | None = None, grad_clip: float = 1.0,
 ) -> float:
+    """Run one forward + backward pass and return the loss scalar."""
     if lr is not None:
         set_lr(optimizer, lr)
     dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
@@ -132,6 +134,7 @@ def train_step(
 
 @torch.no_grad()
 def eval_accuracy(net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int) -> float:
+    """Compute autoregressive accuracy on the last 6 generated tokens."""
     if docs_BL.shape[0] == 0:
         return 0.0
     net.eval()
@@ -155,6 +158,7 @@ def eval_accuracy(net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int) ->
 
 @torch.no_grad()
 def eval_loss(net: torch.nn.Module, docs_BL: np.ndarray) -> float:
+    """Compute cross-entropy loss over the full sequence."""
     if docs_BL.shape[0] == 0:
         return float("nan")
     net.eval()

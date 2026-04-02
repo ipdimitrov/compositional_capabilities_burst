@@ -20,7 +20,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from burst.config import SEED_BASE, TrainConfig
+from burst.config import ACC_BURST, ACC_OTHER, SEED_BASE, TrainConfig
 from burst.core.gpu import gpu_cfg
 from burst.core.train.experiment import build_data, run_pretrain
 
@@ -216,7 +216,7 @@ def _run_group(
             continue
 
         final_i = len(log["step"]) - 1
-        acc_other_series = [float(v) for v in log["acc_other"]]
+        acc_other_series = [float(v) for v in log[ACC_OTHER]]
         loss_series = [float(v) for v in log["loss"]]
         first_step_acc_other_gt_99 = next(
             (
@@ -234,14 +234,14 @@ def _run_group(
             "n_burst_train": int(task_info["n_burst_train"]),
             "final_eval_step": int(log["step"][final_i]),
             "final_acc_other": float(acc_other_series[final_i]),
-            "final_acc_burst": float(log["acc_burst"][final_i]),
+            "final_acc_burst": float(log[ACC_BURST][final_i]),
             "final_loss": float(loss_series[final_i]),
             "peak_acc_other": float(max(acc_other_series)),
             "first_step_acc_other_gt_99": first_step_acc_other_gt_99,
             "min_loss": float(min(loss_series)),
             "curve_step": [int(s) for s in log["step"]],
             "curve_acc_other": acc_other_series,
-            "curve_acc_burst": [float(v) for v in log["acc_burst"]],
+            "curve_acc_burst": [float(v) for v in log[ACC_BURST]],
             "curve_loss": loss_series,
         }
         rows.append(row)
@@ -422,7 +422,7 @@ def _write_excel(
             df.to_excel(writer, sheet_name=sheet[:31], index=False)
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915
+def main() -> None:
     """Run pretraining-only full-factorial sweep."""
     parser = argparse.ArgumentParser(description="Pretraining-only full-factorial sweep.")
     parser.add_argument("--run-tag", default=None)
@@ -491,7 +491,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                     task = futs[fut]
                     try:
                         rows.extend(fut.result())
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         if _is_cuda_oom(exc):
                             saw_cuda_oom = True
                         failed.append(task)

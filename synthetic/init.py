@@ -24,8 +24,8 @@ def set_seed(seed: int = 0) -> None:
     import synthetic.generator as _syn_gen
 
     _shared = np.random.default_rng(true_seed)
-    _syn_fn._rng = _shared
-    _syn_gen._rng = _shared
+    _syn_fn._rng = _shared  # noqa: SLF001
+    _syn_gen._rng = _shared  # noqa: SLF001
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.manual_seed(true_seed)

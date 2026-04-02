@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import pickle
 import sys
 from pathlib import Path
@@ -46,6 +47,8 @@ from synthetic.init import set_seed
 if TYPE_CHECKING:
     from net.nanogpt import nanoGPT
 
+logger = logging.getLogger(__name__)
+
 PROBE_SEED = 1337
 
 """
@@ -58,12 +61,13 @@ Dimension key:
     T: n_token_positions (= L - 1, since model sees tokens :-1)
 """
 
+from burst.core.activations import collect_activations_KPTN
+
 GPU_PROBE_LR = 1e-2
 GPU_PROBE_EPOCHS = 200
 GPU_PROBE_VAL_FRAC = 0.2
 GPU_PROBE_PATIENCE = 30
 GPU_PROBE_VAL_EVERY = 10
-COLLECT_BATCH_SIZE = 512
 
 
 def get_token_position_labels(doc_len: int, seq_len: int, depth: int) -> list[str]:
@@ -76,42 +80,6 @@ def get_token_position_labels(doc_len: int, seq_len: int, depth: int) -> list[st
         labels += [f"sp{d}"]
         labels += [f"o{d}_{i}" for i in range(seq_len)]
     return labels[: doc_len - 1]
-
-
-@torch.no_grad()
-def collect_activations_KPTN(  # noqa: N802
-    net: nanoGPT,
-    docs_BL: np.ndarray,
-) -> list[torch.Tensor]:
-    """Collect residual-stream activations at every (layer, token_pos).
-
-    Returns list of K tensors, each of shape (P, T, N) on CPU.
-    K = n_layers + 1 (post-embedding + post-block_0 + ... + post-block_{L-1}).
-    T = doc_len - 1 (model input is tokens[:-1]).
-    P = len(docs_BL) — caller is responsible for subsampling.
-    """
-    net.eval()
-    P = len(docs_BL)
-    K = len(net.transformer.h) + 1
-
-    all_layer_acts = [[] for _ in range(K)]
-
-    for start in range(0, P, COLLECT_BATCH_SIZE):
-        end = min(start + COLLECT_BATCH_SIZE, P)
-        tokens_bL = torch.as_tensor(docs_BL[start:end], dtype=torch.long, device=DEVICE)
-        inp_bT = tokens_bL[:, :-1]
-
-        tok_emb = net.transformer.wte(inp_bT)
-        pos = torch.arange(inp_bT.size(1), device=DEVICE)
-        pos_emb = net.transformer.wpe(pos)
-        x_bTN = net.transformer.drop(tok_emb + pos_emb)
-
-        all_layer_acts[0].append(x_bTN.float().cpu())
-        for bi, block in enumerate(net.transformer.h):
-            x_bTN = block(x_bTN)
-            all_layer_acts[bi + 1].append(x_bTN.float().cpu())
-
-    return [torch.cat(chunks, dim=0) for chunks in all_layer_acts]
 
 
 def _fit_gpu_probe(feats_PN: torch.Tensor, labels_P: torch.Tensor) -> float:
@@ -193,7 +161,7 @@ def fit_probes_at_checkpoint(
     return {"train_acc_KT": train_acc_KT}
 
 
-def probe_from_checkpoints(  # noqa: PLR0913
+def probe_from_checkpoints(
     job: dict,
     ckpt_dir: Path,
     other_docs_BL: np.ndarray,
@@ -214,7 +182,7 @@ def probe_from_checkpoints(  # noqa: PLR0913
     for step in checkpoint_steps:
         if step not in available_ckpts:
             continue
-        print(f"    Loading ckpt step {step}...", flush=True)  # noqa: T201
+        logger.debug("Loading ckpt step %d...", step)
         net = load_net(cfg, available_ckpts[step])
         probe_results[step] = fit_probes_at_checkpoint(
             net, other_docs_BL, burst_docs_BL, probe_max_samples
@@ -230,7 +198,7 @@ def probe_from_checkpoints(  # noqa: PLR0913
     }
 
 
-def retrain_and_probe(  # noqa: PLR0913
+def retrain_and_probe(
     job: dict,
     target_pool: dict,
     bg_pool: dict,
@@ -245,7 +213,7 @@ def retrain_and_probe(  # noqa: PLR0913
 
     def on_step(net: nanoGPT, global_step: int, _phase: str) -> None:
         if global_step in checkpoint_set:
-            print(f"    Probing step {global_step}...", flush=True)  # noqa: T201
+            logger.debug("Probing step %d...", global_step)
             probe_results[global_step] = fit_probes_at_checkpoint(
                 net, other_docs_BL, burst_docs_BL, probe_max_samples
             )
@@ -277,9 +245,9 @@ def _worker_main() -> None:
     wargs = parser.parse_args()
 
     with Path(wargs.job_path).open("rb") as f:
-        job = pickle.load(f)  # noqa: S301
+        job = pickle.load(f)
     with Path(wargs.data_path).open("rb") as f:
-        tp, bp, other_docs, burst_docs = pickle.load(f)  # noqa: S301
+        tp, bp, other_docs, burst_docs = pickle.load(f)
 
     ckpt_dir = job.get("ckpt_dir")
     if ckpt_dir and Path(ckpt_dir).exists():
@@ -300,9 +268,9 @@ def _worker_main() -> None:
         pickle.dump(result, f)
 
 
-def main() -> None:  # noqa: PLR0915
+def main() -> None:
     """Run linear probes across training checkpoints."""
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
+    from burst.core.train_utils import resolve_run_paths
 
     parser = argparse.ArgumentParser(
         description="Linear probes for Other-vs-Burst representation analysis"
@@ -341,17 +309,16 @@ def main() -> None:  # noqa: PLR0915
     checkpoint_steps = _default_checkpoint_steps(
         total_steps, reversion_steps, args.checkpoint_every
     )
-    print(  # noqa: T201
-        f"Checkpoint steps ({len(checkpoint_steps)}): "
-        f"{checkpoint_steps[:8]}...{checkpoint_steps[-3:]}"
+    logger.info(
+        "Checkpoint steps (%d): %s...%s",
+        len(checkpoint_steps), checkpoint_steps[:8], checkpoint_steps[-3:],
     )
 
-    print(f"Rebuilding data (seed={DATA_SEED})...")  # noqa: T201
+    logger.info("Rebuilding data (seed=%d)...", DATA_SEED)
     tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
-    print(  # noqa: T201
-        f"  Other tasks: {ti['n_other_train']}  "
-        f"Burst tasks: {ti['n_burst_train']}  "
-        f"doc_len: {ti['doc_len']}"
+    logger.info(
+        "Other tasks: %d  Burst tasks: %d  doc_len: %d",
+        ti["n_other_train"], ti["n_burst_train"], ti["doc_len"],
     )
 
     set_seed(DATA_SEED)
@@ -360,24 +327,20 @@ def main() -> None:  # noqa: PLR0915
     )
     doc_len = ti["doc_len"]
     other_docs, burst_docs = build_probe_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
-    print(  # noqa: T201
-        f"  Probe data: Other={other_docs.shape[0]} Burst={burst_docs.shape[0]}",
-    )
+    logger.info("Probe data: Other=%d Burst=%d", other_docs.shape[0], burst_docs.shape[0])
 
     token_labels = get_token_position_labels(doc_len, bcfg["seq_len"], depth)
-    print(  # noqa: T201
-        f"  Token positions ({len(token_labels)}): "
-        f"{token_labels[:6]}...{token_labels[-3:]}",
+    logger.info(
+        "Token positions (%d): %s...%s",
+        len(token_labels), token_labels[:6], token_labels[-3:],
     )
 
     ckpt_root = logs_dir / "checkpoints"
     use_checkpoints = ckpt_root.exists()
     if use_checkpoints:
-        print(  # noqa: T201
-            f"  Found checkpoints at {ckpt_root}, will load instead of retraining",
-        )
+        logger.info("Found checkpoints at %s, will load instead of retraining", ckpt_root)
     else:
-        print("  No checkpoints found, will retrain from scratch")  # noqa: T201
+        logger.info("No checkpoints found, will retrain from scratch")
 
     jobs_cfg = cfg["jobs"]
     if args.jobs:
@@ -388,14 +351,12 @@ def main() -> None:  # noqa: PLR0915
         ]
 
     n_workers = min(len(jobs_cfg), args.n_workers or gpu_cfg.probe_workers)
-    print(f"\n{gpu_cfg.summary()}")  # noqa: T201
-    print(  # noqa: T201
-        f"Probing {len(jobs_cfg)} jobs on {DEVICE}, workers: {n_workers}",
-    )
+    logger.info("%s", gpu_cfg.summary())
+    logger.info("Probing %d jobs on %s, workers: %d", len(jobs_cfg), DEVICE, n_workers)
     n_layer, n_embd, n_head = bcfg["n_layer"], bcfg["n_embd"], bcfg["n_head"]
-    print(f"Model: {n_layer}L/{n_embd}d/{n_head}H")  # noqa: T201
+    logger.info("Model: %dL/%dd/%dH", n_layer, n_embd, n_head)
     mode = "checkpoint-loading" if use_checkpoints else "retrain"
-    print(f"Mode: {mode}\n")  # noqa: T201
+    logger.info("Mode: %s", mode)
 
     probe_dir = run_dir / "probes"
     probe_dir.mkdir(exist_ok=True)
@@ -448,18 +409,13 @@ def main() -> None:  # noqa: PLR0915
             all_probe_results.append(result)
             lbl = jr.label  # type: ignore[attr-defined]
             elapsed = jr.elapsed  # type: ignore[attr-defined]
-            print(  # noqa: T201
-                f"  [{_n_done}/{_n_total}] {lbl:30s} -> {pkl} ({elapsed:.0f}s)",
-                flush=True,
-            )
+            logger.info("[%d/%d] %s -> %s (%.0fs)", _n_done, _n_total, lbl, pkl, elapsed)
         else:
-            print(  # noqa: T201
-                f"  FAIL [{_n_done}/{_n_total}]: "
-                f"{jr.label}",  # type: ignore[attr-defined]
-                flush=True,
+            logger.info(
+                "FAIL [%d/%d]: %s", _n_done, _n_total, jr.label,  # type: ignore[attr-defined]
             )
             if jr.error:  # type: ignore[attr-defined]
-                print(f"    {jr.error}", flush=True)  # noqa: T201
+                logger.info("  %s", jr.error)
 
     run_job_pool(
         jobs=jobs,
@@ -488,8 +444,8 @@ def main() -> None:  # noqa: PLR0915
     with (probe_dir / "probe_meta.json").open("w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nAll probes saved to {probe_dir}")  # noqa: T201
-    print(f"Plot: python burst/plot_probes.py {run_dir}")  # noqa: T201
+    logger.info("All probes saved to %s", probe_dir)
+    logger.info("Plot: python burst/plot_probes.py %s", run_dir)
 
 
 if __name__ == "__main__":

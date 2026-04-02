@@ -11,7 +11,8 @@ from typing import Any
 import numpy as np
 
 from burst.config import (
-    MODE_CURRENT,
+    ACC_BURST,
+    ACC_OTHER,
     TrainConfig,
     burst_steps_for_mode,
     ordered_schedules,
@@ -65,7 +66,7 @@ def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
     grouped = _group_by_schedule(results)
     schedules = ordered_schedules(grouped.keys())
     thresholds = list(TrainConfig().reversion_thresholds)
-    burst_mode = cfg.get("burst_mode", MODE_CURRENT)
+    burst_mode = cfg["burst_mode"]
     grad_records = _load_grad_sim_records(run_dir)
 
     return {
@@ -104,7 +105,7 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
         if not path.exists():
             continue
         with path.open("rb") as f:
-            results = pickle.load(f)  # noqa: S301
+            results = pickle.load(f)
         for result in results:
             grad_log = result.get("grad_sim_log")
             if not grad_log or not grad_log.get("step"):
@@ -196,7 +197,7 @@ def _build_schedule_bars(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, 
     payload: dict[str, Any] = {}
     for schedule, runs in grouped.items():
         cfg = runs[0]["config"]
-        pre_steps = int(cfg.get("pre_burst_steps", 0))
+        pre_steps = int(cfg["pre_burst_steps"])
         burst_steps = int(cfg["total_steps"])
         reversion_steps = int(cfg["reversion_steps"])
         batch_size = int(cfg["batch_size"])
@@ -232,11 +233,11 @@ def _build_training_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str
     for schedule, runs in grouped.items():
         cfg = runs[0]["config"]
         payload[schedule] = {
-            "pre_steps": int(cfg.get("pre_burst_steps", 0)),
+            "pre_steps": int(cfg["pre_burst_steps"]),
             "burst_steps": int(cfg["total_steps"]),
             "reversion_steps": int(cfg["reversion_steps"]),
-            "acc_burst": _aggregate_series(runs, "acc_burst"),
-            "acc_other": _aggregate_series(runs, "acc_other"),
+            ACC_BURST: _aggregate_series(runs, ACC_BURST),
+            ACC_OTHER: _aggregate_series(runs, ACC_OTHER),
             "loss": _aggregate_series(runs, "loss"),
         }
     return payload
@@ -252,7 +253,7 @@ def _build_summary(
     for schedule, runs in grouped.items():
         peak_vals = np.array([run["peak_burst"] for run in runs], dtype=float)
         auc_vals = np.array([run["reversion_auc"] for run in runs], dtype=float)
-        other_end_vals = np.array([run["log"]["acc_other"][-1] for run in runs], dtype=float)
+        other_end_vals = np.array([run["log"][ACC_OTHER][-1] for run in runs], dtype=float)
         peak_mean, peak_ci = _mean_ci(peak_vals)
         auc_mean, auc_ci = _mean_ci(auc_vals)
         other_mean, other_ci = _mean_ci(other_end_vals)
