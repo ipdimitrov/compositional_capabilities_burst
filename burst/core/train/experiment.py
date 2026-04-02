@@ -215,6 +215,7 @@ class DepthNData:
 def build_data(
     cfg: dict, depth: int, burst_pos: int, n_a: int, data_seed: int = DATA_SEED,
 ) -> tuple[dict, dict, dict, int, int, int, dict, dict]:
+    """Build train/eval data pools and vocab info for a given depth and burst position."""
     seed_all(data_seed)
     d = DepthNData(cfg["n_alphabets"], cfg["seq_len"], n_a, depth, burst_pos, data_seed)
     nd, ne = cfg["n_docs_per_task"], cfg["n_eval_per_task"]

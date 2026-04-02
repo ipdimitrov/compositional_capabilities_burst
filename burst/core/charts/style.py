@@ -1,3 +1,5 @@
+"""Matplotlib style helpers for publication-quality figures."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,6 +19,7 @@ FULL_COL_WIDTH = 6.75
 
 
 def apply_paper_style() -> None:
+    """Set rcParams for paper-ready plots."""
     plt.rcParams.update(
         {
             "font.family": "serif",
@@ -46,17 +49,20 @@ def apply_paper_style() -> None:
 
 
 def style_axes(ax: Axes, xlabel: str, ylabel: str) -> None:
+    """Apply labels and grid to an axes."""
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.grid(visible=True)
 
 
 def figsize(cols: str = "half", nrows: int = 1) -> tuple[float, float]:
+    """Return (width, height) for a figure with golden-ratio rows."""
     w = FULL_COL_WIDTH if cols == "full" else HALF_COL_WIDTH
     return (w, (w / 1.618) * nrows)
 
 
 def save_figure(fig: Figure, path: str | Path) -> None:
+    """Save fig as both PNG and PDF, then close it."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, bbox_inches="tight")

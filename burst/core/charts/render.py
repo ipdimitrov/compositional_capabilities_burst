@@ -34,11 +34,13 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    burst_fname = f"overlay_{ACC_BURST.upper()}_{CLASS_BURST}_class_accuracy.png"
+    other_fname = f"overlay_{ACC_OTHER.upper()}_{CLASS_OTHER}_class_accuracy.png"
     paths = [
         _plot_schedule_bars(bundle, out_dir),
         _plot_lr_curves(bundle, out_dir),
-        _plot_overlay(bundle, out_dir, ACC_BURST, f"{CLASS_BURST} Accuracy", f"overlay_{ACC_BURST.upper()}_{CLASS_BURST}_class_accuracy.png"),
-        _plot_overlay(bundle, out_dir, ACC_OTHER, f"{CLASS_OTHER} Accuracy", f"overlay_{ACC_OTHER.upper()}_{CLASS_OTHER}_class_accuracy.png"),
+        _plot_overlay(bundle, out_dir, ACC_BURST, f"{CLASS_BURST} Accuracy", burst_fname),
+        _plot_overlay(bundle, out_dir, ACC_OTHER, f"{CLASS_OTHER} Accuracy", other_fname),
         _plot_overlay(bundle, out_dir, "loss", "Loss", "overlay_LOSS_training_loss.png"),
         _plot_auc_bars(bundle, out_dir),
         _plot_summary_table(bundle, out_dir),

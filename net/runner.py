@@ -47,8 +47,8 @@ def configure_optimizers(net: torch.nn.Module, optim_cfg: DictConfig) -> torch.o
 
     # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
     # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-    decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]  # type: ignore[operator]
-    nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]  # type: ignore[operator]
+    decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]  # noqa: PLR2004  # type: ignore[operator]
+    nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]  # noqa: PLR2004  # type: ignore[operator]
     optim_groups = [
         {"params": decay_params, "weight_decay": optim_cfg.weight_decay},
         {"params": nodecay_params, "weight_decay": 0.0},

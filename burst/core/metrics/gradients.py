@@ -220,7 +220,7 @@ def _grad_rank_per_layer(
         shapes = [
             param_map[pn].shape
             for pn in pnames
-            if pn in param_map and len(param_map[pn].shape) == 2  # type: ignore[operator]
+            if pn in param_map and len(param_map[pn].shape) == 2  # noqa: PLR2004  # type: ignore[operator]
         ]
         if shapes:
             m, n = shapes[0]
