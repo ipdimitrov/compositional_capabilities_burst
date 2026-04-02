@@ -279,6 +279,12 @@ def parse_run_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return {"depth": depth, "burst_pos": burst_pos, "n_a": n_a, "base_cfg": base_cfg}
 
 
+def burst_eval_range(prompt_len: int, burst_pos: int, seq_len: int) -> tuple[int, int]:
+    """Return (eval_start, eval_end) for the burst function's output block."""
+    eval_start = prompt_len + (burst_pos - 1) * (seq_len + 1)
+    return eval_start, eval_start + seq_len
+
+
 def reversion_life_key(threshold: float) -> str:
     """Return the metric key for a reversion threshold."""
     pct = int(threshold * 100)

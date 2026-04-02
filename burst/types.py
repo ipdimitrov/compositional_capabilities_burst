@@ -28,6 +28,8 @@ class ExperimentData(TypedDict):
     eval_other: np.ndarray
     eval_burst: np.ndarray
     prompt_len: int
+    eval_start: int
+    eval_end: int
     vocab_size: int
     context_size: int
     task_info: dict[str, int]

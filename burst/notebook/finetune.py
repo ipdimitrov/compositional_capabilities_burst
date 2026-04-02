@@ -87,6 +87,8 @@ def finetune(  # noqa: PLR0913, PLR0915
     vocab_size = data["vocab_size"]
     context_size = data["context_size"]
     prompt_len = data["prompt_len"]
+    eval_start = data["eval_start"]
+    eval_end = data["eval_end"]
     target_pool = data["target_pool"]
     bg_pool = data["bg_pool"]
     eval_other = data["eval_other"]
@@ -134,8 +136,8 @@ def finetune(  # noqa: PLR0913, PLR0915
         loss_val = train_step(net, optimizer, batch, lr=cur_lr, grad_clip=grad_clip)
 
         if s % eval_every == 0 or s == steps - 1:
-            ao = eval_accuracy(net, eval_other, prompt_len)
-            ab = eval_accuracy(net, eval_burst, prompt_len)
+            ao = eval_accuracy(net, eval_other, prompt_len, eval_start, eval_end)
+            ab = eval_accuracy(net, eval_burst, prompt_len, eval_start, eval_end)
             lo = eval_loss(net, eval_other)
             lb = eval_loss(net, eval_burst)
             log["step"].append(s)

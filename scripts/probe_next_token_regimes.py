@@ -747,7 +747,7 @@ def main() -> None:  # noqa: C901, PLR0915
     logger.info("Final-output model-input positions: %s", f3_pos)
 
     logger.info("\nRebuilding data (seed=%s)...", DATA_SEED)
-    tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
+    tp, bp, _, _, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
     doc_len = ti["doc_len"]
     logger.info("  doc_len=%s  seq_len=%s", doc_len, seq_len)
 

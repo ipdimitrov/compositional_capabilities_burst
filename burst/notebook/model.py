@@ -133,8 +133,11 @@ def train_step(
 
 
 @torch.no_grad()
-def eval_accuracy(net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int) -> float:
-    """Compute autoregressive accuracy on the last 6 generated tokens."""
+def eval_accuracy(
+    net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int,
+    eval_start: int, eval_end: int,
+) -> float:
+    """Compute autoregressive accuracy on tokens [eval_start, eval_end)."""
     if docs_BL.shape[0] == 0:
         return 0.0
     net.eval()
@@ -146,12 +149,10 @@ def eval_accuracy(net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int) ->
         chunk = dat[i : i + bs]
         tgt = chunk[:, 1:]
         full = net.generate(chunk[:, :prompt_len], n_new)
-        gen = full[:, prompt_len:]
-        ref = tgt[:, prompt_len - 1 :]
-        ml = min(gen.shape[1], ref.shape[1])
-        last6 = max(0, ml - 6)
-        correct += (gen[:, last6:ml] == ref[:, last6:ml]).float().sum().item()
-        total += ref[:, last6:ml].numel()
+        gen = full[:, eval_start:eval_end]
+        ref = tgt[:, eval_start - 1 : eval_end - 1]
+        correct += (gen == ref).float().sum().item()
+        total += ref.numel()
     net.train()
     return correct / max(total, 1)
 

@@ -67,6 +67,7 @@ from burst.config import (
     ExperimentConfig,
     TrainConfig,
     batch_size_for_mode,
+    burst_eval_range,
     burst_steps_for_mode,
     reversion_life_key,
     reversion_life_label,
@@ -214,8 +215,7 @@ class DepthNData:
 
 def build_data(
     cfg: dict, depth: int, burst_pos: int, n_a: int, data_seed: int = DATA_SEED,
-) -> tuple[dict, dict, dict, int, dict, dict]:
-    """Build training/eval data pools and return pools, eval docs, prompt len, cfg, task info."""
+) -> tuple[dict, dict, dict, int, int, int, dict, dict]:
     seed_all(data_seed)
     d = DepthNData(cfg["n_alphabets"], cfg["seq_len"], n_a, depth, burst_pos, data_seed)
     nd, ne = cfg["n_docs_per_task"], cfg["n_eval_per_task"]
@@ -245,6 +245,7 @@ def build_data(
     ref = eval_docs[CLASS_OTHER] if eval_docs[CLASS_OTHER].shape[0] > 1 else eval_docs[CLASS_BURST]
     sp_positions = np.where(ref[0] == d.token_idx[" "])[0]
     prompt_len = int(sp_positions[0]) + 1 + d.seq_len + 1
+    eval_start, eval_end = burst_eval_range(prompt_len, burst_pos, d.seq_len)
 
     cfg_out = dict(cfg)
     cfg_out["vocab_size"] = max(cfg["vocab_size"], d.vocab_size + 10)
@@ -258,8 +259,10 @@ def build_data(
         "n_burst_train": len(d.burst_train),
         "doc_len": int(ref.shape[1]),
         "prompt_len": prompt_len,
+        "eval_start": eval_start,
+        "eval_end": eval_end,
     }
-    return target_pool, bg_pool, eval_docs, prompt_len, cfg_out, task_info
+    return target_pool, bg_pool, eval_docs, prompt_len, eval_start, eval_end, cfg_out, task_info
 
 
 def run_pretrain(  # noqa: C901, PLR0913, PLR0915
@@ -269,6 +272,8 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
     ckpt_path: Path | None = None,
     eval_docs: dict | None = None,
     prompt_len: int = 0,
+    eval_start: int = 0,
+    eval_end: int = 0,
     eval_every: int = 25,
     seed: int = DATA_SEED,
     progress_prefix: str = "",
@@ -349,7 +354,8 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
             log["phase"].append(PHASE_PRE_BURST)
             for ek in EVAL_KEYS:
                 pool_key = ek.removeprefix("acc_")
-                log[ek].append(eval_free_gen(net, eval_docs[pool_key], prompt_len))
+                log[ek].append(eval_free_gen(net, eval_docs[pool_key],
+                prompt_len, eval_start, eval_end))
             log[LOSS_OTHER].append(eval_loss(net, eval_docs[CLASS_OTHER]))
             log[LOSS_BURST].append(eval_loss(net, eval_docs[CLASS_BURST]))
             net.train()
@@ -436,7 +442,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     logger.info(
         "\nBuilding data (depth=%d, burst_pos=%d, n_a=%d)...", exp.depth, exp.burst_pos, n_a
     )
-    tp, bp, ed, pl, cfg_out, ti = build_data(
+    tp, bp, ed, pl, es, ee, cfg_out, ti = build_data(
         base_cfg,
         exp.depth,
         exp.burst_pos,
@@ -450,7 +456,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     data_path = logs_dir / "_data.pkl"
     with data_path.open("wb") as f:
-        pickle.dump((tp, bp, ed, pl, None), f)
+        pickle.dump((tp, bp, ed, pl, es, ee), f)
 
     # --- Pretrain: one shared checkpoint for all seeds ---
     pretrain_ckpt_path = logs_dir / "pretrain_ckpt.pt"
@@ -474,6 +480,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             pretrain_ckpt_path,
             eval_docs=ed,
             prompt_len=pl,
+            eval_start=es,
+            eval_end=ee,
             eval_every=base_cfg["eval_every"],
             seed=args.seed,
         )

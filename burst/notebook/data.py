@@ -8,7 +8,7 @@ import itertools
 
 import numpy as np
 
-from burst.config import CLASS_BURST, CLASS_OTHER, DATA_SEED, N_A
+from burst.config import CLASS_BURST, CLASS_OTHER, DATA_SEED, N_A, burst_eval_range
 from burst.core.data import pad_pools_to_same_length
 from burst.rng import get_rng, seed_all
 from burst.types import ExperimentData
@@ -61,8 +61,7 @@ def make_data(  # noqa: PLR0913
 
     pos_fns = {p: list(range((p - 1) * n_a + 1, p * n_a + 1)) for p in range(1, depth + 1)}
 
-    token, token_idx, fn_tok = {}, {}, {}
-    idx = 0
+    token, token_idx, fn_tok, idx = {}, {}, {}, 0
     for i in range(n_alph):
         token[idx] = f"X{i}"
         token_idx[f"X{i}"] = idx
@@ -125,6 +124,7 @@ def make_data(  # noqa: PLR0913
     ref = eval_other if eval_other.shape[0] > 1 else eval_burst
     sp_positions = np.where(ref[0] == token_idx[" "])[0]
     prompt_len = int(sp_positions[0]) + 1 + seq_len + 1
+    eval_start, eval_end = burst_eval_range(prompt_len, burst_pos, seq_len)
 
     return {
         "bg_pool": bg_pool,
@@ -132,6 +132,8 @@ def make_data(  # noqa: PLR0913
         "eval_other": eval_other,
         "eval_burst": eval_burst,
         "prompt_len": prompt_len,
+        "eval_start": eval_start,
+        "eval_end": eval_end,
         "vocab_size": vocab_size + VOCAB_SLACK,
         "context_size": ref.shape[1] + CONTEXT_SLACK,
         "task_info": {

@@ -124,8 +124,11 @@ def sample_batch(  # noqa: PLR0913
 
 
 @torch.no_grad()
-def eval_free_gen(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
-    """Evaluate free-generation accuracy on the last 6 output positions."""
+def eval_free_gen(
+    net: nanoGPT, docs_BL: np.ndarray, prompt_len: int,
+    eval_start: int, eval_end: int,
+) -> float:
+    """Evaluate free-generation accuracy on tokens [eval_start, eval_end)."""
     if docs_BL.shape[0] == 0:
         return 0.0
     net.eval()
@@ -138,12 +141,10 @@ def eval_free_gen(net: nanoGPT, docs_BL: np.ndarray, prompt_len: int) -> float:
     for dat, tgt in loader:
         dat_d, tgt_d = dat.to(DEVICE, non_blocking=True), tgt.to(DEVICE, non_blocking=True)
         full = net.generate(dat_d[:, :prompt_len], n_new)
-        gen = full[:, prompt_len:]
-        ref = tgt_d[:, prompt_len - 1 :]
-        ml = min(gen.shape[1], ref.shape[1])
-        last6 = max(0, ml - 6)
-        correct_t += (gen[:, last6:ml] == ref[:, last6:ml]).float().sum()
-        total += ref[:, last6:ml].numel()
+        gen = full[:, eval_start:eval_end]
+        ref = tgt_d[:, eval_start - 1 : eval_end - 1]
+        correct_t += (gen == ref).float().sum()
+        total += ref.numel()
     net.train()
     return correct_t.item() / max(total, 1)
 
@@ -299,7 +300,7 @@ def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) 
     progress_file.write_text("0")
 
     with Path(shared_data_path).open("rb") as f:
-        target_pool, bg_pool, eval_docs, prompt_len, _ = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool, eval_docs, prompt_len, eval_start, eval_end = pickle.load(f)  # noqa: S301
 
     pretrain_log = None
     if pretrain_log_path and Path(pretrain_log_path).exists():
@@ -343,7 +344,8 @@ def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) 
         log["loss"].append(loss_val)
         log["phase"].append(phase)
         for k in EVAL_KEYS:
-            log[k].append(eval_free_gen(net, eval_docs[k.removeprefix("acc_")], prompt_len))
+            log[k].append(eval_free_gen(net, eval_docs[k.removeprefix("acc_")],
+            prompt_len, eval_start, eval_end))
         log[LOSS_OTHER].append(eval_loss(net, eval_docs[CLASS_OTHER]))
         log[LOSS_BURST].append(eval_loss(net, eval_docs[CLASS_BURST]))
         net.train()
