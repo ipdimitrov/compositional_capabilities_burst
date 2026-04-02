@@ -15,15 +15,13 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from burst.config import ACTIVATION_COLLECT_BATCH_SIZE
 from burst.core.train_utils import DEVICE
 
 if TYPE_CHECKING:
     import numpy as np
 
     from net.nanogpt import nanoGPT
-
-COLLECT_BATCH_SIZE = 512
-
 
 @torch.no_grad()
 def collect_activations_KPTN(  # noqa: N802
@@ -43,8 +41,8 @@ def collect_activations_KPTN(  # noqa: N802
 
     all_layer_acts: list[list[torch.Tensor]] = [[] for _ in range(K)]
 
-    for start in range(0, P, COLLECT_BATCH_SIZE):
-        end = min(start + COLLECT_BATCH_SIZE, P)
+    for start in range(0, P, ACTIVATION_COLLECT_BATCH_SIZE):
+        end = min(start + ACTIVATION_COLLECT_BATCH_SIZE, P)
         tokens_bL = torch.as_tensor(docs_BL[start:end], dtype=torch.long, device=DEVICE)
         inp_bT = tokens_bL[:, :-1]
 

@@ -42,6 +42,7 @@ from einops import rearrange  # noqa: E402
 from burst.config import (  # noqa: E402
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
+    MIN_VECTORS_FOR_SIMILARITY,
     PHASE_BURST,
     PHASE_PRE_BURST,
     PHASE_REVERSION,
@@ -59,9 +60,7 @@ from burst.rng import get_rng, seed_all  # noqa: E402
 from net.nanogpt import nanoGPT  # noqa: E402
 
 warnings.filterwarnings("ignore", message=".*Full backward hook.*no inputs require gradients.*")
-MATRIX_NDIM = 2
 NEAR_ZERO = 1e-12
-MIN_VECTORS_FOR_SIMILARITY = 2
 
 # ---------------------------------------------------------------------------
 # Feature flags — comment out any key to skip that metric entirely.
@@ -221,7 +220,7 @@ def _grad_rank_per_layer(
         shapes = [
             param_map[pn].shape
             for pn in pnames
-            if pn in param_map and len(param_map[pn].shape) == MATRIX_NDIM
+            if pn in param_map and len(param_map[pn].shape) == 2  # type: ignore[operator]
         ]
         if shapes:
             m, n = shapes[0]

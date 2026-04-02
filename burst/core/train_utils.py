@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import OmegaConf
 
+from burst.config import N_PROBE_DOCS_PER_TASK
 from burst.core.train.worker import n_target_for_step, sample_batch
 from burst.rng import seed_all
 from net.nanogpt import nanoGPT
@@ -216,9 +217,6 @@ def pad_to_len(arr: np.ndarray, target_len: int) -> np.ndarray:
         return arr[:, :target_len]
     pad_w = target_len - arr.shape[1]
     return np.concatenate([arr, np.zeros((arr.shape[0], pad_w), dtype=arr.dtype)], axis=1)
-
-
-N_PROBE_DOCS_PER_TASK = 200
 
 
 def build_probe_docs(

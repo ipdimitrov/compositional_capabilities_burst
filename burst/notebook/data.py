@@ -8,22 +8,25 @@ import itertools
 
 import numpy as np
 
-from burst.config import CLASS_BURST, CLASS_OTHER, DATA_SEED, N_A, burst_eval_range
+from burst.config import (
+    BURST_POS,
+    CLASS_BURST,
+    CLASS_OTHER,
+    CONTEXT_SLACK,
+    DATA_SEED,
+    DEPTH,
+    N_A,
+    N_ALPH,
+    N_BURST,
+    N_DOCS,
+    N_EVAL,
+    SEQ_LEN,
+    VOCAB_SLACK,
+    burst_eval_range,
+)
 from burst.core.data import pad_pools_to_same_length
 from burst.rng import get_rng, seed_all
 from burst.types import ExperimentData
-
-N_ALPH = 10
-SEQ_LEN = 6
-DEPTH = 3
-BURST_POS = 3
-N_BURST = 4
-N_DOCS = 100
-N_EVAL = 100
-
-VOCAB_SLACK = 10
-CONTEXT_SLACK = 5
-
 
 def _cat(pool: dict[tuple, np.ndarray], fallback_cols: int = 1) -> np.ndarray:
     if not pool:

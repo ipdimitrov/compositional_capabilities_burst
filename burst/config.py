@@ -127,6 +127,25 @@ REPRO_MANIFEST_FILENAME = "repro_manifest.json"
 CORE_CHARTS_DIRNAME = "core_charts"
 CORE_CLI_MODES = ("train", "gradients", "bundle", "charts", "pipeline")
 
+# ---------------------------------------------------------------------------
+# Training / evaluation thresholds
+# ---------------------------------------------------------------------------
+PRETRAIN_ACC_THRESHOLD = 0.99
+GRAD_NORM_EPS = 1e-6
+CHECKPOINT_EVERY = 10
+MIN_VECTORS_FOR_SIMILARITY = 2
+N_PROBE_DOCS_PER_TASK = 200
+ACTIVATION_COLLECT_BATCH_SIZE = 512
+N_ALPH = 10
+SEQ_LEN = 6
+DEPTH = 3
+BURST_POS = 3
+N_BURST = 4
+N_DOCS = 100
+N_EVAL = 100
+VOCAB_SLACK = 10
+CONTEXT_SLACK = 5
+
 
 def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) -> int:
     """Burst phase length for a given schedule (original "current" mode).

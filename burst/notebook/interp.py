@@ -13,7 +13,6 @@ import torch.nn.functional as F
 
 from burst.notebook.model import DEVICE, load_model
 
-MATRIX_NDIM = 2
 NEAR_ZERO = 1e-10
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -105,7 +104,7 @@ def weight_delta_svd(
     """SVD analysis of weight deltas for 2D weight matrices."""
     results = {}
     for k, v_ref in sd_ref.items():
-        if k not in sd_now or v_ref.dim() != MATRIX_NDIM:
+        if k not in sd_now or v_ref.dim() != 2:  # type: ignore[operator]
             continue
         delta = sd_now[k].float() - v_ref.float()
         S = torch.linalg.svdvals(delta)

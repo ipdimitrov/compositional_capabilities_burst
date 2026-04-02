@@ -1,5 +1,3 @@
-"""Matplotlib styling helpers for consistent figure appearance."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,46 +12,45 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
-FIG_DPI = 220
-SERIF_STACK = ["STIXGeneral", "Times New Roman", "DejaVu Serif"]
+HALF_COL_WIDTH = 3.25
+FULL_COL_WIDTH = 6.75
 
 
 def apply_paper_style() -> None:
-    """Set matplotlib rcParams for publication-quality figures."""
     plt.rcParams.update(
         {
             "font.family": "serif",
-            "font.serif": SERIF_STACK,
+            "font.serif": ["Times"],
             "mathtext.fontset": "stix",
-            "axes.titlesize": 18,
-            "axes.titleweight": "bold",
-            "axes.labelsize": 15,
-            "axes.linewidth": 1.1,
+            "mathtext.rm": "Times",
+            "mathtext.it": "Times:italic",
+            "mathtext.bf": "Times:bold",
+            "font.size": 8,
+            "axes.titlesize": 8,
+            "axes.labelsize": 8,
+            "xtick.labelsize": 6,
+            "ytick.labelsize": 6,
+            "legend.fontsize": 6,
+            "legend.frameon": False,
+            "axes.linewidth": 0.5,
+            "lines.linewidth": 1.0,
             "axes.spines.top": False,
             "axes.spines.right": False,
-            "xtick.labelsize": 12,
-            "ytick.labelsize": 12,
-            "legend.fontsize": 11,
-            "legend.frameon": False,
             "grid.alpha": 0.16,
-            "grid.linewidth": 0.7,
-            "savefig.dpi": FIG_DPI,
-            "figure.dpi": FIG_DPI,
+            "grid.linewidth": 0.5,
+            "pdf.fonttype": 42,
+            "figure.figsize": (HALF_COL_WIDTH, 2.0),
         }
     )
 
 
-def style_axes(ax: Axes, xlabel: str, ylabel: str, title: str = "") -> None:
-    """Apply standard axis labels, title, and grid."""
+def style_axes(ax: Axes, xlabel: str, ylabel: str) -> None:
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    if title:
-        ax.set_title(title, pad=10)
     ax.grid(visible=True)
 
 
 def save_figure(fig: Figure, path: str | Path) -> None:
-    """Save a figure to disk and close it."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()

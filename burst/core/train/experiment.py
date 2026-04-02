@@ -64,6 +64,7 @@ from burst.config import (
     LOSS_OTHER,
     MODE_CURRENT,
     N_A,
+    PRETRAIN_ACC_THRESHOLD,
     ExperimentConfig,
     TrainConfig,
     batch_size_for_mode,
@@ -86,8 +87,6 @@ from burst.rng import get_rng, seed_all
 from net.runner import configure_optimizers, update_phase_lr
 
 logger = logging.getLogger(__name__)
-
-PRETRAIN_ACC_THRESHOLD = 0.99
 
 
 class NpEncoder(json.JSONEncoder):

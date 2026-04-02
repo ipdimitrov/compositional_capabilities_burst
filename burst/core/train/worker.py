@@ -22,9 +22,11 @@ import torch
 
 from burst.config import (
     ACC_BURST,
+    CHECKPOINT_EVERY,
     CLASS_BURST,
     CLASS_OTHER,
     EVAL_KEYS,
+    GRAD_NORM_EPS,
     LOSS_BURST,
     LOSS_OTHER,
     MIXED_FRACTIONS,
@@ -48,8 +50,6 @@ if TYPE_CHECKING:
     from burst.types import WorkerJob
     from net.nanogpt import nanoGPT
 
-GRAD_NORM_EPS = 1e-6
-CHECKPOINT_EVERY = 10
 
 def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batch_size: int) -> int:
     """Return the number of special-class examples in a batch at a given burst-phase step.

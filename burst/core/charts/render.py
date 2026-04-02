@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
-from burst.config import ACC_BURST, ACC_OTHER, SCHED_COLORS, SCHED_DISPLAY, reversion_life_label
+from burst.config import ACC_BURST, ACC_OTHER, CLASS_BURST, CLASS_OTHER, SCHED_COLORS, SCHED_DISPLAY, reversion_life_label
 from burst.core.charts.style import apply_paper_style, save_figure, style_axes
 
 
@@ -29,23 +29,9 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
     paths = [
         _plot_schedule_bars(bundle, out_dir),
         _plot_lr_curves(bundle, out_dir),
-        _plot_overlay(
-            bundle,
-            out_dir,
-            ACC_BURST,
-            "Special Accuracy",
-            "Special Class Accuracy",
-            f"overlay_all_{ACC_BURST}.png",
-        ),
-        _plot_overlay(
-            bundle,
-            out_dir,
-            ACC_OTHER,
-            "Other Accuracy",
-            "Other Class Accuracy",
-            f"overlay_all_{ACC_OTHER}.png",
-        ),
-        _plot_overlay(bundle, out_dir, "loss", "Loss", "Training Loss", "overlay_all_loss.png"),
+        _plot_overlay(bundle, out_dir, ACC_BURST, f"{CLASS_BURST} Accuracy", f"overlay_{ACC_BURST.upper()}_{CLASS_BURST}_class_accuracy.png"),
+        _plot_overlay(bundle, out_dir, ACC_OTHER, f"{CLASS_OTHER} Accuracy", f"overlay_{ACC_OTHER.upper()}_{CLASS_OTHER}_class_accuracy.png"),
+        _plot_overlay(bundle, out_dir, "loss", "Loss", "overlay_LOSS_training_loss.png"),
         _plot_auc_bars(bundle, out_dir),
         _plot_summary_table(bundle, out_dir),
         _plot_reversion_zoom(bundle, out_dir),
@@ -81,7 +67,6 @@ def _plot_schedule_bars(bundle: dict, out_dir: Path) -> Path:
         )
         ax.set_yticks([0.0, 0.5, 1.0])
     style_axes(axes[-1], "Step", "Burst Fraction")
-    axes[0].set_title("Training Schedule")
     return _save(fig, out_dir / "schedule_bars.png")
 
 
@@ -97,15 +82,12 @@ def _plot_lr_curves(bundle: dict, out_dir: Path) -> Path:
             lw=2.0,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
-    style_axes(ax, "Step", "Learning Rate", "Learning Rate")
+    style_axes(ax, "Step", "Learning Rate")
     ax.legend(loc="upper right", ncol=2)
     return _save(fig, out_dir / "lr_schedule.png")
 
 
-def _plot_overlay(  # noqa: PLR0913
-    bundle: dict, out_dir: Path, metric: str, ylabel: str, title: str, filename: str
-) -> Path:
-    """Plot a single metric overlaid across all schedules."""
+def _plot_overlay(bundle: dict, out_dir: Path, metric: str, ylabel: str, filename: str) -> Path:
     fig, ax = plt.subplots(figsize=(11, 6))
     max_burst_end = 0
     for schedule in bundle["config"]["schedules"]:
@@ -128,7 +110,7 @@ def _plot_overlay(  # noqa: PLR0913
     if metric != "loss":
         ax.set_ylim(-0.05, 1.05)
     _annotate_global_phase_boundaries(ax, max_burst_end, _max_total_steps(bundle))
-    style_axes(ax, "Step", ylabel, title)
+    style_axes(ax, "Step", ylabel)
     ax.legend(loc="best", ncol=2)
     path = _save(fig, out_dir / filename)
     _write_aliases(path, _overlay_aliases(filename))
@@ -150,8 +132,8 @@ def _plot_auc_bars(bundle: dict, out_dir: Path) -> Path:
     ax.set_xticklabels(
         [SCHED_DISPLAY.get(schedule, schedule) for schedule in schedules], rotation=25, ha="right"
     )
-    style_axes(ax, "", "AUC", "Reversion AUC")
-    return _save(fig, out_dir / "auc_bars.png")
+    style_axes(ax, "", "AUC")
+    return _save(fig, out_dir / "reversion_auc_bars.png")
 
 
 def _plot_summary_table(bundle: dict, out_dir: Path) -> Path:
@@ -194,7 +176,6 @@ def _plot_summary_table(bundle: dict, out_dir: Path) -> Path:
             cell.set_facecolor(SCHED_COLORS[schedule] + "22")
             cell.set_text_props(fontweight="bold")
         cell.set_edgecolor("#CCCCCC")
-    ax.set_title("Summary Table", pad=10)
     return _save(fig, out_dir / "summary_table.png")
 
 
@@ -224,9 +205,9 @@ def _plot_reversion_zoom(bundle: dict, out_dir: Path) -> Path:
             alpha=0.12,
         )
     ax.set_ylim(-0.05, 1.05)
-    style_axes(ax, "Reversion Step", "Special Accuracy", "Forgetting Speed")
+    style_axes(ax, "Reversion Step", "Special Accuracy")
     ax.legend(loc="upper right", ncol=2)
-    return _save(fig, out_dir / "reversion_zoom.png")
+    return _save(fig, out_dir / "reversion_zoom_forgetting_speed.png")
 
 
 def _plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
@@ -252,7 +233,7 @@ def _plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.12)
     ax.axhline(0.0, color="#666666", ls=":", lw=1.0)
     _annotate_global_phase_boundaries(ax, _max_burst_steps(bundle), _max_total_steps(bundle))
-    style_axes(ax, "Step", "Cosine", "Grad Cosine")
+    style_axes(ax, "Step", "Cosine")
     ax.legend(loc="best", ncol=2)
     path = _save(fig, out_dir / "grad_cosine_burst_vs_other.png")
     _write_aliases(path, [out_dir / "grad_cosine.png"])
@@ -282,8 +263,8 @@ def _plot_grad_cosine_per_schedule(bundle: dict, out_dir: Path) -> Path | None:
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.14)
         ax.axhline(0.0, color="#666666", ls=":", lw=1.0)
         _annotate_global_phase_boundaries(ax, burst_end, steps[-1])
-        style_axes(ax, "Step", "Cosine", f"{SCHED_DISPLAY.get(schedule, schedule)} Grad Cosine")
-        path = _save(fig, out_dir / f"grad_cosine_per_schedule_{schedule}.png")
+        style_axes(ax, "Step", "Cosine")
+        path = _save(fig, out_dir / f"grad_cosine_{schedule.upper()}_per_schedule.png")
         _write_aliases(path, [out_dir / f"grad_cosine_{schedule}.png"])
         if first_path is None:
             first_path = path
@@ -339,10 +320,10 @@ def _plot_grad_norms(bundle: dict, out_dir: Path) -> Path | None:
 
     _annotate_global_phase_boundaries(axes[0], _max_burst_steps(bundle), _max_total_steps(bundle))
     _annotate_global_phase_boundaries(axes[1], _max_burst_steps(bundle), _max_total_steps(bundle))
-    style_axes(axes[0], "Step", "L2 Norm", "Burst Grad Norm")
-    style_axes(axes[1], "Step", "L2 Norm", "Other Grad Norm")
+    style_axes(axes[0], "Step", "L2 Norm")
+    style_axes(axes[1], "Step", "L2 Norm")
     axes[1].legend(loc="best", ncol=1)
-    path = _save(fig, out_dir / "grad_norm_l2.png")
+    path = _save(fig, out_dir / "grad_norm_l2_burst_and_other.png")
     _write_aliases(path, [out_dir / "grad_norms.png"])
     return path
 
@@ -397,10 +378,10 @@ def _plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
     axes[0].axhline(0.0, color="#666666", ls=":", lw=1.0)
     _annotate_global_phase_boundaries(axes[0], _max_burst_steps(bundle), _max_total_steps(bundle))
     _annotate_global_phase_boundaries(axes[1], _max_burst_steps(bundle), _max_total_steps(bundle))
-    style_axes(axes[0], "Step", "Signed Dot", "Grad Norm x Cosine")
-    style_axes(axes[1], "Step", "Power", "Interference Power")
+    style_axes(axes[0], "Step", "Signed Dot")
+    style_axes(axes[1], "Step", "Power")
     axes[1].legend(loc="best", ncol=1)
-    return _save(fig, out_dir / "grad_norm_x_cosine.png")
+    return _save(fig, out_dir / "grad_norm_x_cosine_and_interference_power.png")
 
 
 def _plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
@@ -440,7 +421,7 @@ def _plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
     axes[0].axhline(0.0, color="#666666", ls=":", lw=1.0)
     axes[0].set_xticks(xs)
     axes[0].set_xticklabels(labels)
-    style_axes(axes[0], "Concentration %", "Projection", "Centroid Drift (Late Layers)")
+    style_axes(axes[0], "Concentration %", "Projection")
 
     axes[1].plot(xs, shift_mean, color="#1B9E77", lw=2.4, marker="o", ms=6)
     axes[1].fill_between(
@@ -448,9 +429,9 @@ def _plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
     )
     axes[1].set_xticks(xs)
     axes[1].set_xticklabels(labels)
-    style_axes(axes[1], "Concentration %", "Normalized Shift", "Other Shift Norm (Late Layers)")
+    style_axes(axes[1], "Concentration %", "Normalized Shift")
 
-    path = _save(fig, out_dir / "representation_drift_summary.png")
+    path = _save(fig, out_dir / "representation_drift_centroid_and_shift.png")
     _write_aliases(path, [out_dir / "rep_drift_summary.png"])
     return path
 
@@ -478,9 +459,9 @@ def _plot_per_schedule(bundle: dict, out_dir: Path) -> list[Path]:
             ax.axvline(pre_steps, color="black", ls="--", lw=1.2, alpha=0.65)
         ax.axvline(burst_end, color="black", ls="--", lw=1.2, alpha=0.65)
         ax.set_ylim(-0.05, 1.05)
-        style_axes(ax, "Step", "Accuracy", SCHED_DISPLAY.get(schedule, schedule))
+        style_axes(ax, "Step", "Accuracy")
         ax.legend(loc="best")
-        path = _save(fig, out_dir / f"per_sched_{schedule}.png")
+        path = _save(fig, out_dir / f"per_sched_{schedule.upper()}_accuracy.png")
         _write_aliases(path, [out_dir / f"per_schedule_{schedule}.png"])
         paths.append(path)
     return paths
@@ -501,17 +482,12 @@ def _save(fig: Figure, path: Path) -> Path:
     return path
 
 
-_OVERLAY_BURST_FILENAME = f"overlay_all_{ACC_BURST}.png"
-_OVERLAY_OTHER_FILENAME = f"overlay_all_{ACC_OTHER}.png"
-
-
 def _overlay_aliases(filename: str) -> list[Path]:
-    """Return short alias paths for an overlay chart filename."""
-    if filename == _OVERLAY_BURST_FILENAME:
+    if f"_{ACC_BURST.upper()}_" in filename:
         return [Path("overlay_burst.png")]
-    if filename == _OVERLAY_OTHER_FILENAME:
+    if f"_{ACC_OTHER.upper()}_" in filename:
         return [Path("overlay_other.png")]
-    if filename == "overlay_all_loss.png":
+    if "_LOSS_" in filename:
         return [Path("overlay_loss.png")]
     return []
 
@@ -551,7 +527,7 @@ def _annotate_global_phase_boundaries(ax: Axes, burst_end: float, total_steps: f
     ax.axvline(burst_end, color="black", ls="--", lw=1.15, alpha=0.6)
     ymax = ax.get_ylim()[1]
     ax.text(
-        burst_end * 0.5, ymax * 0.97, "SPECIAL", ha="center", va="top", fontsize=10, color="gray"
+        burst_end * 0.5, ymax * 0.97, "SPECIAL", ha="center", va="top", fontsize=6, color="gray"
     )
     ax.text(
         burst_end + max(total_steps - burst_end, 1) * 0.5,
@@ -559,7 +535,7 @@ def _annotate_global_phase_boundaries(ax: Axes, burst_end: float, total_steps: f
         "ALL-BUT-SPECIAL",
         ha="center",
         va="top",
-        fontsize=10,
+        fontsize=6,
         color="gray",
     )
 
