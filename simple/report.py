@@ -4,6 +4,7 @@ All functions accept lists of result dicts so you can compare across sweep
 configurations.  Finetune and forget are shown as a single continuous
 timeline per burst fraction wherever possible.
 """
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -13,15 +14,17 @@ from pathlib import Path
 
 # ── smoothing helper ──────────────────────────────────────────────────────
 
+ENABLE_SMOOTHING = os.environ.get("ENABLE_SMOOTHING", "0") == "1"
 def _smooth(vals, alpha=0.3):
     """Exponential moving average smoothing."""
+    if ENABLE_SMOOTHING == "0":
+        return vals
     out = []
     s = vals[0]
     for v in vals:
         s = alpha * v + (1 - alpha) * s
         out.append(s)
     return out
-
 
 # ── colour helpers ────────────────────────────────────────────────────────
 
@@ -394,25 +397,27 @@ def plot_weight_drift(ft_results, fg_results, figsize=(14, 5)):
 
 
 def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
-    """Gradient norms on a continuous finetune→forget axis.
-
-    Top: burst-only and bg-only norms (finetune only, forget has no burst training).
-    Bottom-left: burst/bg ratio (finetune).  Bottom-right: bg norm continuous.
-    """
-    ft_list = ft_results if isinstance(ft_results, list) else [ft_results]
+    """Gradient norms on a continuous finetune→forget axis."""
     fig, axes = plt.subplots(2, 2, figsize=figsize)
 
-    # Top-left: burst gradient norm (finetune only)
+    # Top-left: burst gradient norm continuous
     ax = axes[0, 0]
-    for r in ft_list:
-        log = r["log"]
-        if "grad_norm_burst" not in log: continue
-        ax.plot(log["step"], _smooth(log["grad_norm_burst"]), color=_frac_color(r["burst_frac"]),
-                label=r["tag"], linewidth=1.5)
-    ax.set_xlabel("Step"); ax.set_ylabel("Gradient Norm")
-    ax.set_title("Burst-Only Gradient Norm"); ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+        if "grad_norm_burst" not in ft_log: continue
+        ax.plot(ft_log["step"], _smooth(ft_log["grad_norm_burst"]), color=color,
+                label=ft["tag"], linewidth=1.5)
+        if fg is not None and "grad_norm_burst" in fg["log"] and fg["log"]["grad_norm_burst"]:
+            fg_steps = _offset_fg_steps(ft_log, fg["log"])
+            ax.plot(fg_steps, _smooth(fg["log"]["grad_norm_burst"]), color=color, linewidth=1.5)
+    pairs = _pair_ft_fg(ft_results, fg_results)
+    if pairs and pairs[0][0]["log"]["step"]:
+        _phase_boundary(ax, pairs[0][0]["log"])
+    ax.set_xlabel("Step (finetune | forget)"); ax.set_ylabel("Gradient Norm")
+    ax.set_title("Burst Gradient Norm"); ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
-    # Top-right: background gradient norm continuous (finetune bg → forget bg)
+    # Top-right: background gradient norm continuous
     ax = axes[0, 1]
     for ft, fg in _pair_ft_fg(ft_results, fg_results):
         color = _frac_color(ft["burst_frac"])
@@ -423,23 +428,31 @@ def plot_grad_norms(ft_results, fg_results, figsize=(14, 8)):
         if fg is not None and "grad_norm" in fg["log"] and fg["log"]["grad_norm"]:
             fg_steps = _offset_fg_steps(ft_log, fg["log"])
             ax.plot(fg_steps, _smooth(fg["log"]["grad_norm"]), color=color, linewidth=1.5)
-    pairs = _pair_ft_fg(ft_results, fg_results)
     if pairs and pairs[0][0]["log"]["step"]:
         _phase_boundary(ax, pairs[0][0]["log"])
     ax.set_xlabel("Step (finetune | forget)"); ax.set_ylabel("Gradient Norm")
     ax.set_title("Background Gradient Norm"); ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
-    # Bottom-left: burst/bg ratio (finetune only)
+    # Bottom-left: burst/bg ratio continuous
     ax = axes[1, 0]
-    for r in ft_list:
-        log = r["log"]
-        if "grad_norm_burst" not in log or "grad_norm_bg" not in log: continue
-        ratio = [b / (g + 1e-10) for b, g in zip(log["grad_norm_burst"], log["grad_norm_bg"])]
-        ax.plot(log["step"], _smooth(ratio), color=_frac_color(r["burst_frac"]),
-                label=r["tag"], linewidth=1.5)
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+        if "grad_norm_burst" not in ft_log or "grad_norm_bg" not in ft_log: continue
+        ratio = [b / (g + 1e-10) for b, g in zip(ft_log["grad_norm_burst"], ft_log["grad_norm_bg"])]
+        ax.plot(ft_log["step"], _smooth(ratio), color=color,
+                label=ft["tag"], linewidth=1.5)
+        if fg is not None:
+            fg_log = fg["log"]
+            if "grad_norm_burst" in fg_log and fg_log["grad_norm_burst"] and "grad_norm" in fg_log and fg_log["grad_norm"]:
+                fg_steps = _offset_fg_steps(ft_log, fg_log)
+                fg_ratio = [b / (g + 1e-10) for b, g in zip(fg_log["grad_norm_burst"], fg_log["grad_norm"])]
+                ax.plot(fg_steps, _smooth(fg_ratio), color=color, linewidth=1.5)
     ax.axhline(1.0, color="black", linewidth=0.5, linestyle=":")
-    ax.set_xlabel("Step"); ax.set_ylabel("Burst / Background Ratio")
-    ax.set_title("Gradient Norm Ratio (finetune)"); ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+    if pairs and pairs[0][0]["log"]["step"]:
+        _phase_boundary(ax, pairs[0][0]["log"])
+    ax.set_xlabel("Step (finetune | forget)"); ax.set_ylabel("Burst / Background Ratio")
+    ax.set_title("Gradient Norm Ratio"); ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
     # Bottom-right: training batch gradient norm continuous
     ax = axes[1, 1]
@@ -546,6 +559,185 @@ def plot_grad_alignment_norm(ft_results, fg_results, figsize=(14, 5)):
     return fig
 
 
+def plot_grad_projection(ft_results, fg_results, figsize=(14, 5)):
+    """BG gradient projection onto burst direction.
+
+    Left: alignment fraction = (g_bg · ĝ_burst)² / ‖g_bg‖²
+          → what fraction of bg gradient energy is in the burst direction.
+    Right: projected magnitude = |g_bg · ĝ_burst|
+          → absolute force bg exerts along the burst direction.
+    Continuous finetune → forget axis.
+    """
+    fig, (ax_frac, ax_mag) = plt.subplots(1, 2, figsize=figsize)
+    drawn_boundary = False
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+
+        # finetune phase
+        if "grad_align_frac" in ft_log and ft_log["grad_align_frac"]:
+            ax_frac.plot(ft_log["step"], _smooth(ft_log["grad_align_frac"]),
+                         color=color, linewidth=2, label=ft["tag"])
+        if "grad_proj_magnitude" in ft_log and ft_log["grad_proj_magnitude"]:
+            ax_mag.plot(ft_log["step"], _smooth(ft_log["grad_proj_magnitude"]),
+                        color=color, linewidth=2, label=ft["tag"])
+
+        # forget phase
+        if fg is not None:
+            fg_log = fg["log"]
+            fg_steps = _offset_fg_steps(ft_log, fg_log)
+            if "grad_align_frac" in fg_log and fg_log["grad_align_frac"]:
+                ax_frac.plot(fg_steps, _smooth(fg_log["grad_align_frac"]),
+                             color=color, linewidth=2)
+            if "grad_proj_magnitude" in fg_log and fg_log["grad_proj_magnitude"]:
+                ax_mag.plot(fg_steps, _smooth(fg_log["grad_proj_magnitude"]),
+                            color=color, linewidth=2)
+
+        if not drawn_boundary and ft_log["step"]:
+            _phase_boundary(ax_frac, ft_log)
+            _phase_boundary(ax_mag, ft_log)
+            drawn_boundary = True
+
+    ax_frac.set_xlabel("Step (finetune | forget)")
+    ax_frac.set_ylabel("(g_bg · ĝ_burst)² / ‖g_bg‖²")
+    ax_frac.set_title("BG Gradient Alignment Fraction")
+    ax_frac.legend(fontsize=7); ax_frac.grid(True, alpha=0.3)
+
+    ax_mag.set_xlabel("Step (finetune | forget)")
+    ax_mag.set_ylabel("|g_bg · ĝ_burst|")
+    ax_mag.set_title("BG Gradient Projected Magnitude")
+    ax_mag.legend(fontsize=7); ax_mag.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_grad_stability(ft_results, fg_results, figsize=(14, 5)):
+    """Gradient directional stability: cosine between consecutive eval steps.
+
+    Left: BG gradient autocorrelation.  Right: Burst gradient autocorrelation.
+    High = gradient direction is stable step-to-step (effective constraint).
+    Low = gradient is rotating (can't act as consistent projector).
+    Continuous finetune → forget axis.
+    """
+    fig, (ax_bg, ax_burst) = plt.subplots(1, 2, figsize=figsize)
+    drawn_boundary = False
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+
+        # finetune phase
+        if "grad_autocorr_bg" in ft_log and ft_log["grad_autocorr_bg"]:
+            # skip first NaN
+            steps = ft_log["step"][1:]
+            vals_bg = ft_log["grad_autocorr_bg"][1:]
+            vals_burst = ft_log["grad_autocorr_burst"][1:]
+            if vals_bg:
+                ax_bg.plot(steps, _smooth(vals_bg),
+                           color=color, linewidth=2, label=ft["tag"])
+            if vals_burst:
+                ax_burst.plot(steps, _smooth(vals_burst),
+                              color=color, linewidth=2, label=ft["tag"])
+
+        # forget phase
+        if fg is not None:
+            fg_log = fg["log"]
+            if "grad_autocorr_bg" in fg_log and fg_log["grad_autocorr_bg"]:
+                fg_steps = _offset_fg_steps(ft_log, fg_log)
+                # skip first NaN
+                fg_s = fg_steps[1:]
+                fg_bg = fg_log["grad_autocorr_bg"][1:]
+                fg_burst = fg_log["grad_autocorr_burst"][1:]
+                if fg_bg:
+                    ax_bg.plot(fg_s, _smooth(fg_bg),
+                               color=color, linewidth=2)
+                if fg_burst:
+                    ax_burst.plot(fg_s, _smooth(fg_burst),
+                                  color=color, linewidth=2)
+
+        if not drawn_boundary and ft_log["step"]:
+            _phase_boundary(ax_bg, ft_log)
+            _phase_boundary(ax_burst, ft_log)
+            drawn_boundary = True
+
+    for ax, title in [(ax_bg, "BG Gradient Stability"),
+                      (ax_burst, "Burst Gradient Stability")]:
+        ax.set_xlabel("Step (finetune | forget)")
+        ax.set_ylabel("cos(g_t, g_{t-1})")
+        ax.set_title(title)
+        ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_grad_effective_velocity(ft_results, fg_results, figsize=(14, 5)):
+    """Effective velocity: cos(g_t, g_{t-1}) × ‖g_t‖.
+
+    High = large gradient in a consistent direction (real movement).
+    Low = weak or rotating gradient (going nowhere).
+    Left: BG.  Right: Burst.  Continuous finetune → forget axis.
+    """
+    fig, (ax_bg, ax_burst) = plt.subplots(1, 2, figsize=figsize)
+    drawn_boundary = False
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+
+        # finetune phase
+        ac_bg = ft_log.get("grad_autocorr_bg", [])
+        ac_burst = ft_log.get("grad_autocorr_burst", [])
+        gn_bg = ft_log.get("grad_norm_bg", [])
+        gn_burst = ft_log.get("grad_norm_burst", [])
+
+        if ac_bg and gn_bg and len(ac_bg) == len(gn_bg):
+            vel_bg = [a * n for a, n in zip(ac_bg[1:], gn_bg[1:])]
+            if vel_bg:
+                ax_bg.plot(ft_log["step"][1:], _smooth(vel_bg),
+                           color=color, linewidth=2, label=ft["tag"])
+        if ac_burst and gn_burst and len(ac_burst) == len(gn_burst):
+            vel_burst = [a * n for a, n in zip(ac_burst[1:], gn_burst[1:])]
+            if vel_burst:
+                ax_burst.plot(ft_log["step"][1:], _smooth(vel_burst),
+                              color=color, linewidth=2, label=ft["tag"])
+
+        # forget phase
+        if fg is not None:
+            fg_log = fg["log"]
+            fg_steps = _offset_fg_steps(ft_log, fg_log)
+            fg_ac_bg = fg_log.get("grad_autocorr_bg", [])
+            fg_ac_burst = fg_log.get("grad_autocorr_burst", [])
+            fg_gn_bg = fg_log.get("grad_norm", [])
+            fg_gn_burst = fg_log.get("grad_norm_burst", [])
+
+            if fg_ac_bg and fg_gn_bg and len(fg_ac_bg) == len(fg_gn_bg):
+                vel = [a * n for a, n in zip(fg_ac_bg[1:], fg_gn_bg[1:])]
+                if vel:
+                    ax_bg.plot(fg_steps[1:], _smooth(vel),
+                               color=color, linewidth=2)
+            if fg_ac_burst and fg_gn_burst and len(fg_ac_burst) == len(fg_gn_burst):
+                vel = [a * n for a, n in zip(fg_ac_burst[1:], fg_gn_burst[1:])]
+                if vel:
+                    ax_burst.plot(fg_steps[1:], _smooth(vel),
+                                  color=color, linewidth=2)
+
+        if not drawn_boundary and ft_log["step"]:
+            _phase_boundary(ax_bg, ft_log)
+            _phase_boundary(ax_burst, ft_log)
+            drawn_boundary = True
+
+    for ax, title in [(ax_bg, "BG Effective Velocity"),
+                      (ax_burst, "Burst Effective Velocity")]:
+        ax.axhline(0, color="black", linewidth=0.5, linestyle=":")
+        ax.set_xlabel("Step (finetune | forget)")
+        ax.set_ylabel("cos(g_t, g_{t-1}) × ‖g_t‖")
+        ax.set_title(title)
+        ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
 def _build_layer_cosine_matrix(results):
     """Extract per-layer gradient cosine over steps into (steps, layers) matrix."""
     log = results["log"]
@@ -571,10 +763,16 @@ def plot_grad_norm_entropy(ft_results, fg_results, figsize=(14, 5)):
         color = _frac_color(ft["burst_frac"])
         ft_log = ft["log"]
 
-        # burst entropy (finetune only — no burst training during forget)
+        # burst entropy: continuous finetune → forget
         if "grad_norm_entropy_burst" in ft_log and ft_log["grad_norm_entropy_burst"]:
             ax_burst.plot(ft_log["step"], _smooth(ft_log["grad_norm_entropy_burst"]),
                           color=color, linewidth=2, label=ft["tag"])
+        if fg is not None:
+            fg_log_tmp = fg["log"]
+            if "grad_norm_entropy_burst" in fg_log_tmp and fg_log_tmp["grad_norm_entropy_burst"]:
+                fg_steps_tmp = _offset_fg_steps(ft_log, fg_log_tmp)
+                ax_burst.plot(fg_steps_tmp, _smooth(fg_log_tmp["grad_norm_entropy_burst"]),
+                              color=color, linewidth=2)
 
         # bg entropy: continuous finetune → forget
         if "grad_norm_entropy_bg" in ft_log and ft_log["grad_norm_entropy_bg"]:
@@ -592,7 +790,7 @@ def plot_grad_norm_entropy(ft_results, fg_results, figsize=(14, 5)):
             _phase_boundary(ax_bg, ft_log)
             drawn_boundary = True
 
-    ax_burst.set_xlabel("Step"); ax_burst.set_ylabel("Entropy")
+    ax_burst.set_xlabel("Step (finetune | forget)"); ax_burst.set_ylabel("Entropy")
     ax_burst.set_title("Burst Gradient Norm Entropy")
     ax_burst.legend(fontsize=7); ax_burst.grid(True, alpha=0.3)
 
@@ -679,8 +877,9 @@ def plot_per_layer_drift(analysis, phase="pt_ft", figsize=(12, 5)):
     ax.set_yticklabels([f"{t} ({analysis[t]['burst_frac']*100:.0f}%)" for t in tags], fontsize=8)
     ax.set_xticks(range(len(layer_names)))
     ax.set_xticklabels(layer_names, rotation=90, fontsize=6)
-    phase_label = "Pretrain → Finetune" if phase == "pt_ft" else "Finetune → Forget"
-    ax.set_title(f"Per-Layer Weight Drift ({phase_label})")
+    phase_labels = {"pt_ft": "Pretrain → Finetune", "ft_fg": "Finetune → Forget",
+                    "pt_fg": "Pretrain → Forget"}
+    ax.set_title(f"Per-Layer Weight Drift ({phase_labels.get(phase, phase)})")
     fig.colorbar(im, ax=ax, label="L2 Distance")
     fig.tight_layout()
     return fig

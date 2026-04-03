@@ -99,7 +99,12 @@ def forget(
            "weight_drift_from_ft": [], "weight_drift_from_pt": [],
            "grad_norm": [], "grad_norm_burst": [], "grad_cosine_burst_bg": [],
            "grad_cosine_per_layer": [],
-           "grad_norm_entropy": []}
+           "grad_norm_entropy": [], "grad_norm_entropy_burst": [],
+           "grad_align_frac": [], "grad_proj_magnitude": [],
+           "grad_autocorr_bg": [], "grad_autocorr_burst": []}
+
+    _prev_g_bg = None
+    _prev_g_burst = None
 
     net.train()
     pbar = tqdm(range(steps), desc=f"Forget {tag}", disable=quiet)
@@ -153,12 +158,37 @@ def forget(
                 g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
             log["grad_cosine_burst_bg"].append(gc)
 
+            # projection of bg gradient onto burst direction
+            gn_bg = g_bg.norm().item()
+            gn_burst = g_burst.norm().item()
+            dot = torch.dot(g_bg, g_burst).item()
+            align_frac = (dot ** 2) / (gn_bg ** 2 + 1e-10)
+            proj_mag = abs(dot) / (gn_burst + 1e-10)
+            log["grad_align_frac"].append(align_frac)
+            log["grad_proj_magnitude"].append(proj_mag)
+
+            # gradient directional stability (consecutive-step cosine)
+            import torch.nn.functional as _F2
+            if _prev_g_bg is not None:
+                ac_bg = _F2.cosine_similarity(
+                    g_bg.unsqueeze(0), _prev_g_bg.unsqueeze(0)).item()
+                ac_burst = _F2.cosine_similarity(
+                    g_burst.unsqueeze(0), _prev_g_burst.unsqueeze(0)).item()
+            else:
+                ac_bg = ac_burst = float("nan")
+            log["grad_autocorr_bg"].append(ac_bg)
+            log["grad_autocorr_burst"].append(ac_burst)
+            _prev_g_bg = g_bg.detach().clone()
+            _prev_g_burst = g_burst.detach().clone()
+
             # per-layer gradient cosine
             gc_layers = gradient_cosine_per_layer(net, burst_batch, batch)
             log["grad_cosine_per_layer"].append(gc_layers)
 
             ent, _ = grad_norm_entropy(net, batch)
+            ent_burst, _ = grad_norm_entropy(net, burst_batch)
             log["grad_norm_entropy"].append(ent)
+            log["grad_norm_entropy_burst"].append(ent_burst)
             net.zero_grad()
 
             pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",

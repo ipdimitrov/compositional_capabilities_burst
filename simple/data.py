@@ -99,6 +99,7 @@ def make_data(
     n_burst: int = N_BURST,
     depth: int = DEPTH,
     burst_pos: int = BURST_POS,
+    identity_burst_slot: bool = False,
     seed: int = DATA_SEED,
     n_docs: int = N_DOCS,
     n_eval: int = N_EVAL,
@@ -123,6 +124,11 @@ def make_data(
 
     pos_fns = {p: list(range((p - 1) * n_a + 1, p * n_a + 1))
                for p in range(1, depth + 1)}
+
+    # When identity_burst_slot=True, the burst position uses only the
+    # identity bijection (index 0) during pretraining — burst is purely additive.
+    if identity_burst_slot:
+        pos_fns[burst_pos] = [0]
 
     _, token_idx, fn_tok, vocab_size = _build_vocab(n_alph, len(bijections))
 

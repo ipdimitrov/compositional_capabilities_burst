@@ -109,10 +109,15 @@ def finetune(
            "weight_drift": [],
            "grad_norm_burst": [], "grad_norm_bg": [], "grad_norm_train": [],
            "grad_cosine_burst_bg": [], "grad_cosine_per_layer": [],
-           "grad_norm_entropy_burst": [], "grad_norm_entropy_bg": []}
+           "grad_norm_entropy_burst": [], "grad_norm_entropy_bg": [],
+           "grad_align_frac": [], "grad_proj_magnitude": [],
+           "grad_autocorr_bg": [], "grad_autocorr_burst": []}
 
     lr_start = lr * lr_start_frac
     lr_end = lr * lr_end_frac
+
+    _prev_g_bg = None
+    _prev_g_burst = None
 
     net.train()
     pbar = tqdm(range(steps), desc=f"Finetune {tag}", disable=quiet)
@@ -152,10 +157,30 @@ def finetune(
             gn_bg = g_bg.norm().item()
             gc = F.cosine_similarity(
                 g_burst.unsqueeze(0), g_bg.unsqueeze(0)).item()
+            # projection of bg gradient onto burst direction
+            dot = torch.dot(g_bg, g_burst).item()
+            align_frac = (dot ** 2) / (gn_bg ** 2 + 1e-10)  # (g_bg · ĝ_burst)² / ‖g_bg‖²
+            proj_mag = abs(dot) / (gn_burst + 1e-10)          # |g_bg · ĝ_burst|
+
             net.zero_grad()
             log["grad_norm_burst"].append(gn_burst)
             log["grad_norm_bg"].append(gn_bg)
             log["grad_cosine_burst_bg"].append(gc)
+            log["grad_align_frac"].append(align_frac)
+            log["grad_proj_magnitude"].append(proj_mag)
+
+            # gradient directional stability (consecutive-step cosine)
+            if _prev_g_bg is not None:
+                ac_bg = F.cosine_similarity(
+                    g_bg.unsqueeze(0), _prev_g_bg.unsqueeze(0)).item()
+                ac_burst = F.cosine_similarity(
+                    g_burst.unsqueeze(0), _prev_g_burst.unsqueeze(0)).item()
+            else:
+                ac_bg = ac_burst = float("nan")
+            log["grad_autocorr_bg"].append(ac_bg)
+            log["grad_autocorr_burst"].append(ac_burst)
+            _prev_g_bg = g_bg.detach().clone()
+            _prev_g_burst = g_burst.detach().clone()
 
             # per-layer gradient cosine
             gc_layers = gradient_cosine_per_layer(net, burst_batch, bg_batch)
