@@ -16,6 +16,7 @@ from simple.model import (
 from simple.interp import (
     state_dict_cpu, weight_drift_l2,
     _get_grad_vector, gradient_cosine_per_layer, grad_norm_entropy,
+    grad_effective_rank,
 )
 
 
@@ -101,10 +102,14 @@ def forget(
            "grad_cosine_per_layer": [],
            "grad_norm_entropy": [], "grad_norm_entropy_burst": [],
            "grad_align_frac": [], "grad_proj_magnitude": [],
-           "grad_autocorr_bg": [], "grad_autocorr_burst": []}
+           "grad_autocorr_bg": [], "grad_autocorr_burst": [],
+           "grad_bg_vs_ref": [], "grad_burst_vs_ref": [],
+           "grad_rank_burst": [], "grad_rank_bg": []}
 
     _prev_g_bg = None
     _prev_g_burst = None
+    _ref_g_bg = None
+    _ref_g_burst = None
 
     net.train()
     pbar = tqdm(range(steps), desc=f"Forget {tag}", disable=quiet)
@@ -181,6 +186,16 @@ def forget(
             _prev_g_bg = g_bg.detach().clone()
             _prev_g_burst = g_burst.detach().clone()
 
+            # gradient direction vs step-0 reference
+            if _ref_g_bg is None:
+                _ref_g_bg = g_bg.detach().clone()
+                _ref_g_burst = g_burst.detach().clone()
+            import torch.nn.functional as _F3
+            log["grad_bg_vs_ref"].append(
+                _F3.cosine_similarity(g_bg.unsqueeze(0), _ref_g_bg.unsqueeze(0)).item())
+            log["grad_burst_vs_ref"].append(
+                _F3.cosine_similarity(g_burst.unsqueeze(0), _ref_g_burst.unsqueeze(0)).item())
+
             # per-layer gradient cosine
             gc_layers = gradient_cosine_per_layer(net, burst_batch, batch)
             log["grad_cosine_per_layer"].append(gc_layers)
@@ -189,6 +204,12 @@ def forget(
             ent_burst, _ = grad_norm_entropy(net, burst_batch)
             log["grad_norm_entropy"].append(ent)
             log["grad_norm_entropy_burst"].append(ent_burst)
+
+            # gradient effective rank
+            rank_bg = grad_effective_rank(net, batch)
+            rank_burst = grad_effective_rank(net, burst_batch)
+            log["grad_rank_bg"].append(rank_bg)
+            log["grad_rank_burst"].append(rank_burst)
             net.zero_grad()
 
             pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",

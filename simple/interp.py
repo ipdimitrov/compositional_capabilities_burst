@@ -191,6 +191,35 @@ def _get_grad_vector(net, batch_np):
     return torch.cat(grads)
 
 
+def grad_effective_rank(net, batch_np):
+    """Effective rank of the gradient across 2D parameter matrices.
+
+    For each weight matrix (≥2D), compute SVD of its gradient and return
+    the entropy-based effective rank.  Returns the mean effective rank
+    across all weight matrices.
+    """
+    dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
+    inp, tgt = dat[:, :-1], dat[:, 1:]
+    net.zero_grad()
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        logits = net(inp)
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+    loss.backward()
+    ranks = []
+    for p in net.parameters():
+        if p.grad is None or p.grad.ndim < 2:
+            continue
+        g = p.grad.detach().float()
+        if g.ndim > 2:
+            g = g.reshape(g.shape[0], -1)
+        s = torch.linalg.svdvals(g)
+        s = s / (s.sum() + 1e-10)
+        ent = -(s * torch.log(s + 1e-10)).sum().item()
+        ranks.append(np.exp(ent))
+    net.zero_grad()
+    return float(np.mean(ranks)) if ranks else 0.0
+
+
 def _get_grad_per_layer(net, batch_np):
     """Compute per-layer gradient dict {block_group: flat tensor}."""
     dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)

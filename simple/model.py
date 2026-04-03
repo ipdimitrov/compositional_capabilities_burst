@@ -109,6 +109,30 @@ def train_step(net, optimizer, batch_np, lr=None, grad_clip=1.0):
     return loss.item()
 
 
+def train_step_kl(net, ref_net, optimizer, batch_np, kl_beta=1.0,
+                   lr=None, grad_clip=1.0):
+    """Training step with KL(π_θ || π_ref) penalty.  Returns (loss, kl) floats."""
+    if lr is not None:
+        set_lr(optimizer, lr)
+    dat = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
+    inp, tgt = dat[:, :-1], dat[:, 1:]
+    optimizer.zero_grad(set_to_none=True)
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        logits = net(inp)
+        ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
+        with torch.no_grad():
+            ref_logits = ref_net(inp)
+        log_p = F.log_softmax(logits, dim=-1)
+        log_q = F.log_softmax(ref_logits, dim=-1)
+        kl = F.kl_div(log_q, log_p, log_target=True, reduction="batchmean")
+        loss = ce + kl_beta * kl
+    loss.backward()
+    if grad_clip > 0:
+        torch.nn.utils.clip_grad_norm_(net.parameters(), grad_clip)
+    optimizer.step()
+    return ce.item(), kl.item()
+
+
 # ── evaluation ───────────────────────────────────────────────────────────
 
 @torch.no_grad()

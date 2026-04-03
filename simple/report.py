@@ -738,6 +738,151 @@ def plot_grad_effective_velocity(ft_results, fg_results, figsize=(14, 5)):
     return fig
 
 
+def plot_grad_vs_ref(ft_results, fg_results, figsize=(14, 5)):
+    """Gradient direction vs step-0 reference.
+
+    Tracks how much the bg/burst gradient has rotated away from its
+    initial direction at the start of each phase.
+    Left: BG.  Right: Burst.  Continuous finetune → forget axis.
+    """
+    fig, (ax_bg, ax_burst) = plt.subplots(1, 2, figsize=figsize)
+    drawn_boundary = False
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+
+        if "grad_bg_vs_ref" in ft_log and ft_log["grad_bg_vs_ref"]:
+            ax_bg.plot(ft_log["step"], _smooth(ft_log["grad_bg_vs_ref"]),
+                       color=color, linewidth=2, label=ft["tag"])
+        if "grad_burst_vs_ref" in ft_log and ft_log["grad_burst_vs_ref"]:
+            ax_burst.plot(ft_log["step"], _smooth(ft_log["grad_burst_vs_ref"]),
+                          color=color, linewidth=2, label=ft["tag"])
+
+        if fg is not None:
+            fg_log = fg["log"]
+            fg_steps = _offset_fg_steps(ft_log, fg_log)
+            if "grad_bg_vs_ref" in fg_log and fg_log["grad_bg_vs_ref"]:
+                ax_bg.plot(fg_steps, _smooth(fg_log["grad_bg_vs_ref"]),
+                           color=color, linewidth=2)
+            if "grad_burst_vs_ref" in fg_log and fg_log["grad_burst_vs_ref"]:
+                ax_burst.plot(fg_steps, _smooth(fg_log["grad_burst_vs_ref"]),
+                              color=color, linewidth=2)
+
+        if not drawn_boundary and ft_log["step"]:
+            _phase_boundary(ax_bg, ft_log)
+            _phase_boundary(ax_burst, ft_log)
+            drawn_boundary = True
+
+    for ax, title in [(ax_bg, "BG Gradient vs Step-0 Reference"),
+                      (ax_burst, "Burst Gradient vs Step-0 Reference")]:
+        ax.axhline(0, color="black", linewidth=0.5, linestyle=":")
+        ax.set_xlabel("Step (finetune | forget)")
+        ax.set_ylabel("cos(g_t, g_0)")
+        ax.set_title(title)
+        ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_grad_rank(ft_results, fg_results, figsize=(14, 5)):
+    """Effective rank of gradients over training.
+
+    Left: BG gradient rank.  Right: Burst gradient rank.
+    Continuous finetune → forget axis.
+    """
+    fig, (ax_bg, ax_burst) = plt.subplots(1, 2, figsize=figsize)
+    drawn_boundary = False
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+
+        if "grad_rank_bg" in ft_log and ft_log["grad_rank_bg"]:
+            ax_bg.plot(ft_log["step"], _smooth(ft_log["grad_rank_bg"]),
+                       color=color, linewidth=2, label=ft["tag"])
+        if "grad_rank_burst" in ft_log and ft_log["grad_rank_burst"]:
+            ax_burst.plot(ft_log["step"], _smooth(ft_log["grad_rank_burst"]),
+                          color=color, linewidth=2, label=ft["tag"])
+
+        if fg is not None:
+            fg_log = fg["log"]
+            fg_steps = _offset_fg_steps(ft_log, fg_log)
+            if "grad_rank_bg" in fg_log and fg_log["grad_rank_bg"]:
+                ax_bg.plot(fg_steps, _smooth(fg_log["grad_rank_bg"]),
+                           color=color, linewidth=2)
+            if "grad_rank_burst" in fg_log and fg_log["grad_rank_burst"]:
+                ax_burst.plot(fg_steps, _smooth(fg_log["grad_rank_burst"]),
+                              color=color, linewidth=2)
+
+        if not drawn_boundary and ft_log["step"]:
+            _phase_boundary(ax_bg, ft_log)
+            _phase_boundary(ax_burst, ft_log)
+            drawn_boundary = True
+
+    for ax, title in [(ax_bg, "BG Gradient Effective Rank"),
+                      (ax_burst, "Burst Gradient Effective Rank")]:
+        ax.set_xlabel("Step (finetune | forget)")
+        ax.set_ylabel("Effective Rank")
+        ax.set_title(title)
+        ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_cosine_vs_bg_acc(ft_results, fg_results, figsize=(14, 5)):
+    """Gradient cosine (burst vs bg) plotted against BG accuracy, not time.
+
+    Each point is one eval step. Traces the trajectory through
+    (bg_acc, cosine) space during FT then forget.
+    Left: finetune phase.  Right: forget phase.
+    Tests whether cosine→0 tracks bg task death.
+    """
+    fig, (ax_ft, ax_fg) = plt.subplots(1, 2, figsize=figsize)
+
+    for ft, fg in _pair_ft_fg(ft_results, fg_results):
+        color = _frac_color(ft["burst_frac"])
+        ft_log = ft["log"]
+
+        if "grad_cosine_burst_bg" not in ft_log:
+            continue
+        cos = ft_log["grad_cosine_burst_bg"]
+        bg_acc = ft_log["acc_other"]
+        n = min(len(cos), len(bg_acc))
+        ax_ft.plot(bg_acc[:n], cos[:n], color=color, linewidth=1.5,
+                   label=ft["tag"], alpha=0.8)
+        ax_ft.scatter(bg_acc[0], cos[0], color=color, s=40,
+                      marker="o", zorder=5, edgecolors="black", linewidths=0.5)
+        ax_ft.scatter(bg_acc[n-1], cos[n-1], color=color, s=40,
+                      marker="X", zorder=5, edgecolors="black", linewidths=0.5)
+
+        if fg is not None:
+            fg_log = fg["log"]
+            fg_cos = fg_log.get("grad_cosine_burst_bg", [])
+            fg_bg_acc = fg_log.get("acc_other", [])
+            n_fg = min(len(fg_cos), len(fg_bg_acc))
+            if n_fg > 0:
+                ax_fg.plot(fg_bg_acc[:n_fg], fg_cos[:n_fg], color=color,
+                           linewidth=1.5, label=ft["tag"], alpha=0.8)
+                ax_fg.scatter(fg_bg_acc[0], fg_cos[0], color=color, s=40,
+                              marker="o", zorder=5, edgecolors="black", linewidths=0.5)
+                ax_fg.scatter(fg_bg_acc[n_fg-1], fg_cos[n_fg-1], color=color, s=40,
+                              marker="X", zorder=5, edgecolors="black", linewidths=0.5)
+
+    for ax, title in [(ax_ft, "Finetune Phase"),
+                      (ax_fg, "Forget Phase")]:
+        ax.axhline(0, color="black", linewidth=0.5, linestyle=":")
+        ax.set_xlabel("BG Accuracy")
+        ax.set_ylabel("Gradient Cosine (burst vs bg)")
+        ax.set_title(title)
+        ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Gradient Cosine vs BG Accuracy (o=start, X=end)",
+                 fontsize=12, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
 def _build_layer_cosine_matrix(results):
     """Extract per-layer gradient cosine over steps into (steps, layers) matrix."""
     log = results["log"]
