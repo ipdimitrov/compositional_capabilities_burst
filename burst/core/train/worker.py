@@ -29,7 +29,6 @@ from burst.config import (
     GRAD_NORM_EPS,
     LOSS_BURST,
     LOSS_OTHER,
-    MIXED_FRACTIONS,
     PHASE_BURST,
     PHASE_REVERSION,
     TrainConfig,
@@ -42,85 +41,15 @@ from burst.core.train_utils import (
     make_net_bare,
     make_optim_cfg,
     make_scaler,
+    n_target_for_step,
+    sample_batch,
 )
-from burst.rng import get_rng, seed_all
+from burst.rng import seed_all
 from net.runner import configure_optimizers, reset_optimizer_state, update_phase_lr
 
 if TYPE_CHECKING:
     from burst.types import WorkerJob
     from net.nanogpt import nanoGPT
-
-
-def n_target_for_step(step: int, total_steps: int, schedule: str, p: float, batch_size: int) -> int:
-    """Return the number of special-class examples in a batch at a given burst-phase step.
-
-    All schedules 25-100% use binomial sampling throughout the full burst phase.
-    burst_100 returns the full batch (frac=1.0) every step.
-    """
-    T = total_steps
-
-    if schedule == "mid_block":
-        burst_len = max(int(p * T), 1)
-        mid = T // 2
-        half = burst_len // 2
-        return batch_size if mid - half <= step < mid + (burst_len - half) else 0
-
-    if schedule in MIXED_FRACTIONS:
-        frac = MIXED_FRACTIONS[schedule]
-        if frac >= 1.0:
-            return batch_size
-        return int(get_rng().binomial(batch_size, frac))
-
-    if schedule == "ramp_up":
-        burst_len = max(int(p * T), 1)
-        max_frac = 0.20
-        ramp_len = min(int(2 * burst_len / max_frac), T)
-        if step >= T - ramp_len:
-            progress = (step - (T - ramp_len)) / max(ramp_len - 1, 1)
-            return int(get_rng().binomial(batch_size, progress * max_frac))
-        return 0
-
-    if schedule == "reversion_only":
-        return 0
-
-    msg = f"Unknown schedule: {schedule}"
-    raise ValueError(msg)
-
-
-def sample_batch(  # noqa: PLR0913
-    target_pool: dict, bg_pool: dict, n_target: int, batch_size: int,
-    t_ids: list | None = None, b_ids: list | None = None,
-) -> tuple[np.ndarray, list]:
-    """Sample a mixed batch from target and background pools.
-
-    t_ids/b_ids are optional for convenience but should be precomputed
-    and passed explicitly in hot loops.
-    """
-    if t_ids is None:
-        t_ids = list(target_pool.keys())
-    if b_ids is None:
-        b_ids = list(bg_pool.keys())
-    parts = []
-    sampled_tasks = []
-
-    def _sample_from(pool: dict, ids: list, n: int) -> None:
-        """Sample n documents evenly across task ids from pool."""
-        if n == 0:
-            return
-        per = n // len(ids)
-        rem = n % len(ids)
-        for i, tid in enumerate(ids):
-            k = per + (1 if i < rem else 0)
-            if k > 0:
-                idx = get_rng().integers(len(pool[tid]), size=k)
-                parts.append(pool[tid][idx])
-                sampled_tasks.extend([tid] * k)
-
-    _sample_from(target_pool, t_ids, n_target)
-    _sample_from(bg_pool, b_ids, batch_size - n_target)
-
-    perm = get_rng().permutation(batch_size)
-    return np.concatenate(parts)[perm], [sampled_tasks[i] for i in perm]
 
 
 @torch.no_grad()

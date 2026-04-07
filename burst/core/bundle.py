@@ -20,8 +20,12 @@ from burst.config import (
     reversion_life_label,
 )
 from burst.core.representation import build_representation_summary
-from burst.core.train.worker import n_target_for_step
-from burst.core.train_utils import compute_lr_schedule, load_results, resolve_run_paths
+from burst.core.train_utils import (
+    compute_lr_schedule,
+    load_results,
+    n_target_for_step,
+    resolve_run_paths,
+)
 
 BUNDLE_SCHEMA_VERSION = 1
 BUNDLE_DIRNAME = "chart_bundle"
