@@ -50,7 +50,8 @@ LOSS_BURST = f"loss_{CLASS_BURST}"
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 90, 70]
+BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10]
+# BURST_FRACTIONS = [100, 90, 70]
 
 UNIFORM_PCT = 25
 
@@ -132,7 +133,7 @@ CORE_CLI_MODES = ("train", "gradients", "bundle", "charts", "pipeline")
 # ---------------------------------------------------------------------------
 PRETRAIN_ACC_THRESHOLD = 0.99
 GRAD_NORM_EPS = 1e-6
-CHECKPOINT_EVERY = 50 # 10
+CHECKPOINT_EVERY = 10 # 50
 MIN_VECTORS_FOR_SIMILARITY = 2
 N_PROBE_DOCS_PER_TASK = 200
 ACTIVATION_COLLECT_BATCH_SIZE = 512

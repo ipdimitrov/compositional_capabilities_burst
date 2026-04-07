@@ -16,34 +16,7 @@ from burst.config import REPRO_MANIFEST_FILENAME
 from burst.core.train_utils import resolve_run_paths
 
 
-def _git_sha() -> str | None:
-    """Return the current git HEAD SHA, or None on failure."""
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],  # noqa: S607
-            text=True,
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
-
-
-def _runtime() -> dict[str, Any]:
-    """Collect runtime environment info (Python, torch, CUDA, git)."""
-    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
-    return {
-        "python": sys.version.split()[0],
-        "platform": platform.platform(),
-        "torch": torch.__version__,
-        "cuda_available": torch.cuda.is_available(),
-        "cuda_version": torch.version.cuda,
-        "cudnn_version": torch.backends.cudnn.version(),
-        "gpu_name": gpu_name,
-        "git_sha": _git_sha(),
-    }
-
-
 def _jsonable(value: object) -> str | dict | list | int | float | bool | None:
-    """Recursively convert Path objects to strings for JSON serialisation."""
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
@@ -67,6 +40,13 @@ def write_repro_manifest(  # noqa: PLR0913
     _, _, results_dir = resolve_run_paths(run_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = results_dir / REPRO_MANIFEST_FILENAME
+
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    try:
+        git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()  # noqa: S607
+    except (OSError, subprocess.CalledProcessError):
+        git_sha = None
+
     payload = {
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "mode": mode,
@@ -74,7 +54,16 @@ def write_repro_manifest(  # noqa: PLR0913
         "deterministic": deterministic,
         "note": note,
         "cli_args": _jsonable(cli_args),
-        "runtime": _runtime(),
+        "runtime": {
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_version": torch.version.cuda,
+            "cudnn_version": torch.backends.cudnn.version(),
+            "gpu_name": gpu_name,
+            "git_sha": git_sha,
+        },
     }
     with manifest_path.open("w") as f:
         json.dump(payload, f, indent=2)
