@@ -6,6 +6,7 @@ import json
 import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING
+from burst.core.train.worker import n_target_for_step, sample_batch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -137,7 +138,6 @@ def retrain_with_callbacks(
     on_step should return True to continue, False to stop early.
     If max_step is given, training stops at that global step.
     """
-    from burst.core.train.worker import n_target_for_step, sample_batch
 
     seed, cfg, schedule = job["seed"], job["cfg"], job["schedule"]
     seed_all(seed)
