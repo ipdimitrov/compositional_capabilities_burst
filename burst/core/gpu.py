@@ -207,7 +207,7 @@ if __name__ == "__main__":
     import sys
 
     if "--shell" in sys.argv:
-        print(gpu_cfg.shell_exports())
+        print(gpu_cfg.shell_exports())  # noqa: T201
     else:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
         logger.info(gpu_cfg.summary())

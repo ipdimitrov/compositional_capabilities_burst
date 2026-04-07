@@ -20,8 +20,8 @@ def _git_sha() -> str | None:
     """Return the current git HEAD SHA, or None on failure."""
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            text=True,  # noqa: S607
+            ["git", "rev-parse", "HEAD"],  # noqa: S607
+            text=True,
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
