@@ -91,8 +91,9 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
     """Load gradient cosine similarity records from JSON or pickle files."""
     run_dir = Path(run_dir)
     records: list[dict[str, Any]] = []
+    _, _, results_dir = resolve_run_paths(run_dir)
 
-    for grad_dir in (run_dir / "results" / "grad_cosine_sim", run_dir / "grad_cosine_sim"):
+    for grad_dir in (results_dir / "grad_cosine_sim", run_dir / "grad_cosine_sim"):
         if not grad_dir.is_dir():
             continue
         for path in sorted(grad_dir.glob("*.json")):
@@ -101,7 +102,8 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
         if records:
             return records
 
-    for path in (run_dir / "logs" / "all_results.pkl", run_dir / "all_results.pkl"):
+    _, logs_dir, _ = resolve_run_paths(run_dir)
+    for path in (logs_dir / "all_results.pkl", run_dir / "all_results.pkl"):
         if not path.exists():
             continue
         with path.open("rb") as f:

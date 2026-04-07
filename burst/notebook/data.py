@@ -63,7 +63,7 @@ def make_data(  # noqa: PLR0913
     bijections.extend(rng.permutation(n_alph) for _ in range(n_a * depth + n_burst))
     burst_fns = list(range(n_a * depth + 1, n_a * depth + n_burst + 1))
 
-    pos_fns = {p: list(range((p - 1) * n_a + 1, p * n_a + 1)) for p in range(1, depth + 1)}
+    slot_fns = [list(range(p * n_a + 1, (p + 1) * n_a + 1)) for p in range(depth)]
 
     token, token_idx, fn_tok, idx = {}, {}, {}, 0
     for i in range(n_alph):
@@ -81,17 +81,17 @@ def make_data(  # noqa: PLR0913
         idx += 1
     vocab_size = idx
 
-    other_combos = list(itertools.product(*[pos_fns[p] for p in range(1, depth + 1)]))
+    other_combos = list(itertools.product(*slot_fns))
     rng.shuffle(other_combos)
     other_tasks = [(CLASS_OTHER, *combo) for combo in other_combos]
 
-    non_bp = [p for p in range(1, depth + 1) if p != burst_pos]
-    remaining = list(itertools.product(*[pos_fns[p] for p in non_bp]))
+    burst_slot = depth - burst_pos
+    kept_slots = [fns for i, fns in enumerate(slot_fns) if i != burst_slot]
     burst_tasks = []
-    for combo in remaining:
+    for combo in itertools.product(*kept_slots):
         for bf in burst_fns:
             fns = list(combo)
-            fns.insert(burst_pos - 1, bf)
+            fns.insert(burst_slot, bf)
             burst_tasks.append((CLASS_BURST, *tuple(fns)))
 
     seed_all(seed)

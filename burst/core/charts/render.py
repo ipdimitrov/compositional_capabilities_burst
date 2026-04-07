@@ -174,7 +174,7 @@ def _plot_summary_table(bundle: dict, out_dir: Path) -> Path:
     fig, ax = plt.subplots(figsize=(fig_w, 3.8))
     ax.axis("off")
     table = ax.table(cellText=rows, colLabels=headers, loc="center", cellLoc="center")
-    table.auto_set_font_size(auto=False)
+    table.auto_set_font_size(False)
     table.set_fontsize(10)
     table.scale(1.0, 1.55)
     for (row, col), cell in table.get_celld().items():

@@ -13,20 +13,11 @@ Training structure:
   3. Reversal: all-but-special, same length for all schedules.
 
 Output folder layout:
-  data/<date>_<time>_burst_d<depth>_pos<pos>/
-    results/
-      config.json
-      analysis_report.pdf
-      plots/
-      presentation/
-      grad_cosine_sim/
-    logs/
-      all_results.pkl
-      _data.pkl
-      pretrain_ckpt.pt
-      checkpoints/
-      task_distributions/
-      <label>.pkl  (per-run result pickles)
+  data/results/<run_name>/          config.json, plots/, presentation/, grad_cosine_sim/
+  data/logs/<run_name>/             all_results.pkl, _data.pkl, pretrain_ckpt.pt,
+                                    checkpoints/, task_distributions/, <label>.pkl
+
+  where <run_name> = <date>_<time>_burst_d<depth>_pos<pos>[_<mode>]
 
 Usage:
     python -m burst.core train --depth 3 --burst-pos 2
@@ -42,7 +33,7 @@ import pickle
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -118,15 +109,23 @@ class DepthNData:
       bijections[(p-1)*n_a + 1 .. p*n_a] = background functions for position p
       bijections[n_a*depth + 1]          = b* (novel burst function)
 
-    burst_pos (1-indexed): which position in the chain gets b*.
+    burst_pos counts from the outermost function inward (depth=3 example):
+      burst_pos=3 → replaces 1st fn in header (outermost), eval at last output block
+      burst_pos=2 → replaces 2nd fn in header (middle)
+      burst_pos=1 → replaces 3rd fn in header (innermost), eval at first output block
 
     Token format (depth=3):
-      S [FN ... F1] ' ' [input] ' ' [after F1] ' ' ... ' ' [after FN]
+      S [F_out F_mid F_in] ' ' [input] ' ' [F_in(x)] ' ' [F_mid(...)] ' ' [F_out(...)]
     """
 
     def __init__(  # noqa: PLR0913
-        self, n_alph: int, seq_len: int, n_a: int,
-        depth: int, burst_pos: int, seed: int,
+        self,
+        n_alph: int,
+        seq_len: int,
+        n_a: int,
+        depth: int,
+        burst_pos: int,
+        seed: int,
     ) -> None:
         """Initialise bijections, vocabulary, and task splits."""
         assert 1 <= burst_pos <= depth, "burst_pos must be in [1, depth]"  # noqa: S101
@@ -143,9 +142,9 @@ class DepthNData:
 
         self.b_star = n_a * depth + 1
 
-        self.pos_fns: dict[int, list[int]] = {
-            p: list(range((p - 1) * n_a + 1, p * n_a + 1)) for p in range(1, depth + 1)
-        }
+        self.slot_fns: list[list[int]] = [
+            list(range(p * n_a + 1, (p + 1) * n_a + 1)) for p in range(depth)
+        ]
 
         self._build_vocab()
         self._build_splits(rng)
@@ -171,22 +170,17 @@ class DepthNData:
 
     def _build_splits(self, rng: np.random.RandomState) -> None:
         """Build other-class and burst-class task lists."""
-        D, bp = self.depth, self.burst_pos
+        burst_slot = self.depth - self.burst_pos
 
-        per_pos = [self.pos_fns[p] for p in range(1, D + 1)]
-        other_combos = list(itertools.product(*per_pos))
+        other_combos = list(itertools.product(*self.slot_fns))
         rng.shuffle(other_combos)
         self.other_train = [(CLASS_OTHER, *combo) for combo in other_combos]
 
-        non_burst_positions = [p for p in range(1, D + 1) if p != bp]
-        per_pos_no_bp = [self.pos_fns[p] for p in non_burst_positions]
-        remaining_combos = list(itertools.product(*per_pos_no_bp))
+        kept_slots = [fns for i, fns in enumerate(self.slot_fns) if i != burst_slot]
         burst_tasks = []
-        for combo in remaining_combos:
+        for combo in itertools.product(*kept_slots):
             fns = list(combo)
-            # insert b* at the correct slot (positions are listed outermost-first,
-            # so position bp sits at index D - bp from the left)
-            fns.insert(D - bp, self.b_star)
+            fns.insert(burst_slot, self.b_star)
             burst_tasks.append((CLASS_BURST, *fns))
         self.burst_train = burst_tasks
 
@@ -213,7 +207,11 @@ class DepthNData:
 
 
 def build_data(
-    cfg: dict, depth: int, burst_pos: int, n_a: int, data_seed: int = DATA_SEED,
+    cfg: dict,
+    depth: int,
+    burst_pos: int,
+    n_a: int,
+    data_seed: int = DATA_SEED,
 ) -> tuple[dict, dict, dict, int, int, int, dict, dict]:
     """Build train/eval data pools and vocab info for a given depth and burst position."""
     seed_all(data_seed)
@@ -354,8 +352,9 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
             log["phase"].append(PHASE_PRE_BURST)
             for ek in EVAL_KEYS:
                 pool_key = ek.removeprefix("acc_")
-                log[ek].append(eval_free_gen(net, eval_docs[pool_key],
-                prompt_len, eval_start, eval_end))
+                log[ek].append(
+                    eval_free_gen(net, eval_docs[pool_key], prompt_len, eval_start, eval_end)
+                )
             log[LOSS_OTHER].append(eval_loss(net, eval_docs[CLASS_OTHER]))
             log[LOSS_BURST].append(eval_loss(net, eval_docs[CLASS_BURST]))
             net.train()
@@ -418,15 +417,14 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     base_cfg = exp.base_cfg
 
     burst_mode = exp.burst_mode
-    tag = args.run_tag or datetime.now(tz=datetime.UTC).strftime("%Y%m%d-%H%M%S")
+    tag = args.run_tag or datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
     mode_suffix = f"_{burst_mode}" if burst_mode != MODE_CURRENT else ""
-    run_dir = Path("data") / f"{tag}_burst_d{exp.depth}_pos{exp.burst_pos}{mode_suffix}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    results_dir = run_dir / "results"
-    logs_dir = run_dir / "logs"
-    results_dir.mkdir(exist_ok=True)
-    logs_dir.mkdir(exist_ok=True)
+    run_name = f"{tag}_burst_d{exp.depth}_pos{exp.burst_pos}{mode_suffix}"
+    run_dir = Path("data") / run_name
+    results_dir = Path("data") / "results" / run_name
+    logs_dir = Path("data") / "logs" / run_name
+    results_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
     (results_dir / "plots").mkdir(exist_ok=True)
     (results_dir / "presentation").mkdir(exist_ok=True)
     (results_dir / "grad_cosine_sim").mkdir(exist_ok=True)
@@ -451,7 +449,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     logger.info(
         "  Other classes: %s  Burst class: %s  doc_len: %s  prompt: %s",
-        ti["n_other_train"], ti["n_burst_train"], ti["doc_len"], ti["prompt_len"],
+        ti["n_other_train"],
+        ti["n_burst_train"],
+        ti["doc_len"],
+        ti["prompt_len"],
     )
 
     data_path = logs_dir / "_data.pkl"
@@ -471,7 +472,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         pretrain_attempt += 1
         logger.info(
             "\nPretraining shared checkpoint (%d steps on all-but-special) — attempt %d...",
-            P, pretrain_attempt,
+            P,
+            pretrain_attempt,
         )
         pretrain_log = run_pretrain(
             pretrain_cfg,
@@ -483,7 +485,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             eval_start=es,
             eval_end=ee,
             eval_every=base_cfg["eval_every"],
-            seed=args.seed,
+            seed=args.seed + pretrain_attempt - 1,
         )
         assert ACC_OTHER in pretrain_log, f"pretrain_log missing {ACC_OTHER}"  # noqa: S101
         peak_acc_other = max(pretrain_log[ACC_OTHER])
@@ -595,7 +597,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         bs_s = batch_size_for_mode(sched, burst_mode, base_cfg["batch_size"])
         logger.info(
             "  %s: burst_steps=%d  batch_size=%d  reversion=%d",
-            sched, T_s, bs_s, tc.reversion_steps,
+            sched,
+            T_s,
+            bs_s,
+            tc.reversion_steps,
         )
     logger.info("")
 

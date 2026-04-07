@@ -18,7 +18,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import OmegaConf
 
-from burst.core.train.worker import n_target_for_step, sample_batch
 from burst.rng import seed_all
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, phase_lr, reset_optimizer_state, update_phase_lr
@@ -138,6 +137,8 @@ def retrain_with_callbacks(
     on_step should return True to continue, False to stop early.
     If max_step is given, training stops at that global step.
     """
+    from burst.core.train.worker import n_target_for_step, sample_batch
+
     seed, cfg, schedule = job["seed"], job["cfg"], job["schedule"]
     seed_all(seed)
     net = make_net(cfg)
@@ -177,20 +178,38 @@ def retrain_with_callbacks(
     return net
 
 
+def _resolve_split_dir(run_dir: Path, name: str) -> Path:
+    """Find data/<name>/<run_name>/ (legacy nested) or data/<name>/<run_name>/ (split)."""
+    nested = run_dir / name
+    split = run_dir.parent / name / run_dir.name
+    for candidate in (nested, split):
+        if candidate.exists():
+            return candidate
+    return split
+
+
+def resolve_results_dir(run_dir: Path) -> Path:
+    """Directory for config.json, plots, grad_cosine_sim."""
+    return _resolve_split_dir(run_dir, "results")
+
+
+def resolve_logs_dir(run_dir: Path) -> Path:
+    """Directory for all_results.pkl, checkpoints, _data.pkl."""
+    return _resolve_split_dir(run_dir, "logs")
+
+
 def resolve_run_paths(run_dir: str | Path) -> tuple[Path, Path, Path]:
-    """Return (config_path, logs_dir, results_dir) for both old and new layouts."""
+    """Return (config_path, logs_dir, results_dir) for legacy and split layouts."""
     run_dir = Path(run_dir)
-    results_dir = run_dir / "results"
-    logs_dir = run_dir / "logs"
+    results_dir = resolve_results_dir(run_dir)
+    logs_dir = resolve_logs_dir(run_dir)
 
     if (results_dir / "config.json").exists():
         cfg_path = results_dir / "config.json"
     else:
         cfg_path = run_dir / "config.json"
 
-    ld = logs_dir if logs_dir.exists() else run_dir
-    rd = results_dir if results_dir.exists() else run_dir
-    return cfg_path, ld, rd
+    return cfg_path, logs_dir, results_dir
 
 
 def load_results(run_dir: str | Path) -> tuple[list[dict], dict]:
@@ -246,12 +265,20 @@ def compute_lr_schedule(
     U = cfg["reversion_steps"]
 
     steps = np.arange(1, P + T + U + 1)
-    lrs = np.array([
-        phase_lr(
-            s, cfg["warmup_iters"], P, T, U,
-            cfg["lr"], cfg["lr_pretrain_end_frac"],
-            cfg["lr_burst_end_frac"], cfg["lr_reversion_end_frac"],
-        )
-        for s in steps
-    ])
+    lrs = np.array(
+        [
+            phase_lr(
+                s,
+                cfg["warmup_iters"],
+                P,
+                T,
+                U,
+                cfg["lr"],
+                cfg["lr_pretrain_end_frac"],
+                cfg["lr_burst_end_frac"],
+                cfg["lr_reversion_end_frac"],
+            )
+            for s in steps
+        ]
+    )
     return steps, lrs

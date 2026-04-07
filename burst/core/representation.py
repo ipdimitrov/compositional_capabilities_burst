@@ -35,7 +35,7 @@ def build_representation_summary(
         return {}
 
     with data_path.open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool, *_ = pickle.load(f)  # noqa: S301
 
     other_docs = _subsample_pool(bg_pool, n_docs_per_class, seed=0)
     burst_docs = _subsample_pool(target_pool, n_docs_per_class, seed=1)

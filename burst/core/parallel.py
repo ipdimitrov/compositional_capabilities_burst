@@ -7,6 +7,7 @@ and results are collected via pickle files in a temp directory.
 import logging
 import pickle
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -82,7 +83,10 @@ def run_job_pool(  # noqa: C901, PLR0912, PLR0913, PLR0915
     n_done = 0
     retry_queue: list[int] = []
 
-    while n_done < len(jobs):
+    n_total = len(jobs)
+    n_fail = 0
+
+    while n_done < n_total:
         time.sleep(poll_interval)
         done_labels = [name for name, (_, proc, _) in active.items() if proc.poll() is not None]
         for label in done_labels:
@@ -96,7 +100,7 @@ def run_job_pool(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 n_done += 1
                 results.append(jr)
                 if on_done:
-                    on_done(jr, n_done, len(jobs))
+                    on_done(jr, n_done, n_total)
             else:
                 attempt = retry_counts.get(idx, 0)
                 if attempt < max_retries:
@@ -111,19 +115,33 @@ def run_job_pool(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     se = proc.stderr.read().decode() if proc.stderr else ""
                     jr = JobResult(label=label, success=False, error=se[-1500:], elapsed=elapsed)
                     n_done += 1
+                    n_fail += 1
                     results.append(jr)
                     if on_done:
-                        on_done(jr, n_done, len(jobs))
+                        on_done(jr, n_done, n_total)
 
         while retry_queue and len(active) < n_workers:
             ridx = retry_queue.pop(0)
             p, op = launch(ridx)
             active[jobs[ridx]["label"]] = (ridx, p, op)
 
-        while next_idx < len(jobs) and len(active) < n_workers:
+        while next_idx < n_total and len(active) < n_workers:
             p, op = launch(next_idx)
             active[jobs[next_idx]["label"]] = (next_idx, p, op)
             next_idx += 1
+
+        elapsed = time.time() - t0
+        pct = n_done / n_total * 100
+        eta = (elapsed / n_done * (n_total - n_done)) if n_done > 0 else 0
+        fail_str = f"  {n_fail} failed" if n_fail else ""
+        sys.stderr.write(
+            f"\r  [{n_done}/{n_total}] {pct:5.1f}%  "
+            f"elapsed {elapsed:.0f}s  eta {eta:.0f}s{fail_str}   "
+        )
+        sys.stderr.flush()
+
+    sys.stderr.write("\n")
+    sys.stderr.flush()
 
     for f in tmp_dir.glob("*"):
         f.unlink()

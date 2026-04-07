@@ -13,13 +13,15 @@ from typing import Any
 import torch
 
 from burst.config import REPRO_MANIFEST_FILENAME
+from burst.core.train_utils import resolve_run_paths
 
 
 def _git_sha() -> str | None:
     """Return the current git HEAD SHA, or None on failure."""
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True  # noqa: S607
+            ["git", "rev-parse", "HEAD"],
+            text=True,  # noqa: S607
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
@@ -62,7 +64,7 @@ def write_repro_manifest(  # noqa: PLR0913
 ) -> Path:
     """Write a JSON reproducibility manifest to the run's results directory."""
     run_dir = Path(run_dir)
-    results_dir = run_dir / "results" if (run_dir / "results").exists() else run_dir
+    _, _, results_dir = resolve_run_paths(run_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = results_dir / REPRO_MANIFEST_FILENAME
     payload = {

@@ -23,9 +23,9 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-CUDA_CONTEXT_MB = 650
+CUDA_CONTEXT_MB = 1300
 MODEL_PLUS_ACTS_MB = 200
-GRADSIM_WORKER_MB = 2500
+GRADSIM_WORKER_MB = 5000
 
 GPU_REGISTRY: dict[str, dict] = {
     "H100": {"vram_gb": 80, "tflops_bf16": 990},
@@ -206,8 +206,8 @@ gpu_cfg = make_gpu_config()
 if __name__ == "__main__":
     import sys
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if "--shell" in sys.argv:
-        logger.info(gpu_cfg.shell_exports())
+        print(gpu_cfg.shell_exports())
     else:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
         logger.info(gpu_cfg.summary())

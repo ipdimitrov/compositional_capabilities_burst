@@ -55,6 +55,8 @@ from burst.core.train_utils import (  # noqa: E402
     DEVICE,
     _cross_entropy_logits_BTV_targets_BT,
     load_net,
+    resolve_logs_dir,
+    resolve_results_dir,
 )
 from burst.rng import get_rng, seed_all  # noqa: E402
 from net.nanogpt import nanoGPT  # noqa: E402
@@ -82,7 +84,6 @@ GRAD_METRICS: dict[str, bool] = {
 # Number of per-example gradients to sample for SNR estimation.
 # Higher = more accurate but slower (each adds one backward pass).
 N_SNR_EXAMPLES: int = 16
-
 
 
 # ---------------------------------------------------------------------------
@@ -532,24 +533,24 @@ def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
 
     net.train()
 
-    burst_pos_idx = burst_pos
-
-    # Functions at burst_pos have bijection indices in this range
-    bp_fn_indices = list(range((burst_pos - 1) * n_a + 1, burst_pos * n_a + 1))
+    depth = len(next(iter(task_docs))) - 1
+    burst_slot = depth - burst_pos
+    bp_fn_indices = list(range(burst_slot * n_a + 1, (burst_slot + 1) * n_a + 1))
 
     group_docs: dict[str, list[np.ndarray]] = {"BURST": []}
     for fi in bp_fn_indices:
         group_docs[f"O_F{fi}"] = []
 
+    task_tuple_idx = burst_slot + 1
     for task, docs in task_docs.items():
         if docs.shape[0] == 0:
             continue
         if task[0] == CLASS_BURST:
             group_docs["BURST"].append(docs)
-        elif burst_pos_idx >= len(task):
+        elif task_tuple_idx >= len(task):
             continue
         else:
-            fn_at_bp = task[burst_pos_idx]
+            fn_at_bp = task[task_tuple_idx]
             key = f"O_F{fn_at_bp}"
             if key in group_docs:
                 group_docs[key].append(docs)
@@ -748,8 +749,8 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
 
 def _resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
     """Return (config_path, data_path, ckpt_root, gs_out_dir) for a run directory."""
-    results_dir = run_dir / "results"
-    logs_dir = run_dir / "logs"
+    results_dir = resolve_results_dir(run_dir)
+    logs_dir = resolve_logs_dir(run_dir)
 
     config_path = (
         (results_dir / "config.json")
@@ -764,9 +765,7 @@ def _resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
         if (logs_dir / "checkpoints").exists()
         else (run_dir / "checkpoints")
     )
-    gs_out_dir = (
-        (results_dir / "grad_cosine_sim") if results_dir.exists() else (run_dir / "grad_cosine_sim")
-    )
+    gs_out_dir = results_dir / "grad_cosine_sim"
     gs_out_dir.mkdir(parents=True, exist_ok=True)
     return config_path, data_path, ckpt_root, gs_out_dir
 
@@ -827,7 +826,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         logger.info("No checkpoints directory in %s, nothing to do.", run_dir)
         return
 
-    logs_dir = run_dir / "logs"
+    logs_dir = resolve_logs_dir(run_dir)
     pkl_root = logs_dir if logs_dir.exists() else run_dir
 
     job_entries = run_cfg["jobs"]
@@ -886,7 +885,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     logger.info("Jobs: %d checkpoints across %d labels", len(jobs), len(job_entries))
 
     with data_path.open("rb") as f:
-        target_pool, bg_pool, _, _, _ = pickle.load(f)  # noqa: S301
+        target_pool, bg_pool, *_ = pickle.load(f)  # noqa: S301
 
     worker_script = str(Path(__file__))
 
@@ -907,9 +906,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         ]
 
     def on_done(jr: JobResult, n_done: int, n_total: int) -> None:
-        """Log completion status of a gradient worker job."""
-        status = "ok" if jr.success else f"FAIL: {jr.error[:80]}"
-        logger.info("  [%d/%d] %s: %s", n_done, n_total, jr.label, status)
+        """Log failures only — progress bar handles the rest."""
+        if not jr.success:
+            logger.warning("  [%d/%d] %s: FAIL: %s", n_done, n_total, jr.label, jr.error[:80])
 
     results = run_job_pool(
         jobs=jobs,
@@ -1044,10 +1043,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         with (gs_out_dir / f"{label}.json").open("w") as f:
             json.dump(record, f)
 
-    logs_dir = run_dir / "logs"
+    grad_logs_dir = resolve_logs_dir(run_dir)
     all_results_path = (
-        (logs_dir / "all_results.pkl")
-        if (logs_dir / "all_results.pkl").exists()
+        (grad_logs_dir / "all_results.pkl")
+        if (grad_logs_dir / "all_results.pkl").exists()
         else (run_dir / "all_results.pkl")
     )
     if all_results_path.exists():

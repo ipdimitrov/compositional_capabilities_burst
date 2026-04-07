@@ -50,7 +50,8 @@ LOSS_BURST = f"loss_{CLASS_BURST}"
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10]
+# BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10]
+BURST_FRACTIONS = [100, 90, 70]
 
 UNIFORM_PCT = 25
 
@@ -121,7 +122,7 @@ MODE_CONSTANT_STEPS = "constant_steps"
 MODE_SCALED_BATCH = "scaled_batch"
 BURST_MODES = (MODE_CURRENT, MODE_CONSTANT_STEPS, MODE_SCALED_BATCH)
 
-DEFAULT_REPRO_SEED = 1337
+DEFAULT_REPRO_SEED = 42
 DEFAULT_DETERMINISTIC = True
 REPRO_MANIFEST_FILENAME = "repro_manifest.json"
 CORE_CHARTS_DIRNAME = "core_charts"
@@ -132,7 +133,7 @@ CORE_CLI_MODES = ("train", "gradients", "bundle", "charts", "pipeline")
 # ---------------------------------------------------------------------------
 PRETRAIN_ACC_THRESHOLD = 0.99
 GRAD_NORM_EPS = 1e-6
-CHECKPOINT_EVERY = 10
+CHECKPOINT_EVERY = 50 # 10
 MIN_VECTORS_FOR_SIMILARITY = 2
 N_PROBE_DOCS_PER_TASK = 200
 ACTIVATION_COLLECT_BATCH_SIZE = 512
@@ -211,7 +212,7 @@ class TrainConfig:
     lr: float = 1e-3
     lr_pretrain_end_frac: float = 0.3
     lr_burst_end_frac: float = 0.15
-    lr_reversion_end_frac: float = 0.1
+    lr_reversion_end_frac: float = 0.05
     weight_decay: float = 1e-3
     beta1: float = 0.9
     beta2: float = 0.9

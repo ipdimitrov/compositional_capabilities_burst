@@ -17,8 +17,9 @@ source "${SCRIPT_DIR}/post_process.sh"
 RUN_DIRS=()
 
 latest_run_dir() {
-    local depth="$1" pos="$2"
-    ls -d "${DATA_DIR}/burst_d${depth}_pos${pos}_"* 2>/dev/null | sort | tail -1
+    local depth="$1" pos="$2" match
+    match=$(ls -d "${DATA_DIR}/results/"*"_burst_d${depth}_pos${pos}_"* 2>/dev/null | sort | tail -1)
+    [ -n "${match}" ] && echo "${DATA_DIR}/$(basename "${match}")"
 }
 
 run_experiment() {
@@ -29,7 +30,7 @@ run_experiment() {
     echo "=== depth=${depth} burst_pos=${pos} mode=${mode} ==="
     local run_dir _tmplog
     _tmplog=$(mktemp)
-    "${PYTHON}" burst/experiment.py \
+    "${PYTHON}" burst/core/train/experiment.py \
         --depth "${depth}" --burst-pos "${pos}" --burst-mode "${mode}" \
         2>&1 | tee "${_tmplog}"
     run_dir=$(grep "^Output:" "${_tmplog}" | head -1 | awk '{print $2}')
@@ -49,28 +50,18 @@ run_experiment 3 3 constant_steps
 # run_experiment 3 3 scaled_batch
 # run_experiment 3 3 current
 
-# ── depth=3 pos=2 (overnight) ────────────────────────────────────────────
-# run_experiment 3 2 current
-run_experiment 3 2 constant_steps
-# run_experiment 3 2 scaled_batch
-
-# ── depth=3 pos=1 (overnight) ────────────────────────────────────────────
-# run_experiment 3 1 current
-run_experiment 3 1 constant_steps
-# run_experiment 3 1 scaled_batch
-
-# ── depth=4 ─────────────────────────────────────────────────────────────
-run_experiment 4 1 constant_steps
-run_experiment 4 2 constant_steps
-run_experiment 4 3 constant_steps
-run_experiment 4 4 constant_steps
-
-# ── depth=5 ─────────────────────────────────────────────────────────────
-run_experiment 5 1 constant_steps
-run_experiment 5 2 constant_steps
-run_experiment 5 3 constant_steps
-run_experiment 5 4 constant_steps
-run_experiment 5 5 constant_steps
+# ── uncomment for full sweep ───────────────────────────────────────────
+# run_experiment 3 2 constant_steps
+# run_experiment 3 1 constant_steps
+# run_experiment 4 1 constant_steps
+# run_experiment 4 2 constant_steps
+# run_experiment 4 3 constant_steps
+# run_experiment 4 4 constant_steps
+# run_experiment 5 1 constant_steps
+# run_experiment 5 2 constant_steps
+# run_experiment 5 3 constant_steps
+# run_experiment 5 4 constant_steps
+# run_experiment 5 5 constant_steps
 
 
 echo "=== all runs complete ==="
