@@ -52,7 +52,7 @@ from burst.config import (
 from burst.core.train.worker import n_target_for_step, sample_batch
 from burst.core.train_utils import (
     DEVICE,
-    _cross_entropy_logits_BTV_targets_BT,
+    cross_entropy_logits_BTV_targets_BT,
     make_net_bare,
     make_optim_cfg,
     make_scaler,
@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _extract_adam_delta_named(
+def extract_adam_delta_named(
     net: torch.nn.Module, optimizer: torch.optim.AdamW, eps: float = 1e-8
 ) -> dict[str, torch.Tensor]:
     """Extract Adam update direction m_hat / (sqrt(v_hat) + eps) keyed by param name."""
@@ -112,7 +112,7 @@ def _extract_adam_delta_named(
 _ETA_FLOOR = 1e-12
 
 
-def _eval_loss_at_eta(  # noqa: PLR0913
+def eval_loss_at_eta(  # noqa: PLR0913
     net: nanoGPT,
     sd_base: dict[str, torch.Tensor],
     delta: dict[str, torch.Tensor],
@@ -131,7 +131,7 @@ def _eval_loss_at_eta(  # noqa: PLR0913
         ).item()
 
 
-def _critical_lr_line_search(  # noqa: PLR0913
+def critical_lr_line_search(  # noqa: PLR0913
     net: nanoGPT,
     sd_base: dict[str, torch.Tensor],
     delta: dict[str, torch.Tensor],
@@ -150,7 +150,7 @@ def _critical_lr_line_search(  # noqa: PLR0913
     Returns eta_c = (eta_lower + eta_upper) / 2.
     """
     eta = eta0
-    loss_eta = _eval_loss_at_eta(net, sd_base, delta, eta, inp_BT, tgt_BT, vocab_size)
+    loss_eta = eval_loss_at_eta(net, sd_base, delta, eta, inp_BT, tgt_BT, vocab_size)
     direction = +1 if loss_eta < loss_base else -1
 
     eta_lower, eta_upper = 0.0, 0.0
@@ -160,7 +160,7 @@ def _critical_lr_line_search(  # noqa: PLR0913
         if eta < _ETA_FLOOR:
             eta_lower, eta_upper = eta, eta_prev
             break
-        loss_eta = _eval_loss_at_eta(net, sd_base, delta, eta, inp_BT, tgt_BT, vocab_size)
+        loss_eta = eval_loss_at_eta(net, sd_base, delta, eta, inp_BT, tgt_BT, vocab_size)
         if direction == +1 and loss_eta > loss_base:
             eta_lower, eta_upper = eta_prev, eta
             break
@@ -175,7 +175,7 @@ def _critical_lr_line_search(  # noqa: PLR0913
 
     while abs(1.0 - eta_lower / eta_upper) > binary_tol:
         eta_mid = 0.5 * (eta_lower + eta_upper)
-        loss_mid = _eval_loss_at_eta(net, sd_base, delta, eta_mid, inp_BT, tgt_BT, vocab_size)
+        loss_mid = eval_loss_at_eta(net, sd_base, delta, eta_mid, inp_BT, tgt_BT, vocab_size)
         if loss_mid > loss_base:
             eta_upper = eta_mid
         else:
@@ -211,7 +211,7 @@ class SharpnessTrace:
     steps: list[StepSharpness] = field(default_factory=list)
 
 
-def _measure_sharpness_at_step(  # noqa: PLR0913
+def measure_sharpness_at_step(  # noqa: PLR0913
     net: nanoGPT,
     optimizer: torch.optim.AdamW,
     burst_inp_BT: torch.Tensor,
@@ -228,7 +228,7 @@ def _measure_sharpness_at_step(  # noqa: PLR0913
     """
     raw = getattr(net, "_orig_mod", net)
     sd_base = {k: v.clone() for k, v in raw.state_dict().items()}
-    delta = _extract_adam_delta_named(raw, optimizer)
+    delta = extract_adam_delta_named(raw, optimizer)
 
     if not delta:
         return float("nan"), float("nan"), eta0_burst, eta0_other
@@ -243,10 +243,10 @@ def _measure_sharpness_at_step(  # noqa: PLR0913
         ).item()
     net.train()
 
-    eta_c_burst = _critical_lr_line_search(
+    eta_c_burst = critical_lr_line_search(
         raw, sd_base, delta, loss_burst, burst_inp_BT, burst_tgt_BT, vocab_size, eta0=eta0_burst
     )
-    eta_c_other = _critical_lr_line_search(
+    eta_c_other = critical_lr_line_search(
         raw, sd_base, delta, loss_other, other_inp_BT, other_tgt_BT, vocab_size, eta0=eta0_other
     )
 
@@ -307,7 +307,7 @@ def compute_sharpness_dynamics(  # noqa: C901, PLR0913, PLR0915
 
     max_micro_bs = 512
 
-    def _train_step(batch_np: np.ndarray, global_step: int) -> float:
+    def train_step(batch_np: np.ndarray, global_step: int) -> float:
         tokens_BL = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inputs_BT, targets_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
         update_phase_lr(global_step, optimizer, warmup_steps, P, T, U, lr_max, lr_pe, lr_be, lr_re)
@@ -319,7 +319,7 @@ def compute_sharpness_dynamics(  # noqa: C901, PLR0913, PLR0915
             lo, hi = i * max_micro_bs, min((i + 1) * max_micro_bs, n)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
                 logits_BTV = net(inputs_BT[lo:hi])
-                loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV, targets_BT[lo:hi]) / n_accum
+                loss = cross_entropy_logits_BTV_targets_BT(logits_BTV, targets_BT[lo:hi]) / n_accum
             scaler.scale(loss).backward()
             total_loss += loss.item()
         if cfg["grad_clip"] > 0:
@@ -329,14 +329,14 @@ def compute_sharpness_dynamics(  # noqa: C901, PLR0913, PLR0915
         scaler.update()
         return total_loss
 
-    def _eos_threshold(lr: float) -> float:
+    def eos_threshold(lr: float) -> float:
         """AdamW EoS threshold: (2/lr - wd) * (1+b1)/(1-b1)."""
         return (2.0 / lr - weight_decay) * (1.0 + beta1) / (1.0 - beta1)
 
-    def _maybe_measure(gs: int, phase: str, loss_val: float) -> None:
+    def maybe_measure(gs: int, phase: str, loss_val: float) -> None:
         nonlocal eta0_burst, eta0_other
         lr = optimizer.param_groups[0]["lr"]
-        lc_b, lc_o, eta0_burst, eta0_other = _measure_sharpness_at_step(
+        lc_b, lc_o, eta0_burst, eta0_other = measure_sharpness_at_step(
             net,
             optimizer,
             burst_inp,
@@ -354,7 +354,7 @@ def compute_sharpness_dynamics(  # noqa: C901, PLR0913, PLR0915
                 lr=lr,
                 lambda_c_burst=lc_b,
                 lambda_c_other=lc_o,
-                eos_threshold=_eos_threshold(lr),
+                eos_threshold=eos_threshold(lr),
                 train_loss=loss_val,
             )
         )
@@ -365,18 +365,18 @@ def compute_sharpness_dynamics(  # noqa: C901, PLR0913, PLR0915
         nt = n_target_for_step(s, T, schedule, p, bs)
         batch_np, _ = sample_batch(target_pool, bg_pool, nt, bs)
         gs = P + s + 1
-        loss_val = _train_step(batch_np, gs)
+        loss_val = train_step(batch_np, gs)
         if s % measure_every == 0 or s == T - 1:
-            _maybe_measure(gs, PHASE_BURST, loss_val)
+            maybe_measure(gs, PHASE_BURST, loss_val)
 
     reset_optimizer_state(optimizer)
 
     for s in range(U):
         batch_np, _ = sample_batch(target_pool, bg_pool, 0, bs)
         gs = P + T + s + 1
-        loss_val = _train_step(batch_np, gs)
+        loss_val = train_step(batch_np, gs)
         if s % measure_every == 0 or s == U - 1:
-            _maybe_measure(gs, PHASE_REVERSION, loss_val)
+            maybe_measure(gs, PHASE_REVERSION, loss_val)
 
     return trace
 
@@ -449,10 +449,10 @@ def plot_sharpness_dynamics(
     plt.savefig(out_dir / "sharpness_dynamics.png", dpi=150)
     plt.close()
 
-    _plot_sharpness_vs_eos(traces, out_dir)
+    plot_sharpness_vs_eos(traces, out_dir)
 
 
-def _plot_sharpness_vs_eos(
+def plot_sharpness_vs_eos(
     traces: dict[str, list[SharpnessTrace]],
     out_dir: Path,
 ) -> None:

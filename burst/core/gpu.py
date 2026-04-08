@@ -48,7 +48,7 @@ GPU_REGISTRY: dict[str, dict] = {
 }
 
 
-def _detect_gpu() -> tuple[int, int]:
+def detect_gpu() -> tuple[int, int]:
     """Return (vram_gb, tflops_bf16) from env vars, registry, or safe defaults."""
     env_vram = os.environ.get("GPU_VRAM_GB")
     env_tflops = os.environ.get("GPU_TFLOPS")
@@ -92,7 +92,7 @@ class GpuConfig:
         """Return usable VRAM in MB after reserving 10% headroom."""
         return int(self.vram_gb * 1024 * 0.90)
 
-    def _cap_by_vram(self, per_proc_mb: int) -> int:
+    def cap_by_vram(self, per_proc_mb: int) -> int:
         """Return max worker count that fits in usable VRAM."""
         return max(1, int(self.usable_vram_mb * 0.85 / per_proc_mb))
 
@@ -109,7 +109,7 @@ class GpuConfig:
         if self.vram_gb == 0:
             return 1
         per_proc_mb = CUDA_CONTEXT_MB + MODEL_PLUS_ACTS_MB
-        by_vram = self._cap_by_vram(per_proc_mb)
+        by_vram = self.cap_by_vram(per_proc_mb)
         by_compute = max(4, min(64, int(math.sqrt(self.tflops_bf16))))
         return min(by_vram, by_compute)
 
@@ -119,7 +119,7 @@ class GpuConfig:
         if self.vram_gb == 0:
             return 1
         per_proc_mb = CUDA_CONTEXT_MB + MODEL_PLUS_ACTS_MB * 2
-        by_vram = self._cap_by_vram(per_proc_mb)
+        by_vram = self.cap_by_vram(per_proc_mb)
         by_compute = max(4, min(48, int(math.sqrt(self.tflops_bf16) * 0.75)))
         return min(by_vram, by_compute)
 
@@ -132,7 +132,7 @@ class GpuConfig:
         if self.vram_gb == 0:
             return 1
         per_proc_mb = CUDA_CONTEXT_MB + GRADSIM_WORKER_MB
-        by_vram = self._cap_by_vram(per_proc_mb)
+        by_vram = self.cap_by_vram(per_proc_mb)
         by_compute = max(2, min(32, int(math.sqrt(self.tflops_bf16) * 0.5)))
         return min(by_vram, by_compute)
 
@@ -162,7 +162,7 @@ class GpuConfig:
             return 1
         extra_mb = max(0, (batch_size - base_batch_size)) * 0.1
         per_proc_mb = CUDA_CONTEXT_MB + MODEL_PLUS_ACTS_MB + extra_mb
-        by_vram = self._cap_by_vram(int(per_proc_mb))
+        by_vram = self.cap_by_vram(int(per_proc_mb))
         by_compute = max(4, min(64, int(math.sqrt(self.tflops_bf16))))
         return min(by_vram, by_compute)
 
@@ -192,7 +192,7 @@ class GpuConfig:
 
 def make_gpu_config() -> GpuConfig:
     """Detect GPU and return a frozen GpuConfig."""
-    vram, tflops = _detect_gpu()
+    vram, tflops = detect_gpu()
     return GpuConfig(
         vram_gb=vram,
         tflops_bf16=tflops,

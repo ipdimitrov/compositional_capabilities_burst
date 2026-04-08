@@ -164,7 +164,7 @@ class nanoGPT(nn.Module):
         self.transformer.wte.weight = self.LM_head.weight
 
         # init all weights
-        self.apply(self._init_weights)
+        self.apply(self.init_weights)
         # apply special scaled init to the residual projections
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
@@ -183,7 +183,7 @@ class nanoGPT(nn.Module):
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
-    def _init_weights(self, module):
+    def init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:

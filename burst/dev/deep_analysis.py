@@ -146,7 +146,7 @@ def free_gen_acc_ablated(
     norms_T = delta_TN.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     delta_unit_TN = delta_TN / norms_T
 
-    def _hook(_module: Any, _input: Any, output: Any) -> Any:  # noqa: ANN401
+    def forward_capture_hook(_module: Any, _input: Any, output: Any) -> Any:  # noqa: ANN401
         if isinstance(output, tuple):
             x_raw, rest = output[0], output[1:]
         else:
@@ -162,9 +162,9 @@ def free_gen_acc_ablated(
         return x
 
     if ablate_layer == 0:
-        handle = net.transformer.drop.register_forward_hook(_hook)
+        handle = net.transformer.drop.register_forward_hook(forward_capture_hook)
     else:
-        handle = net.transformer.h[ablate_layer - 1].register_forward_hook(_hook)
+        handle = net.transformer.h[ablate_layer - 1].register_forward_hook(forward_capture_hook)
 
     try:
         generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
@@ -758,7 +758,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
-    def _save_png(fig: Any, name: str) -> str:  # noqa: ANN401
+    def write_dashboard_png(fig: Any, name: str) -> str:  # noqa: ANN401
         path = charts_dir / f"{name}.png"
         try:
             fig.write_image(str(path), width=1200, height=600, scale=2)
@@ -803,7 +803,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         template="plotly_white",
         height=500,
     )
-    _save_png(fig1, "01_grad_interference_timeseries")
+    write_dashboard_png(fig1, "01_grad_interference_timeseries")
     all_figs.append(("Gradient Interference Time Series", fig1))
 
     # -----------------------------------------------------------------------
@@ -872,7 +872,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         template="plotly_white",
         height=900,
     )
-    _save_png(fig2, "02_grad_interference_vs_forgetting")
+    write_dashboard_png(fig2, "02_grad_interference_vs_forgetting")
     all_figs.append(("Gradient Interference vs Forgetting", fig2))
 
     # -----------------------------------------------------------------------
@@ -913,7 +913,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             template="plotly_white",
             height=500,
         )
-        _save_png(fig3, f"03_per_layer_interference_{run_name}")
+        write_dashboard_png(fig3, f"03_per_layer_interference_{run_name}")
         all_figs.append((f"Per-Layer Interference ({run_name})", fig3))
 
     # -----------------------------------------------------------------------
@@ -945,7 +945,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             template="plotly_white",
             height=500,
         )
-        _save_png(fig4, f"04_ema_interpolation_{run_name}")
+        write_dashboard_png(fig4, f"04_ema_interpolation_{run_name}")
         all_figs.append((f"EMA Interpolation Probe ({run_name})", fig4))
 
     # -----------------------------------------------------------------------
@@ -991,7 +991,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         template="plotly_white",
         height=500,
     )
-    _save_png(fig5, "05_ema_cliff_vs_forgetting")
+    write_dashboard_png(fig5, "05_ema_cliff_vs_forgetting")
     all_figs.append(("EMA Cliff vs Forgetting", fig5))
 
     # -----------------------------------------------------------------------
@@ -1036,7 +1036,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         template="plotly_white",
         height=500,
     )
-    _save_png(fig6, "06_sharpness_vs_forgetting")
+    write_dashboard_png(fig6, "06_sharpness_vs_forgetting")
     all_figs.append(("Critical Sharpness vs Forgetting", fig6))
 
     # -----------------------------------------------------------------------
@@ -1064,7 +1064,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         height=500,
         barmode="group",
     )
-    _save_png(fig7, "07_sharpness_bars")
+    write_dashboard_png(fig7, "07_sharpness_bars")
     all_figs.append(("Sharpness Bars", fig7))
 
     # -----------------------------------------------------------------------
@@ -1097,7 +1097,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             height=500,
             barmode="group",
         )
-        _save_png(fig8, f"08_weight_delta_rank_{run_name}")
+        write_dashboard_png(fig8, f"08_weight_delta_rank_{run_name}")
         all_figs.append((f"Weight Delta Rank ({run_name})", fig8))
 
     # -----------------------------------------------------------------------
@@ -1142,7 +1142,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         template="plotly_white",
         height=500,
     )
-    _save_png(fig9, "09_weight_rank_vs_forgetting")
+    write_dashboard_png(fig9, "09_weight_rank_vs_forgetting")
     all_figs.append(("Weight Rank vs Forgetting", fig9))
 
     # -----------------------------------------------------------------------
@@ -1183,7 +1183,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         height=500,
         barmode="group",
     )
-    _save_png(fig10, "10_adl_readability_peak")
+    write_dashboard_png(fig10, "10_adl_readability_peak")
     all_figs.append(("ADL Readability at Peak", fig10))
 
     # -----------------------------------------------------------------------
@@ -1224,7 +1224,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         height=500,
         barmode="group",
     )
-    _save_png(fig11, "11_adl_causal_ablation")
+    write_dashboard_png(fig11, "11_adl_causal_ablation")
     all_figs.append(("ADL Causal Ablation", fig11))
 
     # -----------------------------------------------------------------------
@@ -1260,7 +1260,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             template="plotly_white",
             height=500,
         )
-        _save_png(fig12, f"12_adl_delta_norm_{run_name}")
+        write_dashboard_png(fig12, f"12_adl_delta_norm_{run_name}")
         all_figs.append((f"ADL Delta Norm ({run_name})", fig12))
 
     # -----------------------------------------------------------------------
@@ -1294,7 +1294,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             ],
         )
 
-        def _add_scatter(  # noqa: PLR0913
+        def add_summary_scatter(  # noqa: PLR0913
             fig: Any,  # noqa: ANN401
             row: int,
             col: int,
@@ -1320,7 +1320,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
 
         colors = [sched_color(s) for s in schedules]
 
-        _add_scatter(
+        add_summary_scatter(
             fig13,
             1,
             1,
@@ -1347,10 +1347,10 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                 if sched_entries
                 else float("nan")
             )
-        _add_scatter(fig13, 1, 2, burst_pct, gi_means, colors, schedules)
-        _add_scatter(fig13, 1, 3, burst_pct, gi_ends, colors, schedules)
+        add_summary_scatter(fig13, 1, 2, burst_pct, gi_means, colors, schedules)
+        add_summary_scatter(fig13, 1, 3, burst_pct, gi_ends, colors, schedules)
 
-        _add_scatter(
+        add_summary_scatter(
             fig13,
             2,
             1,
@@ -1360,7 +1360,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             schedules,
         )
 
-        _add_scatter(
+        add_summary_scatter(
             fig13,
             2,
             2,
@@ -1371,9 +1371,9 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         )
 
         ema_cliff = [tv.get(s, {}).get("mean_cliff_alpha", float("nan")) for s in schedules]
-        _add_scatter(fig13, 2, 3, burst_pct, ema_cliff, colors, schedules)
+        add_summary_scatter(fig13, 2, 3, burst_pct, ema_cliff, colors, schedules)
 
-        _add_scatter(
+        add_summary_scatter(
             fig13,
             3,
             1,
@@ -1391,7 +1391,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                 adl_read.append(step_data[max(peak_steps)]["mean_readability"])
             else:
                 adl_read.append(float("nan"))
-        _add_scatter(fig13, 3, 2, burst_pct, adl_read, colors, schedules)
+        add_summary_scatter(fig13, 3, 2, burst_pct, adl_read, colors, schedules)
 
         fig13.update_xaxes(title_text="Burst %")
         fig13.update_layout(
@@ -1399,7 +1399,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             template="plotly_white",
             height=1100,
         )
-        _save_png(fig13, f"13_summary_all_metrics_{run_name}")
+        write_dashboard_png(fig13, f"13_summary_all_metrics_{run_name}")
         all_figs.append((f"Summary All Metrics ({run_name})", fig13))
 
     # -----------------------------------------------------------------------

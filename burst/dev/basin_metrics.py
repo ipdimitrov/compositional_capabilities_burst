@@ -624,7 +624,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
 
     all_figs: list[tuple[str, go.Figure]] = []
 
-    def _add(key: str, fig: go.Figure) -> None:
+    def append_basin_fig(key: str, fig: go.Figure) -> None:
         all_figs.append((key, fig))
         save_png(fig, str(charts_dir / f"{key}.png"))
 
@@ -682,7 +682,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"noise_burst_{run_name}", fig)
+            append_basin_fig(f"noise_burst_{run_name}", fig)
             fig_burst_delta.add_vline(
                 x=0.004, line_dash="dash", line_color="gray", annotation_text="sigma=0.004"
             )
@@ -694,7 +694,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"noise_burst_delta_{run_name}", fig_burst_delta)
+            append_basin_fig(f"noise_burst_delta_{run_name}", fig_burst_delta)
 
             # Other accuracy vs sigma
             fig = go.Figure()
@@ -739,7 +739,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"noise_other_{run_name}", fig)
+            append_basin_fig(f"noise_other_{run_name}", fig)
             fig_other_delta.add_vline(
                 x=0.004, line_dash="dash", line_color="gray", annotation_text="sigma=0.004"
             )
@@ -751,7 +751,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"noise_other_delta_{run_name}", fig_other_delta)
+            append_basin_fig(f"noise_other_delta_{run_name}", fig_other_delta)
 
             # Differential sensitivity: burst drop / other drop at sigma=0.004
             has_threshold = NOISE_SIGMA_THRESHOLD in NOISE_SIGMAS
@@ -778,7 +778,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     template="plotly_white",
                     height=500,
                 )
-                _add(f"noise_differential_burst_{run_name}", fig_diff_burst)
+                append_basin_fig(f"noise_differential_burst_{run_name}", fig_diff_burst)
                 fig_diff_other = go.Figure(
                     go.Bar(x=schedules, y=other_drops, marker_color=colors, showlegend=False)
                 )
@@ -789,7 +789,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     template="plotly_white",
                     height=500,
                 )
-                _add(f"noise_differential_other_{run_name}", fig_diff_other)
+                append_basin_fig(f"noise_differential_other_{run_name}", fig_diff_other)
                 fig_diff_delta = go.Figure(
                     go.Bar(x=schedules, y=diff_drops, marker_color=colors, showlegend=False)
                 )
@@ -801,7 +801,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     template="plotly_white",
                     height=500,
                 )
-                _add(f"noise_differential_delta_{run_name}", fig_diff_delta)
+                append_basin_fig(f"noise_differential_delta_{run_name}", fig_diff_delta)
 
         # ------------------------------------------------------------------
         # Metric 1b: Directed Noise Robustness
@@ -860,7 +860,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             fig.update_xaxes(title_text="ε", row=1, col=2)
             fig.update_yaxes(title_text="Burst Accuracy", row=1, col=1)
             fig.update_yaxes(title_text="Narrowness (undo_drop / rand_drop)", row=1, col=2)
-            _add(f"directed_noise_{run_name}", fig)
+            append_basin_fig(f"directed_noise_{run_name}", fig)
 
         # ------------------------------------------------------------------
         # Metric 2: Weight Drift Correlation
@@ -894,7 +894,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"weight_drift_scatter_{run_name}", fig)
+            append_basin_fig(f"weight_drift_scatter_{run_name}", fig)
 
             # Mean drift per schedule bar chart
             mean_drifts = [
@@ -918,7 +918,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"weight_drift_bar_{run_name}", fig)
+            append_basin_fig(f"weight_drift_bar_{run_name}", fig)
 
         # ------------------------------------------------------------------
         # Metric 3: Loss Surface
@@ -930,15 +930,15 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             # Sharpness comparison: burst vs other per schedule (separate figures with CI)
             colors = [color(s) for s in schedules]
 
-            def _ci95(vals: Any) -> Any:  # noqa: ANN401
+            def ci95_interval(vals: Any) -> Any:  # noqa: ANN401
                 if len(vals) > 1:
                     return 1.96 * float(np.std(vals, ddof=1) / np.sqrt(len(vals)))
                 return 0.0
 
             burst_sharpness = [ls[s]["burst_sharpness"] for s in schedules]
             other_sharpness = [ls[s]["other_sharpness"] for s in schedules]
-            burst_ci = [_ci95(ls[s].get("per_seed_burst_sharpness", [])) for s in schedules]
-            other_ci = [_ci95(ls[s].get("per_seed_other_sharpness", [])) for s in schedules]
+            burst_ci = [ci95_interval(ls[s].get("per_seed_burst_sharpness", [])) for s in schedules]
+            other_ci = [ci95_interval(ls[s].get("per_seed_other_sharpness", [])) for s in schedules]
             diff_sharpness = [b - o for b, o in zip(burst_sharpness, other_sharpness, strict=True)]
             diff_ci = [
                 float(np.sqrt(bc**2 + oc**2)) for bc, oc in zip(burst_ci, other_ci, strict=True)
@@ -964,7 +964,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"loss_surface_sharpness_burst_{run_name}", fig_sharp_burst)
+            append_basin_fig(f"loss_surface_sharpness_burst_{run_name}", fig_sharp_burst)
             fig_sharp_other = go.Figure(
                 go.Bar(
                     x=schedules,
@@ -983,7 +983,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"loss_surface_sharpness_other_{run_name}", fig_sharp_other)
+            append_basin_fig(f"loss_surface_sharpness_other_{run_name}", fig_sharp_other)
             fig_sharp_delta = go.Figure(
                 go.Bar(
                     x=schedules,
@@ -1002,7 +1002,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"loss_surface_sharpness_delta_{run_name}", fig_sharp_delta)
+            append_basin_fig(f"loss_surface_sharpness_delta_{run_name}", fig_sharp_delta)
 
             # 2D heatmaps for all schedules
             extreme_scheds = list(ls.keys())
@@ -1062,7 +1062,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     template="plotly_white",
                     height=500,
                 )
-                _add(f"loss_surface_2d_{run_name}_{sched}", fig)
+                append_basin_fig(f"loss_surface_2d_{run_name}_{sched}", fig)
 
     # ------------------------------------------------------------------
     # HTML dashboard

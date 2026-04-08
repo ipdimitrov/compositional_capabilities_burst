@@ -473,7 +473,7 @@ def compute_lmc_dual(
                 for a in alphas
             ]
 
-            def _eval_batch(
+            def eval_interp_batch(
                 interps: list[dict],
                 _net: nanoGPT = net,
                 _V: int = V,
@@ -495,10 +495,10 @@ def compute_lmc_dual(
                         )
                 return burst_losses, other_losses
 
-            pre_peak_burst, pre_peak_other = _eval_batch(all_interps_pre_peak)
-            peak_rev_burst, peak_rev_other = _eval_batch(all_interps_peak_rev)
+            pre_peak_burst, pre_peak_other = eval_interp_batch(all_interps_pre_peak)
+            peak_rev_burst, peak_rev_other = eval_interp_batch(all_interps_peak_rev)
 
-            def _barrier(curve: list[float]) -> float:
+            def interp_barrier(curve: list[float]) -> float:
                 ep = (curve[0] + curve[-1]) / 2
                 return max(curve) - ep
 
@@ -508,10 +508,10 @@ def compute_lmc_dual(
                     "pre_peak_other": pre_peak_other,
                     "peak_rev_burst": peak_rev_burst,
                     "peak_rev_other": peak_rev_other,
-                    "barrier_pre_peak_burst": _barrier(pre_peak_burst),
-                    "barrier_pre_peak_other": _barrier(pre_peak_other),
-                    "barrier_peak_rev_burst": _barrier(peak_rev_burst),
-                    "barrier_peak_rev_other": _barrier(peak_rev_other),
+                    "barrier_pre_peak_burst": interp_barrier(pre_peak_burst),
+                    "barrier_pre_peak_other": interp_barrier(pre_peak_other),
+                    "barrier_peak_rev_burst": interp_barrier(peak_rev_burst),
+                    "barrier_peak_rev_other": interp_barrier(peak_rev_other),
                 }
             )
 
@@ -552,7 +552,7 @@ def compute_ema_dual(  # noqa: PLR0913
                 for a in alphas
             ]
 
-            def _eval_path(
+            def eval_path_interp(
                 interps: list[dict],
                 _net: nanoGPT = net,
             ) -> tuple[list[float], list[float]]:
@@ -563,10 +563,10 @@ def compute_ema_dual(  # noqa: PLR0913
                     other_accs.append(free_gen_acc(_net, other_sub, prompt_len))
                 return burst_accs, other_accs
 
-            pre_peak_burst, pre_peak_other = _eval_path(all_pre_peak)
-            rev_peak_burst, rev_peak_other = _eval_path(all_rev_peak)
+            pre_peak_burst, pre_peak_other = eval_path_interp(all_pre_peak)
+            rev_peak_burst, rev_peak_other = eval_path_interp(all_rev_peak)
 
-            def _cliff_alpha(accs: list[float], threshold: float = 0.5) -> float:
+            def cliff_alpha_metric(accs: list[float], threshold: float = 0.5) -> float:
                 for i, acc in enumerate(accs):
                     if acc > threshold:
                         if i == 0:
@@ -582,8 +582,8 @@ def compute_ema_dual(  # noqa: PLR0913
                     "pre_peak_other": pre_peak_other,
                     "rev_peak_burst": rev_peak_burst,
                     "rev_peak_other": rev_peak_other,
-                    "cliff_pre_peak_burst": _cliff_alpha(pre_peak_burst),
-                    "cliff_rev_peak_burst": _cliff_alpha(rev_peak_burst),
+                    "cliff_pre_peak_burst": cliff_alpha_metric(pre_peak_burst),
+                    "cliff_rev_peak_burst": cliff_alpha_metric(rev_peak_burst),
                 }
             )
 
@@ -1264,14 +1264,14 @@ def aggregate_layer_metric(
             results[sched] = {}
             continue
 
-        def _safe_nanmean(vs: list[float]) -> float:
+        def safe_nanmean(vs: list[float]) -> float:
             arr = np.asarray(vs)
             valid = arr[~np.isnan(arr)]
             return float(valid.mean()) if len(valid) > 0 else float("nan")
 
         results[sched] = {
-            "mean_per_layer": {ln: _safe_nanmean(vs) for ln, vs in layer_vals.items()},
-            "end_per_layer": {ln: _safe_nanmean(vs) for ln, vs in layer_end_vals.items()},
+            "mean_per_layer": {ln: safe_nanmean(vs) for ln, vs in layer_vals.items()},
+            "end_per_layer": {ln: safe_nanmean(vs) for ln, vs in layer_end_vals.items()},
             "layer_names": layer_names or list(layer_vals.keys()),
         }
 
@@ -1723,7 +1723,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
 
     all_figs: list[tuple[str, str, go.Figure]] = []
 
-    def _add(key: str, title: str, fig: go.Figure) -> None:
+    def append_dashboard_fig(key: str, title: str, fig: go.Figure) -> None:
         all_figs.append((key, title, fig))
         save_png(fig, str(charts_dir / f"{key}.png"))
 
@@ -1799,7 +1799,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             fig.update_xaxes(title_text="α")  # noqa: RUF001
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
-            _add(f"ema_{path_key}_{rn}", f"EMA {path_label} ({rn})", fig)
+            append_dashboard_fig(f"ema_{path_key}_{rn}", f"EMA {path_label} ({rn})", fig)
             fig_delta.update_layout(
                 title=f"EMA Interpolation Δ (Burst − Other): {path_label} — {rn}<br>"  # noqa: RUF001
                 f"<sup>α=0: start model, α=1: peak burst.</sup>",  # noqa: RUF001
@@ -1808,7 +1808,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"ema_{path_key}_delta_{rn}", f"EMA {path_label} Δ ({rn})", fig_delta)
+            append_dashboard_fig(
+                f"ema_{path_key}_delta_{rn}",
+                f"EMA {path_label} Δ ({rn})",
+                fig_delta,
+            )
 
         cliff_vals = {s: [p["cliff_pre_peak_burst"] for p in ema[s]["per_seed"]] for s in schedules}
         fig_cliff = go.Figure()
@@ -1821,7 +1825,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"ema_cliff_{rn}", f"EMA Cliff ({rn})", fig_cliff)
+        append_dashboard_fig(f"ema_cliff_{rn}", f"EMA Cliff ({rn})", fig_cliff)
 
     # ------------------------------------------------------------------
     # Section 2: LMC (dual-class, fixed)
@@ -1894,7 +1898,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             fig.update_xaxes(title_text="α")  # noqa: RUF001
             fig.update_yaxes(title_text="Cross-Entropy Loss", row=1, col=1)
             fig.update_yaxes(title_text="Cross-Entropy Loss", row=1, col=2)
-            _add(f"lmc_{path_key}_{rn}", f"LMC {path_label} ({rn})", fig)
+            append_dashboard_fig(f"lmc_{path_key}_{rn}", f"LMC {path_label} ({rn})", fig)
             fig_delta.update_layout(
                 title=f"LMC Loss Barrier Δ (Burst − Other): {path_label} — {rn}<br>"  # noqa: RUF001
                 f"<sup>High barrier = different basins (deep). Low = same ridge (shallow).</sup>",
@@ -1903,7 +1907,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"lmc_{path_key}_delta_{rn}", f"LMC {path_label} Δ ({rn})", fig_delta)
+            append_dashboard_fig(
+                f"lmc_{path_key}_delta_{rn}",
+                f"LMC {path_label} Δ ({rn})",
+                fig_delta,
+            )
 
         for barrier_key, barrier_label in [
             ("barrier_pre_peak_burst", "Pre↔Peak Burst-Class"),
@@ -1919,7 +1927,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"lmc_barrier_{barrier_key}_{rn}", f"LMC Barrier {barrier_label} ({rn})", fig_b)
+            append_dashboard_fig(
+                f"lmc_barrier_{barrier_key}_{rn}",
+                f"LMC Barrier {barrier_label} ({rn})",
+                fig_b,
+            )
 
     # ------------------------------------------------------------------
     # Section 3: Frankenstein Layer Swap
@@ -2002,7 +2014,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             fig.update_xaxes(title_text="Last Block from Bottom Model")
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
-            _add(f"frank_{direction}_{rn}", f"Frankenstein {dir_label} ({rn})", fig)
+            append_dashboard_fig(f"frank_{direction}_{rn}", f"Frankenstein {dir_label} ({rn})", fig)
             fig_delta.update_layout(
                 title=f"Frankenstein Δ (Burst − Other): {dir_label} — {rn}",  # noqa: RUF001
                 xaxis_title="Last Block from Bottom Model",
@@ -2010,7 +2022,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"frank_{direction}_delta_{rn}", f"Frankenstein {dir_label} Δ ({rn})", fig_delta)
+            append_dashboard_fig(
+                f"frank_{direction}_delta_{rn}",
+                f"Frankenstein {dir_label} Δ ({rn})",
+                fig_delta,
+            )
 
     # ------------------------------------------------------------------
     # Section 3b: Frankenstein Localisation Gap
@@ -2058,7 +2074,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"frank_loc_gap_{rn}", f"Frankenstein Localisation Gap ({rn})", fig_gap)
+        append_dashboard_fig(
+            f"frank_loc_gap_{rn}",
+            f"Frankenstein Localisation Gap ({rn})",
+            fig_gap,
+        )
 
         fig_bar = go.Figure(
             go.Bar(
@@ -2076,7 +2096,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"frank_loc_gap_bar_{rn}", f"Localisation Gap Bar ({rn})", fig_bar)
+        append_dashboard_fig(f"frank_loc_gap_bar_{rn}", f"Localisation Gap Bar ({rn})", fig_bar)
 
     # ------------------------------------------------------------------
     # Section 4: Cross-Burst Frankenstein
@@ -2184,7 +2204,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             fig.update_xaxes(title_text="Last Block from Bottom Model")
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
             fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
-            _add(f"xfrank_{pair_key}_{rn}", f"Cross-Frank {sa}×{sb} ({rn})", fig)  # noqa: RUF001
+            append_dashboard_fig(f"xfrank_{pair_key}_{rn}", f"Cross-Frank {sa}×{sb} ({rn})", fig)  # noqa: RUF001
             fig_delta.update_layout(
                 title=f"Cross-Burst Frankenstein Δ (Burst − Other): {sa} × {sb} — {rn}",  # noqa: RUF001
                 xaxis_title="Last Block from Bottom Model",
@@ -2192,7 +2212,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"xfrank_{pair_key}_delta_{rn}", f"Cross-Frank {sa}×{sb} Δ ({rn})", fig_delta)  # noqa: RUF001
+            append_dashboard_fig(
+                f"xfrank_{pair_key}_delta_{rn}",
+                f"Cross-Frank {sa}×{sb} Δ ({rn})",  # noqa: RUF001
+                fig_delta,
+            )
 
     # ------------------------------------------------------------------
     # Section 5: Task Vector Transfer (dual-class)
@@ -2217,7 +2241,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"transfer_{class_key}_{rn}", f"Transfer {class_label} ({rn})", fig)
+            append_dashboard_fig(
+                f"transfer_{class_key}_{rn}",
+                f"Transfer {class_label} ({rn})",
+                fig,
+            )
 
     # ------------------------------------------------------------------
     # Section 6: Pruning Robustness (dual-class)
@@ -2283,7 +2311,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         fig.update_xaxes(title_text="Sparsity (%)")
         fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
         fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
-        _add(f"pruning_{rn}", f"Pruning Robustness ({rn})", fig)
+        append_dashboard_fig(f"pruning_{rn}", f"Pruning Robustness ({rn})", fig)
         fig_delta.update_layout(
             title=f"Pruning Robustness Δ (Burst − Other) — {rn}",  # noqa: RUF001
             xaxis_title="Sparsity (%)",
@@ -2291,7 +2319,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"pruning_delta_{rn}", f"Pruning Robustness Δ ({rn})", fig_delta)
+        append_dashboard_fig(f"pruning_delta_{rn}", f"Pruning Robustness Δ ({rn})", fig_delta)
 
     # ------------------------------------------------------------------
     # Section 7: Relearning Efficiency (dual-class)
@@ -2357,7 +2385,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         fig.update_xaxes(title_text="Relearning Step")
         fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=1)
         fig.update_yaxes(title_text="Accuracy", range=[0, 1], row=1, col=2)
-        _add(f"relearning_{rn}", f"Relearning ({rn})", fig)
+        append_dashboard_fig(f"relearning_{rn}", f"Relearning ({rn})", fig)
         fig_delta.update_layout(
             title=f"Relearning After Reversion Δ (Burst − Other) — {rn}",  # noqa: RUF001
             xaxis_title="Relearning Step",
@@ -2365,7 +2393,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"relearning_delta_{rn}", f"Relearning Δ ({rn})", fig_delta)
+        append_dashboard_fig(f"relearning_delta_{rn}", f"Relearning Δ ({rn})", fig_delta)
 
         _trapz = np.trapezoid
         auc_vals = {}
@@ -2387,7 +2415,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"relearning_auc_{rn}", f"Relearning AUC ({rn})", fig_auc)
+        append_dashboard_fig(f"relearning_auc_{rn}", f"Relearning AUC ({rn})", fig_auc)
 
     # ------------------------------------------------------------------
     # Section 8: Forgetting Trajectory Dimensionality
@@ -2408,7 +2436,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"trajectory_dim_{rn}", f"Trajectory Dim ({rn})", fig)
+        append_dashboard_fig(f"trajectory_dim_{rn}", f"Trajectory Dim ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 9: Forgetting Speed Decomposition
@@ -2432,7 +2460,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"fsd_{metric_key}_{rn}", f"{metric_label} ({rn})", fig)
+            append_dashboard_fig(f"fsd_{metric_key}_{rn}", f"{metric_label} ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 10: Gradient Re-Alignment During Reversion
@@ -2463,7 +2491,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"grad_temporal_{rn}", f"Grad Re-Alignment ({rn})", fig)
+        append_dashboard_fig(f"grad_temporal_{rn}", f"Grad Re-Alignment ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 11: Per-Layer Interference Heatmap
@@ -2501,7 +2529,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"layer_interference_{rn}", f"Layer Interference Mean ({rn})", fig)
+        append_dashboard_fig(f"layer_interference_{rn}", f"Layer Interference Mean ({rn})", fig)
 
         z_end = []
         for sched in schedules:
@@ -2526,7 +2554,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"layer_interference_end_{rn}", f"Layer Interference End-of-Burst ({rn})", fig_end)
+        append_dashboard_fig(
+            f"layer_interference_end_{rn}",
+            f"Layer Interference End-of-Burst ({rn})",
+            fig_end,
+        )
 
     # ------------------------------------------------------------------
     # Section 12: Critical Sharpness — Global (λ_c = 2/η_c)
@@ -2564,7 +2596,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"sharpness_global_{class_key}_{rn}", f"Sharpness {class_label} ({rn})", fig)
+            append_dashboard_fig(
+                f"sharpness_global_{class_key}_{rn}",
+                f"Sharpness {class_label} ({rn})",
+                fig,
+            )
 
         diff_vals = {}
         for s in schedules:
@@ -2588,7 +2624,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"sharpness_global_diff_{rn}", f"Sharpness Δ ({rn})", fig_diff)
+            append_dashboard_fig(f"sharpness_global_diff_{rn}", f"Sharpness Δ ({rn})", fig_diff)
 
     # ------------------------------------------------------------------
     # Section 13: Critical Sharpness — Per-Layer Heatmap
@@ -2643,7 +2679,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(
+            append_dashboard_fig(
                 f"sharpness_layer_{class_key}_{rn}",
                 f"Per-Layer Sharpness {class_label} ({rn})",
                 fig,
@@ -2691,7 +2727,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"sharpness_layer_diff_{rn}", f"Per-Layer Sharpness Δ ({rn})", fig_hm_diff)
+        append_dashboard_fig(
+            f"sharpness_layer_diff_{rn}",
+            f"Per-Layer Sharpness Δ ({rn})",
+            fig_hm_diff,
+        )
 
         for class_key, class_label in [
             ("burst_layers", "Burst Class"),
@@ -2759,7 +2799,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(
+            append_dashboard_fig(
                 f"sharpness_profile_{class_key}_{rn}",
                 f"Sharpness Profile {class_label} ({rn})",
                 fig,
@@ -2828,7 +2868,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"sharpness_profile_diff_{rn}", f"Sharpness Profile Δ ({rn})", fig_diff)
+        append_dashboard_fig(
+            f"sharpness_profile_diff_{rn}",
+            f"Sharpness Profile Δ ({rn})",
+            fig_diff,
+        )
 
     # ------------------------------------------------------------------
     # Section 14: Cross-Run Burst Position Comparison
@@ -2870,7 +2914,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"position_{metric_key}", f"Position {metric_label}", fig)
+            append_dashboard_fig(f"position_{metric_key}", f"Position {metric_label}", fig)
 
     # ------------------------------------------------------------------
     # Section 14: Gradient Norm Ratio Per Layer
@@ -2910,7 +2954,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"grad_norm_ratio_{rn}", f"Grad Norm Ratio ({rn})", fig)
+        append_dashboard_fig(f"grad_norm_ratio_{rn}", f"Grad Norm Ratio ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 15: Gradient Effective Rank Per Layer
@@ -2949,7 +2993,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"grad_rank_{rn}", f"Grad Rank ({rn})", fig)
+        append_dashboard_fig(f"grad_rank_{rn}", f"Grad Rank ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 16: Gradient SNR Per Layer
@@ -2988,7 +3032,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"grad_snr_{rn}", f"Grad SNR ({rn})", fig)
+        append_dashboard_fig(f"grad_snr_{rn}", f"Grad SNR ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 17: Gradient Conflict Rate Per Layer
@@ -3031,7 +3075,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"conflict_rate_{rn}", f"Conflict Rate ({rn})", fig)
+        append_dashboard_fig(f"conflict_rate_{rn}", f"Conflict Rate ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 18: Per-Token-Position Gradient Norms
@@ -3066,7 +3110,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"token_pos_grad_{rn}", f"Token Pos Grad ({rn})", fig)
+        append_dashboard_fig(f"token_pos_grad_{rn}", f"Token Pos Grad ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 19: Gradient Attribution to Composition Steps
@@ -3092,7 +3136,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(
+            append_dashboard_fig(
                 f"grad_attribution_intermediate_{rn}", f"Grad Attribution Intermediate ({rn})", fig
             )
 
@@ -3108,7 +3152,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"grad_attribution_final_{rn}", f"Grad Attribution Final ({rn})", fig)
+            append_dashboard_fig(
+                f"grad_attribution_final_{rn}",
+                f"Grad Attribution Final ({rn})",
+                fig,
+            )
 
     # ------------------------------------------------------------------
     # Section 20: Forgetting Gradient Alignment (global + per-layer)
@@ -3140,7 +3188,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"forgetting_grad_alignment_{rn}", f"Forgetting Grad Alignment ({rn})", fig)
+            append_dashboard_fig(
+                f"forgetting_grad_alignment_{rn}",
+                f"Forgetting Grad Alignment ({rn})",
+                fig,
+            )
 
         layer_group_names = fga.get(schedules[0], {}).get("layer_group_names", [])
         ps0 = fga.get(schedules[0], {}).get("per_seed", [])
@@ -3171,7 +3223,11 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 template="plotly_white",
                 height=500,
             )
-            _add(f"fga_per_layer_{rn}", f"Per-Layer Grad Alignment ({rn})", fig_heat)
+            append_dashboard_fig(
+                f"fga_per_layer_{rn}",
+                f"Per-Layer Grad Alignment ({rn})",
+                fig_heat,
+            )
 
     # ------------------------------------------------------------------
     # Section 21: Per-Layer Weight Drift Heatmap
@@ -3211,7 +3267,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"weight_drift_per_layer_{rn}", f"Per-Layer Weight Drift ({rn})", fig)
+        append_dashboard_fig(f"weight_drift_per_layer_{rn}", f"Per-Layer Weight Drift ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 22: Effective Rank of ΔW Per Layer
@@ -3250,7 +3306,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"effective_rank_per_layer_{rn}", f"Effective Rank ({rn})", fig)
+        append_dashboard_fig(f"effective_rank_per_layer_{rn}", f"Effective Rank ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 23: CKA Per Layer
@@ -3290,7 +3346,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             template="plotly_white",
             height=500,
         )
-        _add(f"cka_per_layer_{rn}", f"CKA Per Layer ({rn})", fig)
+        append_dashboard_fig(f"cka_per_layer_{rn}", f"CKA Per Layer ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Section 24: Directional Pruning (top-k SVD of ΔW)
@@ -3345,7 +3401,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         )
         fig.update_xaxes(title_text="k (SVD components removed)")
         fig.update_yaxes(title_text="Accuracy", range=[0, 1])
-        _add(f"directional_pruning_{rn}", f"Directional Pruning ({rn})", fig)
+        append_dashboard_fig(f"directional_pruning_{rn}", f"Directional Pruning ({rn})", fig)
 
     # ------------------------------------------------------------------
     # Assemble HTML
@@ -3785,14 +3841,14 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
 
     all_figs: list[tuple[str, str, Any]] = []
 
-    def _try_save_png(fig: object, name: str) -> None:
+    def try_save_extended_png(fig: object, name: str) -> None:
         with contextlib.suppress(Exception):
             pio.write_image(fig, str(charts_dir / name), width=1200, height=500)
 
     for key, title, ylabel in scalar_metrics:
         fig = ext_bar_fig(schedules, key, title, ylabel, metrics, colors)
         all_figs.append((key, title, fig))
-        _try_save_png(fig, f"extended_{key}.png")
+        try_save_extended_png(fig, f"extended_{key}.png")
 
     for curve_key, title, ylabel in [
         ("burst_curve", "Special Class Accuracy", "Accuracy"),
@@ -3801,7 +3857,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
     ]:
         fig_ba = ext_curve_burst_aligned(schedules, metrics, colors, curve_key, title, ylabel)
         all_figs.append((f"{curve_key}_burst_aligned", f"{title} — Burst-Start Aligned", fig_ba))
-        _try_save_png(fig_ba, f"extended_{curve_key}_burst_aligned.png")
+        try_save_extended_png(fig_ba, f"extended_{curve_key}_burst_aligned.png")
 
     fig_var = go.Figure()
     for s in schedules:
@@ -3822,7 +3878,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
         height=450,
     )
     all_figs.append(("seed_variance_steps_to_peak", "Cross-Seed Variance: Steps to Peak", fig_var))
-    _try_save_png(fig_var, "extended_seed_variance.png")
+    try_save_extended_png(fig_var, "extended_seed_variance.png")
 
     html_parts = [
         """<!DOCTYPE html>

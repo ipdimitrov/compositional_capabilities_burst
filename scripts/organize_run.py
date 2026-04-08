@@ -28,10 +28,10 @@ def organize(run_dir: Path) -> None:
     for src_dir in (logs_dir, results_dir):
         if not src_dir.exists():
             continue
-        _move_heavy_in(src_dir, heavy_dir, src_dir)
+        move_heavy_in(src_dir, heavy_dir, src_dir)
 
     light_size = sum(
-        _file_size(f)
+        file_size(f)
         for d in (logs_dir, results_dir)
         if d.exists()
         for f in d.rglob("*")
@@ -42,14 +42,15 @@ def organize(run_dir: Path) -> None:
     logger.info("  Heavy (excluded): %.1f MB", heavy_size / 1e6)
 
 
-def _file_size(p: Path) -> int:
+def file_size(p: Path) -> int:
+    """Return file size in bytes, or 0 if missing or unreadable."""
     try:
         return p.stat().st_size
     except OSError:
         return 0
 
 
-def _move_heavy_in(root: Path, heavy_dir: Path, base: Path) -> None:
+def move_heavy_in(root: Path, heavy_dir: Path, base: Path) -> None:
     """Recursively move heavy files/dirs from root into heavy_dir, symlinking back."""
     for p in sorted(root.iterdir()):
         if p.is_symlink():
@@ -64,7 +65,7 @@ def _move_heavy_in(root: Path, heavy_dir: Path, base: Path) -> None:
             p.symlink_to(dest.resolve())
             logger.info("  moved dir  %s/ -> _heavy/%s/", rel, rel)
         elif p.is_dir():
-            _move_heavy_in(p, heavy_dir, base)
+            move_heavy_in(p, heavy_dir, base)
         elif p.is_file() and p.suffix in HEAVY_EXTENSIONS:
             rel = p.relative_to(base)
             dest = heavy_dir / rel

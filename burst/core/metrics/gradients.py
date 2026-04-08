@@ -57,7 +57,7 @@ from burst.core.parallel import JobResult, run_job_pool  # noqa: E402
 from burst.core.repro import write_repro_manifest  # noqa: E402
 from burst.core.train_utils import (  # noqa: E402
     DEVICE,
-    _cross_entropy_logits_BTV_targets_BT,
+    cross_entropy_logits_BTV_targets_BT,
     load_net,
     resolve_logs_dir,
     resolve_results_dir,
@@ -70,7 +70,7 @@ NEAR_ZERO = 1e-12
 
 # ---------------------------------------------------------------------------
 # Feature flags — comment out any key to skip that metric entirely.
-# This controls what is computed in each _worker_main() subprocess.
+# This controls what is computed in each worker_main() subprocess.
 # ---------------------------------------------------------------------------
 GRAD_METRICS: dict[str, bool] = {
     "cosine_global": True,
@@ -95,13 +95,13 @@ N_SNR_EXAMPLES: int = 16
 # ---------------------------------------------------------------------------
 
 
-def _flat_grad(net: nanoGPT) -> torch.Tensor:
+def flat_grad(net: nanoGPT) -> torch.Tensor:
     """Concatenate all parameter gradients into a single flat vector."""
     grads = [p.grad.detach().view(-1) for p in net.parameters() if p.grad is not None]
     return torch.cat(grads) if grads else torch.zeros(1, device=DEVICE)
 
 
-def _layer_groups(net: nanoGPT) -> list[tuple[str, list[str]]]:
+def layer_groups_for_net(net: nanoGPT) -> list[tuple[str, list[str]]]:
     """Return ordered (short_name, [param_name, ...]) groups for per-layer grad-sim.
 
     Groups:
@@ -146,7 +146,7 @@ def _layer_groups(net: nanoGPT) -> list[tuple[str, list[str]]]:
 # ---------------------------------------------------------------------------
 
 
-def _grad_vecs_per_layer(
+def grad_vecs_per_layer(
     net: nanoGPT, docs_np: np.ndarray, n_samples: int, layer_groups: list[tuple[str, list[str]]]
 ) -> dict[str, torch.Tensor]:
     """Run one backward pass and extract per-layer gradient vectors."""
@@ -156,7 +156,7 @@ def _grad_vecs_per_layer(
     inp_BT, tgt_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
         logits_BTV = net(inp_BT)
-    loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV.float(), tgt_BT)
+    loss = cross_entropy_logits_BTV_targets_BT(logits_BTV.float(), tgt_BT)
     loss.backward()
 
     param_map = dict(net.named_parameters())
@@ -171,7 +171,7 @@ def _grad_vecs_per_layer(
     return result
 
 
-def _grad_vec_for_docs(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> torch.Tensor:
+def grad_vec_for_docs(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> torch.Tensor:
     """Compute a flat gradient vector from a random subset of docs."""
     n = min(n_samples, docs_np.shape[0])
     idx = get_rng().choice(docs_np.shape[0], n, replace=False)
@@ -179,9 +179,9 @@ def _grad_vec_for_docs(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> tor
     inp_BT, tgt_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
         logits_BTV = net(inp_BT)
-    loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV.float(), tgt_BT)
+    loss = cross_entropy_logits_BTV_targets_BT(logits_BTV.float(), tgt_BT)
     loss.backward()
-    return _flat_grad(net).float()
+    return flat_grad(net).float()
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ def _grad_vec_for_docs(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> tor
 # ---------------------------------------------------------------------------
 
 
-def _effective_rank(g_vec: torch.Tensor, param_shape: tuple[int, int]) -> float:
+def effective_rank(g_vec: torch.Tensor, param_shape: tuple[int, int]) -> float:
     """Effective rank of a gradient vector reshaped as a matrix.
 
     Computes exp(H(sigma_hat)) where H is the entropy of the normalised
@@ -209,11 +209,11 @@ def _effective_rank(g_vec: torch.Tensor, param_shape: tuple[int, int]) -> float:
     return float(torch.exp(entropy).item())
 
 
-def _grad_rank_per_layer(
+def grad_rank_per_layer(
     net: nanoGPT, docs_np: np.ndarray, n_samples: int, layer_groups: list[tuple[str, list[str]]]
 ) -> dict[str, float]:
     """Effective rank of the gradient matrix for each layer group (burst data)."""
-    vecs = _grad_vecs_per_layer(net, docs_np, n_samples, layer_groups)
+    vecs = grad_vecs_per_layer(net, docs_np, n_samples, layer_groups)
     param_map = dict(net.named_parameters())
 
     result: dict[str, float] = {}
@@ -229,13 +229,13 @@ def _grad_rank_per_layer(
         ]
         if shapes:
             m, n = shapes[0]
-            result[name] = _effective_rank(g_vec, (m, n))
+            result[name] = effective_rank(g_vec, (m, n))
         else:
             result[name] = float("nan")
     return result
 
 
-def _grad_snr_per_layer(
+def grad_snr_per_layer(
     net: nanoGPT, docs_np: np.ndarray, n_examples: int, layer_groups: list[tuple[str, list[str]]]
 ) -> dict[str, float]:
     """Per-layer gradient signal-to-noise ratio across individual examples.
@@ -265,7 +265,7 @@ def _grad_snr_per_layer(
         """Compute per-example loss for vmap-based gradient computation."""
         with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
             logits_1LV = functional_call(net, (params, buffers), (inp_1L.unsqueeze(0),))
-        return _cross_entropy_logits_BTV_targets_BT(logits_1LV, tgt_1L.unsqueeze(0))
+        return cross_entropy_logits_BTV_targets_BT(logits_1LV, tgt_1L.unsqueeze(0))
 
     grad_fn = grad(loss_fn)
     per_example_grads = vmap(grad_fn, in_dims=(None, 0, 0))(params, inp_EL, tgt_EL)
@@ -288,7 +288,7 @@ def _grad_snr_per_layer(
     return result
 
 
-def _conflict_rate_per_layer(
+def conflict_rate_per_layer(
     burst_vecs: dict[str, torch.Tensor], other_vecs: dict[str, torch.Tensor]
 ) -> dict[str, float]:
     """Fraction of parameters where burst and other gradients have opposite signs.
@@ -308,7 +308,7 @@ def _conflict_rate_per_layer(
     return result
 
 
-def _grad_projection_metrics(
+def grad_projection_metrics(
     g_burst: torch.Tensor,
     g_other: torch.Tensor,
 ) -> dict[str, float]:
@@ -374,7 +374,7 @@ def _grad_projection_metrics(
     }
 
 
-def _token_pos_grad_norms(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> list[float]:
+def token_pos_grad_norms(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> list[float]:
     """Per-token-position gradient norm w.r.t. the embedding output.
 
     Hooks the wte embedding output to capture d(loss)/d(h_t) for each
@@ -388,7 +388,7 @@ def _token_pos_grad_norms(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> 
 
     emb_grad: list[torch.Tensor] = []
 
-    def _hook(
+    def emb_backward_hook(
         _module: torch.nn.Module,
         _grad_input: tuple[torch.Tensor, ...],
         grad_output: tuple[torch.Tensor, ...],
@@ -396,7 +396,7 @@ def _token_pos_grad_norms(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> 
         """Capture embedding gradient from backward hook."""
         emb_grad.append(grad_output[0].detach().float())
 
-    handle = net.transformer.wte.register_full_backward_hook(_hook)
+    handle = net.transformer.wte.register_full_backward_hook(emb_backward_hook)
     net.zero_grad(set_to_none=True)
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
         logits = net(inp)
@@ -412,7 +412,7 @@ def _token_pos_grad_norms(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> 
     return norms_T.cpu().tolist()
 
 
-def _grad_attribution(
+def grad_attribution(
     net: nanoGPT, docs_np: np.ndarray, n_samples: int, prompt_len: int, doc_len: int
 ) -> dict[str, Any]:
     """Decompose gradient norm by which output token position it comes from.
@@ -478,9 +478,9 @@ def compute_grad_cosine_sim(
     """Compute global burst-vs-other gradient cosine similarity."""
     net.train()
     net.zero_grad(set_to_none=True)
-    g_burst = _grad_vec_for_docs(net, docs_burst_BL, n_samples=n_samples)
+    g_burst = grad_vec_for_docs(net, docs_burst_BL, n_samples=n_samples)
     net.zero_grad(set_to_none=True)
-    g_other = _grad_vec_for_docs(net, docs_other_BL, n_samples=n_samples)
+    g_other = grad_vec_for_docs(net, docs_other_BL, n_samples=n_samples)
     cos_sim = F.cosine_similarity(g_burst.unsqueeze(0), g_other.unsqueeze(0)).item()
     net.zero_grad(set_to_none=True)
     return {"burst_vs_other": cos_sim}
@@ -490,13 +490,13 @@ def compute_grad_cosine_sim_per_layer(
     net: nanoGPT, docs_burst_BL: np.ndarray, docs_other_BL: np.ndarray, n_samples: int
 ) -> dict[str, Any]:
     """Compute burst-vs-other cosine similarity separately for each layer group."""
-    layer_groups = _layer_groups(net)
+    layer_groups = layer_groups_for_net(net)
     net.train()
 
     net.zero_grad(set_to_none=True)
-    burst_vecs = _grad_vecs_per_layer(net, docs_burst_BL, n_samples, layer_groups)
+    burst_vecs = grad_vecs_per_layer(net, docs_burst_BL, n_samples, layer_groups)
     net.zero_grad(set_to_none=True)
-    other_vecs = _grad_vecs_per_layer(net, docs_other_BL, n_samples, layer_groups)
+    other_vecs = grad_vecs_per_layer(net, docs_other_BL, n_samples, layer_groups)
     net.zero_grad(set_to_none=True)
 
     per_layer: dict[str, float] = {}
@@ -571,7 +571,7 @@ def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
         if doc_list:
             pooled = np.concatenate(doc_list)
             net.zero_grad(set_to_none=True)
-            grad_vecs.append(_grad_vec_for_docs(net, pooled, n_samples=n_samples))
+            grad_vecs.append(grad_vec_for_docs(net, pooled, n_samples=n_samples))
         else:
             grad_vecs.append(None)
 
@@ -602,7 +602,7 @@ def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
 # ---------------------------------------------------------------------------
 
 
-def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
+def worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Run a single gradient-metric job in a subprocess."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
@@ -646,7 +646,7 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
             pickle.dump(result, f)
         return
 
-    layer_groups = _layer_groups(net)
+    layer_groups = layer_groups_for_net(net)
     net.train()
 
     # --- cosine_global + grad_projection ---
@@ -656,9 +656,9 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     if need_global_grads:
         net.zero_grad(set_to_none=True)
-        g_burst_flat = _grad_vec_for_docs(net, burst_docs_all, n_samples=gs_bs)
+        g_burst_flat = grad_vec_for_docs(net, burst_docs_all, n_samples=gs_bs)
         net.zero_grad(set_to_none=True)
-        g_other_flat = _grad_vec_for_docs(net, other_docs_all, n_samples=gs_bs)
+        g_other_flat = grad_vec_for_docs(net, other_docs_all, n_samples=gs_bs)
 
         if GRAD_METRICS.get("cosine_global", True):
             result["burst_vs_other"] = F.cosine_similarity(
@@ -666,7 +666,7 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
             ).item()
 
         if GRAD_METRICS.get("grad_projection", True):
-            result["grad_projection"] = _grad_projection_metrics(g_burst_flat, g_other_flat)
+            result["grad_projection"] = grad_projection_metrics(g_burst_flat, g_other_flat)
 
         net.zero_grad(set_to_none=True)
 
@@ -679,9 +679,9 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     if need_layer_vecs:
         net.zero_grad(set_to_none=True)
-        burst_vecs = _grad_vecs_per_layer(net, burst_docs_all, gs_bs, layer_groups)
+        burst_vecs = grad_vecs_per_layer(net, burst_docs_all, gs_bs, layer_groups)
         net.zero_grad(set_to_none=True)
-        other_vecs = _grad_vecs_per_layer(net, other_docs_all, gs_bs, layer_groups)
+        other_vecs = grad_vecs_per_layer(net, other_docs_all, gs_bs, layer_groups)
         net.zero_grad(set_to_none=True)
 
         if GRAD_METRICS.get("cosine_per_layer", True):
@@ -708,27 +708,27 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
             result["other_norm_per_layer"] = other_norms
 
         if GRAD_METRICS.get("conflict_rate", True):
-            result["conflict_rate"] = _conflict_rate_per_layer(burst_vecs, other_vecs)
+            result["conflict_rate"] = conflict_rate_per_layer(burst_vecs, other_vecs)
 
     # --- grad_rank ---
     if GRAD_METRICS.get("grad_rank", True):
         net.zero_grad(set_to_none=True)
-        result["grad_rank"] = _grad_rank_per_layer(net, burst_docs_all, gs_bs, layer_groups)
+        result["grad_rank"] = grad_rank_per_layer(net, burst_docs_all, gs_bs, layer_groups)
 
     # --- grad_snr ---
     if GRAD_METRICS.get("grad_snr", True):
         net.zero_grad(set_to_none=True)
-        result["grad_snr"] = _grad_snr_per_layer(net, burst_docs_all, N_SNR_EXAMPLES, layer_groups)
+        result["grad_snr"] = grad_snr_per_layer(net, burst_docs_all, N_SNR_EXAMPLES, layer_groups)
 
     # --- token_pos_grad ---
     if GRAD_METRICS.get("token_pos_grad", True):
         net.zero_grad(set_to_none=True)
-        result["token_pos_grad_norms"] = _token_pos_grad_norms(net, burst_docs_all, n_samples=gs_bs)
+        result["token_pos_grad_norms"] = token_pos_grad_norms(net, burst_docs_all, n_samples=gs_bs)
 
     # --- grad_attribution ---
     if GRAD_METRICS.get("grad_attribution", True):
         net.zero_grad(set_to_none=True)
-        result["grad_attribution"] = _grad_attribution(
+        result["grad_attribution"] = grad_attribution(
             net, burst_docs_all, n_samples=gs_bs, prompt_len=prompt_len, doc_len=doc_len
         )
 
@@ -753,7 +753,7 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
 # ---------------------------------------------------------------------------
 
 
-def _resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
+def resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
     """Return (config_path, data_path, ckpt_root, gs_out_dir) for a run directory."""
     results_dir = resolve_results_dir(run_dir)
     logs_dir = resolve_logs_dir(run_dir)
@@ -812,7 +812,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         },
         note=args.note,
     )
-    config_path, data_path, ckpt_root, gs_out_dir = _resolve_run_paths(run_dir)
+    config_path, data_path, ckpt_root, gs_out_dir = resolve_run_paths(run_dir)
     with config_path.open() as f:
         run_cfg = json.load(f)
 
@@ -1095,6 +1095,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
 if __name__ == "__main__":
     if "--worker" in sys.argv:
-        _worker_main()
+        worker_main()
     else:
         main()

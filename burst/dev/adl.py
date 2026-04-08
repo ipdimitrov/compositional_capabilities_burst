@@ -193,7 +193,7 @@ def free_gen_accuracy_with_ablation(
     norms_T = delta_TN.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     delta_unit_TN = delta_TN / norms_T
 
-    def _ablate_hook(
+    def ablate_forward_hook(
         _module: object,
         _input: object,
         output: object,
@@ -215,9 +215,9 @@ def free_gen_accuracy_with_ablation(
         return x_BTN
 
     if ablate_layer == 0:
-        handle = net.transformer.drop.register_forward_hook(_ablate_hook)
+        handle = net.transformer.drop.register_forward_hook(ablate_forward_hook)
     else:
-        handle = net.transformer.h[ablate_layer - 1].register_forward_hook(_ablate_hook)
+        handle = net.transformer.h[ablate_layer - 1].register_forward_hook(ablate_forward_hook)
 
     try:
         generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)

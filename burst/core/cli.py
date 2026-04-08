@@ -61,7 +61,7 @@ class CliCommand:
     gradients_args: list[str]
 
 
-def _parse_args() -> CliCommand:  # noqa: C901, PLR0915
+def parse_args() -> CliCommand:  # noqa: C901, PLR0915
     """Parse CLI arguments into a CliCommand."""
     parser = argparse.ArgumentParser(description="Canonical burst pipeline CLI.")
     parser.add_argument("--seed", type=int, default=DEFAULT_REPRO_SEED)
@@ -180,7 +180,7 @@ def _parse_args() -> CliCommand:  # noqa: C901, PLR0915
 
 def main() -> None:
     """Run the burst pipeline CLI."""
-    cmd = _parse_args()
+    cmd = parse_args()
     seed_all(cmd.seed, deterministic=cmd.deterministic)
 
     if cmd.mode == "train":

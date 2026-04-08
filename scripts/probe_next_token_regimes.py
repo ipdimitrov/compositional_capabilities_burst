@@ -54,7 +54,7 @@ N_DIGITS = 10
 PROBE_METHODS = ["logit_lens", "learned_probe"]
 
 
-def _ordered_schedules(scheds: set[str]) -> list[str]:
+def ordered_schedules(scheds: set[str]) -> list[str]:
     """Return schedules in canonical order, falling back to sorted."""
     return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
 
@@ -386,7 +386,7 @@ def plot_raw_curves(
     raw_scheds = set()
     for k in all_results:
         raw_scheds.add(k.rsplit("_s", 1)[0])
-    schedules_seen = _ordered_schedules(raw_scheds)
+    schedules_seen = ordered_schedules(raw_scheds)
 
     K = n_layers + 1
     layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
@@ -519,7 +519,7 @@ def plot_combined_curves(
     for step_data in step_results.values():
         for k in step_data:
             raw_scheds.add(k.rsplit("_s", 1)[0])
-    schedules_seen = _ordered_schedules(raw_scheds)
+    schedules_seen = ordered_schedules(raw_scheds)
 
     sorted_steps = sorted(step_results.keys())
     step_colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(sorted_steps)))
@@ -634,7 +634,7 @@ def plot_combined_diffs(
     plt.close(fig)
 
 
-def _worker_main() -> None:
+def worker_main() -> None:
     """Subprocess entry: load pickled args, run single probe job, save results."""
     import warnings  # noqa: PLC0415
 
@@ -894,6 +894,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if "--worker" in sys.argv:
         sys.argv.remove("--worker")
-        _worker_main()
+        worker_main()
     else:
         main()

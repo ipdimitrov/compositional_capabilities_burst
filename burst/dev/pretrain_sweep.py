@@ -89,17 +89,20 @@ class SweepRun:
         }
 
 
-def _fmt_float(v: float) -> str:
+def fmt_float(v: float) -> str:
+    """Format a float for human-readable plot titles and filenames."""
     return f"{v:.0e}" if v < SMALL_FLOAT_THRESHOLD else f"{v:.4f}".rstrip("0").rstrip(".")
 
 
-def _file_safe(v: float) -> str:
+def file_safe(v: float) -> str:
+    """Format a numeric value for use inside filenames without dots or scientific noise."""
     if isinstance(v, int):
         return str(v)
     return f"{v:.0e}" if v < SMALL_FLOAT_THRESHOLD else str(v).replace(".", "p")
 
 
-def _build_sweep_runs(n_seeds: int, depth: int, burst_pos: int) -> list[SweepRun]:
+def build_sweep_runs(n_seeds: int, depth: int, burst_pos: int) -> list[SweepRun]:
+    """Enumerate all grid combinations as `SweepRun` rows for the pretrain sweep."""
     staged: list[dict[str, Any]] = []
     combos = itertools.product(
         LR_VALUES,
@@ -140,18 +143,20 @@ def _build_sweep_runs(n_seeds: int, depth: int, burst_pos: int) -> list[SweepRun
     return runs
 
 
-def _chunk_runs(runs: list[SweepRun], chunk_size: int) -> list[list[SweepRun]]:
+def chunk_runs(runs: list[SweepRun], chunk_size: int) -> list[list[SweepRun]]:
+    """Split `runs` into contiguous chunks of at most `chunk_size` each."""
     if chunk_size <= 0:
         return [runs]
     return [runs[i : i + chunk_size] for i in range(0, len(runs), chunk_size)]
 
 
-def _build_group_tasks(
+def build_group_tasks(
     grouped: dict[tuple[int, int], list[SweepRun]],
     max_workers: int,
     chunk_size: int,
     base_cfg: dict[str, Any],
 ) -> list[tuple[tuple[int, int], list[SweepRun], dict[str, Any]]]:
+    """Build parallel worker tasks: each tuple is (group key, run chunk, shared base cfg)."""
     tasks: list[tuple[tuple[int, int], list[SweepRun], dict[str, Any]]] = []
     n_groups = len(grouped)
     if n_groups == 0:
@@ -165,14 +170,15 @@ def _build_group_tasks(
             effective_chunk_size = max(1, math.ceil(len(group_runs) / auto_chunks_per_group))
         tasks.extend(
             (group_key, run_chunk, base_cfg)
-            for run_chunk in _chunk_runs(group_runs, effective_chunk_size)
+            for run_chunk in chunk_runs(group_runs, effective_chunk_size)
         )
     return tasks
 
 
-def _run_group(
+def run_group(
     args: tuple[tuple[int, int], list[SweepRun], dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Execute one worker chunk: pretrain each run in `group_runs`, return result rows."""
     group_key, group_runs, base_cfg = args
     n_a, n_docs_per_task = group_key
 
@@ -248,12 +254,14 @@ def _run_group(
     return rows
 
 
-def _is_cuda_oom(exc: BaseException) -> bool:
+def is_cuda_oom(exc: BaseException) -> bool:
+    """Return True if `exc` looks like a CUDA out-of-memory error."""
     text = str(exc).lower()
     return "out of memory" in text and "cuda" in text
 
 
-def _plot_single_run(row: dict[str, Any], out_dir: Path) -> None:
+def plot_single_run(row: dict[str, Any], out_dir: Path) -> None:
+    """Save one accuracy/loss curve PNG for a single sweep run."""
     fig, ax_acc = plt.subplots(figsize=(10, 5.5))
     ax_loss = ax_acc.twinx()
 
@@ -274,7 +282,7 @@ def _plot_single_run(row: dict[str, Any], out_dir: Path) -> None:
 
     title = (
         f"{row['config_id']} seed={row['seed']} | "
-        f"lr={_fmt_float(row['lr'])}, lr_pre_end={row['lr_pretrain_end_frac']}, "
+        f"lr={fmt_float(row['lr'])}, lr_pre_end={row['lr_pretrain_end_frac']}, "
         f"beta={row['beta1']}, pre_steps={row['pre_burst_steps']}, "
         f"N_A={row['n_a']}, n_docs={row['n_docs_per_task']}"
     )
@@ -285,8 +293,8 @@ def _plot_single_run(row: dict[str, Any], out_dir: Path) -> None:
 
     name = (
         f"{row['config_id']}_s{row['seed']}_"
-        f"lr{_file_safe(row['lr'])}_lpe{_file_safe(row['lr_pretrain_end_frac'])}_"
-        f"b{_file_safe(row['beta1'])}_p{row['pre_burst_steps']}_"
+        f"lr{file_safe(row['lr'])}_lpe{file_safe(row['lr_pretrain_end_frac'])}_"
+        f"b{file_safe(row['beta1'])}_p{row['pre_burst_steps']}_"
         f"na{row['n_a']}_nd{row['n_docs_per_task']}.png"
     )
     fig.tight_layout()
@@ -294,8 +302,9 @@ def _plot_single_run(row: dict[str, Any], out_dir: Path) -> None:
     plt.close(fig)
 
 
-def _plot_summary(raw_df: pd.DataFrame, agg_df: pd.DataFrame, out_dir: Path) -> None:
-    def _bar_by(df: pd.DataFrame, key: str, fname: str, xlab: str) -> None:
+def plot_summary(raw_df: pd.DataFrame, agg_df: pd.DataFrame, out_dir: Path) -> None:
+    """Write aggregate bar charts and top-config plot from sweep results."""
+    def plot_bar_by(df: pd.DataFrame, key: str, fname: str, xlab: str) -> None:
         stats = (
             df.groupby(key)["final_acc_other"]
             .agg(mean="mean", std="std")
@@ -312,17 +321,17 @@ def _plot_summary(raw_df: pd.DataFrame, agg_df: pd.DataFrame, out_dir: Path) -> 
         fig.savefig(out_dir / fname, dpi=150)
         plt.close(fig)
 
-    _bar_by(raw_df, "lr", "summary_by_lr.png", "lr")
-    _bar_by(
+    plot_bar_by(raw_df, "lr", "summary_by_lr.png", "lr")
+    plot_bar_by(
         raw_df,
         "lr_pretrain_end_frac",
         "summary_by_lr_pretrain_end_frac.png",
         "lr_pretrain_end_frac",
     )
-    _bar_by(raw_df, "beta1", "summary_by_beta.png", "beta1=beta2")
-    _bar_by(raw_df, "pre_burst_steps", "summary_by_pre_burst_steps.png", "pre_burst_steps")
-    _bar_by(raw_df, "n_a", "summary_by_n_a.png", "N_A")
-    _bar_by(raw_df, "n_docs_per_task", "summary_by_n_docs_per_task.png", "n_docs_per_task")
+    plot_bar_by(raw_df, "beta1", "summary_by_beta.png", "beta1=beta2")
+    plot_bar_by(raw_df, "pre_burst_steps", "summary_by_pre_burst_steps.png", "pre_burst_steps")
+    plot_bar_by(raw_df, "n_a", "summary_by_n_a.png", "N_A")
+    plot_bar_by(raw_df, "n_docs_per_task", "summary_by_n_docs_per_task.png", "n_docs_per_task")
 
     top = agg_df.sort_values(
         ["final_acc_other_mean", "final_loss_mean"], ascending=[False, True]
@@ -339,9 +348,10 @@ def _plot_summary(raw_df: pd.DataFrame, agg_df: pd.DataFrame, out_dir: Path) -> 
     plt.close(fig)
 
 
-def _build_tables(
+def build_tables(
     raw_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+    """Aggregate raw runs into per-config stats, ranking, and per-parameter slices."""
     group_cols = ["config_id", *CONFIG_KEYS]
     agg_df = raw_df.groupby(group_cols, as_index=False).agg(
         final_acc_other_mean=("final_acc_other", "mean"),
@@ -403,13 +413,14 @@ def _build_tables(
     return agg_df, ranking_df, by_param
 
 
-def _write_excel(
+def write_excel(
     out_path: Path,
     raw_df: pd.DataFrame,
     agg_df: pd.DataFrame,
     ranking_df: pd.DataFrame,
     by_param: dict[str, pd.DataFrame],
 ) -> None:
+    """Export sweep tables to a multi-sheet Excel workbook."""
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         raw_export = raw_df.drop(
             columns=["curve_step", "curve_acc_other", "curve_acc_burst", "curve_loss"]
@@ -446,7 +457,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     args = parser.parse_args()
 
     base_cfg = TrainConfig().to_dict()
-    all_runs = _build_sweep_runs(args.n_seeds, args.depth, args.burst_pos)
+    all_runs = build_sweep_runs(args.n_seeds, args.depth, args.burst_pos)
     if args.max_runs is not None:
         all_runs = all_runs[: max(0, args.max_runs)]
     if not all_runs:
@@ -469,7 +480,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         grouped.setdefault(run.group_key, []).append(run)
 
     list(grouped.items())
-    tasks = _build_group_tasks(
+    tasks = build_group_tasks(
         grouped, max_workers=max_workers, chunk_size=args.chunk_size, base_cfg=base_cfg
     )
     n_workers = max(1, min(max_workers, len(tasks)))
@@ -485,14 +496,14 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         saw_cuda_oom = False
 
         with ProcessPoolExecutor(max_workers=cur_workers, mp_context=ctx) as ex:
-            futs = {ex.submit(_run_group, t): t for t in pending}
+            futs = {ex.submit(run_group, t): t for t in pending}
             with tqdm(total=len(pending), desc="Task chunks", unit="chunk", ncols=100) as pbar:
                 for fut in as_completed(futs):
                     task = futs[fut]
                     try:
                         rows.extend(fut.result())
                     except Exception as exc:  # noqa: BLE001
-                        if _is_cuda_oom(exc):
+                        if is_cuda_oom(exc):
                             saw_cuda_oom = True
                         failed.append(task)
                     finally:
@@ -521,14 +532,14 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         msg = "Sweep produced no rows."
         raise RuntimeError(msg)
 
-    agg_df, ranking_df, by_param = _build_tables(raw_df)
+    agg_df, ranking_df, by_param = build_tables(raw_df)
 
     for row in tqdm(rows, desc="Per-run plots", unit="plot", ncols=100):
-        _plot_single_run(row, per_run_dir)
-    _plot_summary(raw_df, agg_df, summary_dir)
+        plot_single_run(row, per_run_dir)
+    plot_summary(raw_df, agg_df, summary_dir)
 
     excel_path = out_dir / "pretrain_sweep_results.xlsx"
-    _write_excel(excel_path, raw_df, agg_df, ranking_df, by_param)
+    write_excel(excel_path, raw_df, agg_df, ranking_df, by_param)
 
     ranking_df.iloc[0]
 

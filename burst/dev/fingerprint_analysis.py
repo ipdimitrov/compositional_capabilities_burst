@@ -236,7 +236,7 @@ def steering_experiment(  # noqa: PLR0913
     for alpha in alphas:
         scaled_delta_TN = alpha * delta_TN
 
-        def _steer_hook(
+        def steer_forward_hook(
             _module: torch.nn.Module,
             _input: tuple,
             output: torch.Tensor | tuple,
@@ -255,9 +255,9 @@ def steering_experiment(  # noqa: PLR0913
             return x
 
         if steer_layer == 0:
-            handle = net.transformer.drop.register_forward_hook(_steer_hook)
+            handle = net.transformer.drop.register_forward_hook(steer_forward_hook)
         else:
-            handle = net.transformer.h[steer_layer - 1].register_forward_hook(_steer_hook)
+            handle = net.transformer.h[steer_layer - 1].register_forward_hook(steer_forward_hook)
 
         try:
             burst_on_other = measure_burst_acc_on_other(net, other_docs, burst_docs, prompt_len)
@@ -483,14 +483,14 @@ def analyse_run(  # noqa: C901, PLR0915
         if not ll_readability_agg["with_ln"]:
             continue
 
-        def _mean_over_seeds(arrs: list[np.ndarray]) -> list:
+        def mean_over_seeds(arrs: list[np.ndarray]) -> list:
             return np.mean(arrs, axis=0).tolist()
 
         analysis["logit_lens"][sched] = {
             method: {
-                "mean_readability_KT": _mean_over_seeds(ll_readability_agg[method]),
-                "mean_rank_KT": _mean_over_seeds(ll_mean_rank_agg[method]),
-                "mean_entropy_KT": _mean_over_seeds(ll_entropy_agg[method]),
+                "mean_readability_KT": mean_over_seeds(ll_readability_agg[method]),
+                "mean_rank_KT": mean_over_seeds(ll_mean_rank_agg[method]),
+                "mean_entropy_KT": mean_over_seeds(ll_entropy_agg[method]),
                 "overall_readability": float(
                     np.mean([a.mean() for a in ll_readability_agg[method]])
                 ),
@@ -614,7 +614,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
 
     all_figs: list[tuple[str, str, go.Figure]] = []
 
-    def _add_fig(key: str, fig: go.Figure, title: str | None = None) -> None:
+    def register_fingerprint_fig(key: str, fig: go.Figure, title: str | None = None) -> None:
         t = title or fig.layout.title.text if fig.layout.title else key
         if isinstance(t, dict):
             t = t.get("text", key)
@@ -669,7 +669,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                 template="plotly_white",
                 height=250 * len(schedules) + 100,
             )
-            _add_fig(
+            register_fingerprint_fig(
                 f"logit_lens_readability_heatmap_{method}_{run_name}",
                 fig,
                 f"Logit Lens Readability ({method_label}) — {run_name}",
@@ -704,7 +704,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             height=500,
             barmode="group",
         )
-        _add_fig(
+        register_fingerprint_fig(
             f"logit_lens_comparison_bar_{run_name}",
             fig,
             f"Logit Lens Readability Comparison — {run_name}",
@@ -755,7 +755,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             template="plotly_white",
             height=250 * len(schedules) + 100,
         )
-        _add_fig(f"logit_lens_mean_rank_{run_name}", fig, f"Logit Lens Mean Rank — {run_name}")
+        register_fingerprint_fig(
+            f"logit_lens_mean_rank_{run_name}",
+            fig,
+            f"Logit Lens Mean Rank — {run_name}",
+        )
 
     # ------------------------------------------------------------------
     # Chart 4: Logit Lens Entropy heatmap
@@ -802,7 +806,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             template="plotly_white",
             height=250 * len(schedules) + 100,
         )
-        _add_fig(f"logit_lens_entropy_{run_name}", fig, f"Logit Lens Entropy — {run_name}")
+        register_fingerprint_fig(
+            f"logit_lens_entropy_{run_name}",
+            fig,
+            f"Logit Lens Entropy — {run_name}",
+        )
 
     # ------------------------------------------------------------------
     # Chart 5: Steering alpha sweep (per schedule)
@@ -877,7 +885,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             height=500,
             legend_title="Schedule",
         )
-        _add_fig(f"steering_alpha_sweep_{run_name}", fig, f"Steering alpha Sweep -- {run_name}")
+        register_fingerprint_fig(
+            f"steering_alpha_sweep_{run_name}",
+            fig,
+            f"Steering alpha Sweep -- {run_name}",
+        )
 
     # ------------------------------------------------------------------
     # Chart 6: Steering layer sweep
@@ -936,7 +948,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             legend_title="Schedule",
         )
         fig.update_xaxes(title_text="Layer")
-        _add_fig(f"steering_layer_sweep_{run_name}", fig, f"Steering Layer Sweep — {run_name}")
+        register_fingerprint_fig(
+            f"steering_layer_sweep_{run_name}",
+            fig,
+            f"Steering Layer Sweep — {run_name}",
+        )
 
     # ------------------------------------------------------------------
     # Chart 7: Summary — readability + steering vs burstiness
@@ -1021,7 +1037,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             template="plotly_white",
             height=500,
         )
-        _add_fig(f"summary_fingerprint_{run_name}", fig, f"Fingerprint Summary — {run_name}")
+        register_fingerprint_fig(
+            f"summary_fingerprint_{run_name}",
+            fig,
+            f"Fingerprint Summary — {run_name}",
+        )
 
     # ------------------------------------------------------------------
     # Chart 8: Delta norm per layer (shows where the fingerprint lives)
@@ -1053,7 +1073,11 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             height=500,
             barmode="group",
         )
-        _add_fig(f"delta_norm_per_layer_{run_name}", fig, f"Delta Norm per Layer — {run_name}")
+        register_fingerprint_fig(
+            f"delta_norm_per_layer_{run_name}",
+            fig,
+            f"Delta Norm per Layer — {run_name}",
+        )
 
     # ------------------------------------------------------------------
     # HTML dashboard

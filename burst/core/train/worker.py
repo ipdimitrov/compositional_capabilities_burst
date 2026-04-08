@@ -37,7 +37,7 @@ from burst.config import (
 from burst.core.data import BurstDataset
 from burst.core.train_utils import (
     DEVICE,
-    _cross_entropy_logits_BTV_targets_BT,
+    cross_entropy_logits_BTV_targets_BT,
     make_net_bare,
     make_optim_cfg,
     make_scaler,
@@ -93,7 +93,7 @@ def eval_loss(net: nanoGPT, docs_BL: np.ndarray) -> float:
         inp_d = inputs_BT.to(DEVICE, non_blocking=True)
         tgt_d = targets_BT.to(DEVICE, non_blocking=True)
         logits_BTV = net(inp_d)
-        loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV, tgt_d)
+        loss = cross_entropy_logits_BTV_targets_BT(logits_BTV, tgt_d)
         total_loss += loss.item()
         n_batches += 1
     net.train()
@@ -126,7 +126,7 @@ def checkpoint_steps(T: int, U: int) -> dict[int, str]:
     return steps
 
 
-def _save_task_distribution(  # noqa: PLR0913
+def save_task_distribution(  # noqa: PLR0913
     stats_dir: Path,
     label: str,
     schedule: str,
@@ -165,7 +165,7 @@ def _save_task_distribution(  # noqa: PLR0913
         writer.writerows(rows)
 
 
-def _compute_reversion_metrics(
+def compute_reversion_metrics(
     log: dict, P: int, T: int, U: int
 ) -> dict[str, object]:
     """Extract reversion summary metrics from the training log."""
@@ -295,7 +295,7 @@ def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) 
             s, e = i * max_micro_bs, min((i + 1) * max_micro_bs, n)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
                 logits_BTV = net(inputs_BT[s:e])
-                loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV, targets_BT[s:e])
+                loss = cross_entropy_logits_BTV_targets_BT(logits_BTV, targets_BT[s:e])
                 loss = loss / n_accum
             scaler.scale(loss).backward()
             total_loss += loss.item()
@@ -344,14 +344,14 @@ def run(job: WorkerJob, shared_data_path: str, run_dir: str, progress_dir: str) 
 
     stats_dir = Path(run_dir) / "task_distributions"
     stats_dir.mkdir(exist_ok=True)
-    _save_task_distribution(
+    save_task_distribution(
         stats_dir, label, schedule, seed, PHASE_BURST, task_counts_burst,
     )
-    _save_task_distribution(
+    save_task_distribution(
         stats_dir, label, schedule, seed, PHASE_REVERSION, task_counts_reversion,
     )
 
-    metrics = _compute_reversion_metrics(log, P, T, U)
+    metrics = compute_reversion_metrics(log, P, T, U)
 
     result = {
         "schedule": schedule,

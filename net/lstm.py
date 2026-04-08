@@ -21,13 +21,13 @@ class AutoLstm(nn.Module):
         self.hidden: tuple[torch.Tensor, torch.Tensor] | None = None
         self.use_hidden = False
 
-        self.apply(self._init_weights)
+        self.apply(self.init_weights)
 
     def get_num_params(self) -> int:
         """Return total number of parameters."""
         return sum(p.numel() for p in self.parameters())
 
-    def _init_weights(self, module: nn.Module) -> None:
+    def init_weights(self, module: nn.Module) -> None:
         """Initialize weights with normal or orthogonal distribution."""
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)

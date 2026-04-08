@@ -1213,7 +1213,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
 
     all_figs: list[tuple[str, str, go.Figure]] = []
 
-    def _add_fig(key: str, fig: go.Figure) -> None:
+    def register_metric_fig(key: str, fig: go.Figure) -> None:
         desc = _METRIC_DESCRIPTIONS.get(key, {})
         title = desc.get("title", key)
         all_figs.append((key, title, fig))
@@ -1244,7 +1244,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("task_vector_transfer", fig)
+        register_metric_fig("task_vector_transfer", fig)
 
     # ------------------------------------------------------------------
     # Chart 2: Forgetting Trajectory Dimensionality
@@ -1272,7 +1272,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("forgetting_trajectory_dim", fig)
+        register_metric_fig("forgetting_trajectory_dim", fig)
 
     # ------------------------------------------------------------------
     # Chart 3: Relearning Efficiency
@@ -1306,7 +1306,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("relearning_efficiency", fig)
+        register_metric_fig("relearning_efficiency", fig)
 
     # Relearning AUC bar chart
     for analysis in existing_analyses:
@@ -1332,7 +1332,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("relearning_auc", fig)
+        register_metric_fig("relearning_auc", fig)
 
     # ------------------------------------------------------------------
     # Chart 4: Linear Mode Connectivity (Peak→Reverted removed — use unified_analysis for pre→peak LMC)  # noqa: E501
@@ -1370,7 +1370,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("pruning_robustness", fig)
+        register_metric_fig("pruning_robustness", fig)
 
     # ------------------------------------------------------------------
     # Chart 6: Pairwise Gradient Separation
@@ -1406,7 +1406,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("pairwise_grad_separation", fig)
+        register_metric_fig("pairwise_grad_separation", fig)
 
     # ------------------------------------------------------------------
     # Chart 7: Forgetting Speed Decomposition
@@ -1462,7 +1462,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("forgetting_speed_decomposition", fig)
+        register_metric_fig("forgetting_speed_decomposition", fig)
 
     # ------------------------------------------------------------------
     # Chart 8: Per-Layer Interference Localisation
@@ -1503,7 +1503,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("layer_interference_localisation", fig)
+        register_metric_fig("layer_interference_localisation", fig)
 
     # ------------------------------------------------------------------
     # Chart 9: Gradient Interference Temporal Dynamics
@@ -1541,7 +1541,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("grad_interference_temporal", fig)
+        register_metric_fig("grad_interference_temporal", fig)
 
     # Re-alignment speed bar chart
     for analysis in existing_analyses:
@@ -1568,14 +1568,14 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("realign_speed", fig)
+        register_metric_fig("realign_speed", fig)
 
     # ------------------------------------------------------------------
     # Chart 11: Gradient Projection — interference magnitude, useful learning,
     #           and interference ratio over time with error bands
     # ------------------------------------------------------------------
 
-    def _proj_timeseries_fig(  # noqa: PLR0913
+    def projection_timeseries_fig(  # noqa: PLR0913
         gp: dict,
         schedules: list[str],
         metric_key: str,
@@ -1636,9 +1636,9 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             continue
         schedules = sorted(gp.keys(), key=sched_order)
 
-        _add_fig(
+        register_metric_fig(
             "grad_interference_magnitude",
-            _proj_timeseries_fig(
+            projection_timeseries_fig(
                 gp,
                 schedules,
                 "interference_magnitude",
@@ -1648,9 +1648,9 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                 "Interference Magnitude ||g_parallel||",
             ),
         )
-        _add_fig(
+        register_metric_fig(
             "grad_interference_ratio",
-            _proj_timeseries_fig(
+            projection_timeseries_fig(
                 gp,
                 schedules,
                 "interference_ratio",
@@ -1661,9 +1661,9 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                 hline=0.5,
             ),
         )
-        _add_fig(
+        register_metric_fig(
             "grad_useful_learning",
-            _proj_timeseries_fig(
+            projection_timeseries_fig(
                 gp,
                 schedules,
                 "useful_learning",
@@ -1704,7 +1704,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=500,
         )
-        _add_fig("grad_interference_ratio_bar", fig_bar)
+        register_metric_fig("grad_interference_ratio_bar", fig_bar)
 
     # ------------------------------------------------------------------
     # Chart 10: Burst Position Comparison
@@ -1746,7 +1746,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                 template="plotly_white",
                 height=500,
             )
-            _add_fig(f"burst_position_{metric_key}", fig)
+            register_metric_fig(f"burst_position_{metric_key}", fig)
 
     # ------------------------------------------------------------------
     # Summary: all new metrics vs burstiness (first run only)
@@ -1758,7 +1758,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         schedules = sorted(sm.keys(), key=sched_order)
         burst_pcts = [int(s.replace("burst_", "")) for s in schedules]
 
-        def _get_scalar(metric_dict: dict, sched: str, key: str) -> float:
+        def get_metric_scalar(metric_dict: dict, sched: str, key: str) -> float:
             d = metric_dict.get(run_name, {}).get(sched, {})
             return d.get(key, float("nan")) if isinstance(d, dict) else float("nan")
 
@@ -1776,7 +1776,9 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         )
         colors = [sched_color(s) for s in schedules]
 
-        def _add_scatter_summary(fig: go.Figure, row: int, col: int, y_vals: list[float]) -> None:
+        def add_scatter_summary_row(
+            fig: go.Figure, row: int, col: int, y_vals: list[float]
+        ) -> None:
             fig.add_trace(
                 go.Scatter(
                     x=burst_pcts,
@@ -1790,57 +1792,61 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                 col=col,
             )
 
-        _add_scatter_summary(
+        add_scatter_summary_row(
             fig_summary,
             1,
             1,
             [
-                _get_scalar(new_results.get("task_vector_transfer", {}), s, "mean_transfer_acc")
+                get_metric_scalar(
+                    new_results.get("task_vector_transfer", {}), s, "mean_transfer_acc"
+                )
                 for s in schedules
             ],
         )
-        _add_scatter_summary(
+        add_scatter_summary_row(
             fig_summary,
             1,
             2,
             [
-                _get_scalar(new_results.get("forgetting_trajectory_dim", {}), s, "mean_dim")
+                get_metric_scalar(new_results.get("forgetting_trajectory_dim", {}), s, "mean_dim")
                 for s in schedules
             ],
         )
-        _add_scatter_summary(
+        add_scatter_summary_row(
             fig_summary,
             1,
             3,
             [
-                _get_scalar(new_results.get("relearning_efficiency", {}), s, "auc")
+                get_metric_scalar(new_results.get("relearning_efficiency", {}), s, "auc")
                 for s in schedules
             ],
         )
-        _add_scatter_summary(
+        add_scatter_summary_row(
             fig_summary,
             2,
             1,
             [
-                _get_scalar(new_results.get("linear_mode_connectivity", {}), s, "barrier")
+                get_metric_scalar(new_results.get("linear_mode_connectivity", {}), s, "barrier")
                 for s in schedules
             ],
         )
-        _add_scatter_summary(
+        add_scatter_summary_row(
             fig_summary,
             2,
             2,
             [
-                _get_scalar(new_results.get("pruning_robustness", {}), s, "robustness_auc")
+                get_metric_scalar(new_results.get("pruning_robustness", {}), s, "robustness_auc")
                 for s in schedules
             ],
         )
-        _add_scatter_summary(
+        add_scatter_summary_row(
             fig_summary,
             2,
             3,
             [
-                _get_scalar(new_results.get("grad_interference_temporal", {}), s, "realign_speed")
+                get_metric_scalar(
+                    new_results.get("grad_interference_temporal", {}), s, "realign_speed"
+                )
                 for s in schedules
             ],
         )
@@ -1851,7 +1857,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             template="plotly_white",
             height=800,
         )
-        _add_fig("summary_new_metrics", fig_summary)
+        register_metric_fig("summary_new_metrics", fig_summary)
 
     # ------------------------------------------------------------------
     # Assemble HTML dashboard

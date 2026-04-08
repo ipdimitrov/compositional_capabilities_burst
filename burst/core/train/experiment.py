@@ -72,7 +72,7 @@ from burst.core.repro import write_repro_manifest
 from burst.core.train.worker import eval_free_gen, eval_loss
 from burst.core.train_utils import (
     DEVICE,
-    _cross_entropy_logits_BTV_targets_BT,
+    cross_entropy_logits_BTV_targets_BT,
     make_net,
     make_optim_cfg,
     make_scaler,
@@ -149,10 +149,10 @@ class DepthNData:
             list(range(p * n_a + 1, (p + 1) * n_a + 1)) for p in range(depth)
         ]
 
-        self._build_vocab()
-        self._build_splits(rng)
+        self.build_vocab()
+        self.build_splits(rng)
 
-    def _build_vocab(self) -> None:
+    def build_vocab(self) -> None:
         """Build token-to-index and index-to-token mappings."""
         self.token, self.token_idx, self.fn_tok = {}, {}, {}
         idx = 0
@@ -171,7 +171,7 @@ class DepthNData:
             idx += 1
         self.vocab_size = idx
 
-    def _build_splits(self, rng: np.random.RandomState) -> None:
+    def build_splits(self, rng: np.random.RandomState) -> None:
         """Build other-class and burst-class task lists."""
         burst_slot = self.depth - self.burst_pos
 
@@ -187,7 +187,7 @@ class DepthNData:
             burst_tasks.append((CLASS_BURST, *fns))
         self.burst_train = burst_tasks
 
-    def _make_doc(self, task: tuple[int, ...]) -> np.ndarray:
+    def make_doc(self, task: tuple[int, ...]) -> np.ndarray:
         """Generate a single tokenised document for a task composition."""
         fns = task[1:]
         inp = get_rng().choice(self.n_alph, size=self.seq_len, replace=True)
@@ -206,7 +206,7 @@ class DepthNData:
 
     def gen_pool(self, tasks: list[tuple[int, ...]], n: int) -> dict[tuple[int, ...], np.ndarray]:
         """Generate n documents per task, returning {task: docs_array}."""
-        return {t: np.array([self._make_doc(t) for _ in range(n)]) for t in tasks}
+        return {t: np.array([self.make_doc(t) for _ in range(n)]) for t in tasks}
 
 
 def build_data(
@@ -235,13 +235,13 @@ def build_data(
     for i, k in enumerate(eval_pools):
         eval_pools[k] = padded[i + 2]
 
-    def _cat(pool: dict) -> np.ndarray:
+    def concat_pool(pool: dict) -> np.ndarray:
         """Concatenate all arrays in a pool into one."""
         if not pool:
             return np.zeros((1, next(iter(bg_pool.values())).shape[1]), dtype=np.int64)
         return np.concatenate(list(pool.values()))
 
-    eval_docs = {k: _cat(v) for k, v in eval_pools.items()}
+    eval_docs = {k: concat_pool(v) for k, v in eval_pools.items()}
 
     ref = eval_docs[CLASS_OTHER] if eval_docs[CLASS_OTHER].shape[0] > 1 else eval_docs[CLASS_BURST]
     sp_positions = np.where(ref[0] == d.token_idx[" "])[0]
@@ -337,7 +337,7 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
             logits_BTV = net(inp)
-            loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV, tgt)
+            loss = cross_entropy_logits_BTV_targets_BT(logits_BTV, tgt)
         scaler.scale(loss).backward()
         if cfg["grad_clip"] > 0:
             scaler.unscale_(optimizer)

@@ -83,7 +83,7 @@ def get_token_position_labels(doc_len: int, seq_len: int, depth: int) -> list[st
     return labels[: doc_len - 1]
 
 
-def _fit_gpu_probe(feats_PN: torch.Tensor, labels_P: torch.Tensor) -> float:
+def fit_gpu_probe(feats_PN: torch.Tensor, labels_P: torch.Tensor) -> float:
     """Train a single binary linear probe on GPU, return val accuracy."""
     N = feats_PN.shape[1]
     n_total = feats_PN.shape[0]
@@ -157,7 +157,7 @@ def fit_probes_at_checkpoint(
     for k in range(K):
         for t in range(T):
             feats_PN = acts_K_PTN[k][:, t, :]
-            train_acc_KT[k, t] = _fit_gpu_probe(feats_PN, labels_P)
+            train_acc_KT[k, t] = fit_gpu_probe(feats_PN, labels_P)
 
     return {"train_acc_KT": train_acc_KT}
 
@@ -230,13 +230,15 @@ def retrain_and_probe(  # noqa: PLR0913
     }
 
 
-def _default_checkpoint_steps(total_steps: int, reversion_steps: int, every: int) -> list[int]:
+def default_checkpoint_steps(total_steps: int, reversion_steps: int, every: int) -> list[int]:
+    """Checkpoint steps from `every`, always including burst start and reversion end."""
     steps = set(range(0, total_steps + reversion_steps + 1, every))
     steps |= {0, total_steps, total_steps + reversion_steps}
     return sorted(steps)
 
 
-def _worker_main() -> None:
+def worker_main() -> None:
+    """CLI entry: load job, run checkpoints, write probe results."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-path", required=True)
     parser.add_argument("--data-path", required=True)
@@ -307,7 +309,7 @@ def main() -> None:  # noqa: PLR0915
     total_steps = bcfg["total_steps"]
     reversion_steps = bcfg["reversion_steps"]
 
-    checkpoint_steps = _default_checkpoint_steps(
+    checkpoint_steps = default_checkpoint_steps(
         total_steps, reversion_steps, args.checkpoint_every
     )
     logger.info(
@@ -474,6 +476,6 @@ def main() -> None:  # noqa: PLR0915
 if __name__ == "__main__":
     if "--worker" in sys.argv:
         sys.argv.remove("--worker")
-        _worker_main()
+        worker_main()
     else:
         main()

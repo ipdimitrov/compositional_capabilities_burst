@@ -16,9 +16,10 @@ if TYPE_CHECKING:
     from plotly.graph_objs import Figure
 
 
-def _plotly_to_mpl_color(
+def plotly_to_mpl_color(
     c: str | tuple[float, ...],
 ) -> str | tuple[float, ...]:
+    """Map a Plotly rgb/rgba string to matplotlib RGBA floats, or pass through tuples."""
     if not isinstance(c, str):
         return c
     m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", c)
@@ -55,11 +56,11 @@ def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
         line_info = trace.get("line", {})
         marker_info = trace.get("marker", {})
         if isinstance(line_info, dict) and "color" in line_info:
-            color = _plotly_to_mpl_color(line_info["color"])
+            color = plotly_to_mpl_color(line_info["color"])
         elif isinstance(marker_info, dict) and "color" in marker_info:
             mc = marker_info["color"]
             if isinstance(mc, str):
-                color = _plotly_to_mpl_color(mc)
+                color = plotly_to_mpl_color(mc)
 
         kwargs = {"label": name}
         if color and isinstance(color, (str, tuple)):
@@ -75,7 +76,7 @@ def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
             bar_colors = marker_info.get("color") if isinstance(marker_info, dict) else None
             if isinstance(bar_colors, list):
                 kwargs.pop("color", None)
-                kwargs["color"] = [_plotly_to_mpl_color(c) for c in bar_colors[: len(x)]]
+                kwargs["color"] = [plotly_to_mpl_color(c) for c in bar_colors[: len(x)]]
             ax.bar(x, y, alpha=0.8, **kwargs)
         elif trace_type == "heatmap":
             pass
@@ -114,7 +115,8 @@ def save_png(
         plotly_to_png_matplotlib(fig, path, width=width, height=height)
 
 
-def _fmt(v: float | str, precision: int = 5) -> str:
+def fmt_value(v: float | str, precision: int = 5) -> str:
+    """Format a numeric or string value for compact text dump output."""
     if isinstance(v, float):
         if v == 0.0:
             return "0"
@@ -125,7 +127,7 @@ def _fmt(v: float | str, precision: int = 5) -> str:
 _INLINE_THRESHOLD = 20
 
 
-def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
+def trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
     """Convert a single Plotly trace dict to compact text lines."""
     lines: list[str] = []
     ttype = trace.get("type", "scatter")
@@ -145,7 +147,7 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
             lines.append(f"    cols: {', '.join(str(c) for c in x_labels)}")
         for row_i, row in enumerate(z):
             row_label = y_labels[row_i] if row_i < len(y_labels) else row_i
-            lines.append(f"    {row_label}: {', '.join(_fmt(v) for v in row)}")
+            lines.append(f"    {row_label}: {', '.join(fmt_value(v) for v in row)}")
         return lines
 
     if ttype == "contour":
@@ -159,11 +161,14 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         y0 = trace.get("y0")
         dy = trace.get("dy")
         if x0 is not None:
-            lines.append(f"    x0={_fmt(x0)} dx={_fmt(dx)} y0={_fmt(y0)} dy={_fmt(dy)}")
+            lines.append(
+                f"    x0={fmt_value(x0)} dx={fmt_value(dx)} "
+                f"y0={fmt_value(y0)} dy={fmt_value(dy)}"
+            )
         if z:
             lines.append(f"    grid: {len(z)}x{len(z[0]) if z else 0}")
             flat = [v for row in z for v in row]
-            lines.append(f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]")
+            lines.append(f"    range: [{fmt_value(min(flat))}, {fmt_value(max(flat))}]")
         return lines
 
     if ttype == "surface":
@@ -176,7 +181,7 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
             flat = [v for row in z for v in row if v is not None]
             if flat:
                 lines.append(f"    grid: {len(z)}x{len(z[0]) if z else 0}")
-                lines.append(f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]")
+                lines.append(f"    range: [{fmt_value(min(flat))}, {fmt_value(max(flat))}]")
         return lines
 
     header = f"  [{ttype}]"
@@ -192,16 +197,16 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
 
     if len(x) <= _INLINE_THRESHOLD:
         for i, (xi, yi) in enumerate(zip(x, y, strict=False)):
-            entry = f"    {_fmt(xi)}: {_fmt(yi)}"
+            entry = f"    {fmt_value(xi)}: {fmt_value(yi)}"
             if i < len(err_vals):
-                entry += f" +/-{_fmt(err_vals[i])}"
+                entry += f" +/-{fmt_value(err_vals[i])}"
             lines.append(entry)
     else:
         lines.append(f"    n={len(x)}")
         y_num = [v for v in y if isinstance(v, (int, float))]
         if y_num:
-            lines.append(f"    y range: [{_fmt(min(y_num))}, {_fmt(max(y_num))}]")
-            lines.append(f"    y mean: {_fmt(sum(y_num) / len(y_num))}")
+            lines.append(f"    y range: [{fmt_value(min(y_num))}, {fmt_value(max(y_num))}]")
+            lines.append(f"    y mean: {fmt_value(sum(y_num) / len(y_num))}")
         sample_indices = [
             0,
             len(x) // 4,
@@ -211,9 +216,9 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         ]
         for idx in sample_indices:
             if idx < len(x):
-                entry = f"    {_fmt(x[idx])}: {_fmt(y[idx])}"
+                entry = f"    {fmt_value(x[idx])}: {fmt_value(y[idx])}"
                 if idx < len(err_vals):
-                    entry += f" +/-{_fmt(err_vals[idx])}"
+                    entry += f" +/-{fmt_value(err_vals[idx])}"
                 lines.append(entry)
         lines.append(f"    ... ({len(x)} points total, showing 5 samples)")
 
@@ -270,7 +275,7 @@ def fig_to_text(  # noqa: C901
         parts.append(f"  subplots: {' | '.join(subplot_titles)}")
 
     for trace in traces:
-        parts.extend(_trace_to_text(trace))
+        parts.extend(trace_to_text(trace))
 
     return "\n".join(parts)
 

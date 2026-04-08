@@ -37,8 +37,8 @@ def build_representation_summary(
     with data_path.open("rb") as f:
         target_pool, bg_pool, *_ = pickle.load(f)  # noqa: S301
 
-    other_docs = _subsample_pool(bg_pool, n_docs_per_class, seed=0)
-    burst_docs = _subsample_pool(target_pool, n_docs_per_class, seed=1)
+    other_docs = subsample_pool(bg_pool, n_docs_per_class, seed=0)
+    burst_docs = subsample_pool(target_pool, n_docs_per_class, seed=1)
     if other_docs.size == 0 or burst_docs.size == 0:
         return {}
 
@@ -52,7 +52,7 @@ def build_representation_summary(
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            seed_metrics = _representation_for_run(run, ckpt_dir, other_docs, burst_docs)
+            seed_metrics = representation_for_run(run, ckpt_dir, other_docs, burst_docs)
             if seed_metrics is not None:
                 per_seed.append(seed_metrics)
 
@@ -63,16 +63,16 @@ def build_representation_summary(
         shift_vals = np.array([seed["late_other_shift_norm"] for seed in per_seed], dtype=float)
         cos_vals = np.array([seed["late_drift_cosine"] for seed in per_seed], dtype=float)
         by_schedule[schedule] = {
-            "late_centroid_projection": _mean_ci_payload(proj_vals),
-            "late_other_shift_norm": _mean_ci_payload(shift_vals),
-            "late_drift_cosine": _mean_ci_payload(cos_vals),
+            "late_centroid_projection": mean_ci_payload(proj_vals),
+            "late_other_shift_norm": mean_ci_payload(shift_vals),
+            "late_drift_cosine": mean_ci_payload(cos_vals),
             "per_seed": per_seed,
         }
 
     return {"by_schedule": by_schedule}
 
 
-def _representation_for_run(
+def representation_for_run(
     run: _ResultDict,
     ckpt_dir: Path,
     other_docs_BL: np.ndarray,
@@ -92,12 +92,12 @@ def _representation_for_run(
     net_pre = load_net(run["config"], str(step_to_path[available_steps[0]]))
     net_peak = load_net(run["config"], str(step_to_path[peak_step]))
 
-    other_pre = _mean_layer_vectors(net_pre, other_docs_BL)
-    other_peak = _mean_layer_vectors(net_peak, other_docs_BL)
-    burst_pre = _mean_layer_vectors(net_pre, burst_docs_BL)
-    burst_peak = _mean_layer_vectors(net_peak, burst_docs_BL)
+    other_pre = mean_layer_vectors(net_pre, other_docs_BL)
+    other_peak = mean_layer_vectors(net_peak, other_docs_BL)
+    burst_pre = mean_layer_vectors(net_pre, burst_docs_BL)
+    burst_peak = mean_layer_vectors(net_peak, burst_docs_BL)
 
-    late_indices = _late_layer_indices(len(other_pre))
+    late_indices = late_layer_indices(len(other_pre))
     centroid_projection_vals = []
     shift_norm_vals = []
     drift_cos_vals = []
@@ -126,7 +126,7 @@ def _representation_for_run(
     }
 
 
-def _mean_layer_vectors(net: nanoGPT, docs_BL: np.ndarray) -> list[np.ndarray]:
+def mean_layer_vectors(net: nanoGPT, docs_BL: np.ndarray) -> list[np.ndarray]:
     """Return mean activation vector per layer, averaged over docs and positions."""
     activations_KPTN = collect_activations_KPTN(net, docs_BL)
     return [
@@ -134,13 +134,13 @@ def _mean_layer_vectors(net: nanoGPT, docs_BL: np.ndarray) -> list[np.ndarray]:
     ]
 
 
-def _late_layer_indices(n_layers_total: int) -> list[int]:
+def late_layer_indices(n_layers_total: int) -> list[int]:
     """Return indices of the last two layers (or fewer if model is small)."""
     start = max(1, n_layers_total - 2)
     return list(range(start, n_layers_total))
 
 
-def _subsample_pool(pool: _TaskPool, n_docs: int, *, seed: int) -> np.ndarray:
+def subsample_pool(pool: _TaskPool, n_docs: int, *, seed: int) -> np.ndarray:
     """Concatenate and subsample documents from a pool to at most n_docs."""
     if not pool:
         return np.zeros((0, 0), dtype=np.int64)
@@ -152,7 +152,7 @@ def _subsample_pool(pool: _TaskPool, n_docs: int, *, seed: int) -> np.ndarray:
     return docs[idx]
 
 
-def _mean_ci_payload(values: np.ndarray) -> dict[str, float]:
+def mean_ci_payload(values: np.ndarray) -> dict[str, float]:
     """Return {mean, ci} dict with 95% confidence interval."""
     mean, ci = mean_ci(values)
     return {"mean": mean, "ci": ci}

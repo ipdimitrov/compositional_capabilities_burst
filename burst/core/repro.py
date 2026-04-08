@@ -16,13 +16,14 @@ from burst.config import REPRO_MANIFEST_FILENAME
 from burst.core.train_utils import resolve_run_paths
 
 
-def _jsonable(value: object) -> str | dict | list | int | float | bool | None:
+def jsonable(value: object) -> str | dict | list | int | float | bool | None:
+    """Recursively convert values to JSON-serialisable primitives."""
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
-        return {k: _jsonable(v) for k, v in value.items()}
+        return {k: jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
+        return [jsonable(v) for v in value]
     return value
 
 
@@ -53,7 +54,7 @@ def write_repro_manifest(  # noqa: PLR0913
         "seed": seed,
         "deterministic": deterministic,
         "note": note,
-        "cli_args": _jsonable(cli_args),
+        "cli_args": jsonable(cli_args),
         "runtime": {
             "python": sys.version.split()[0],
             "platform": platform.platform(),

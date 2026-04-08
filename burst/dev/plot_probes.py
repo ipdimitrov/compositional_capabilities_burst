@@ -42,7 +42,8 @@ _TEXT_CONTRAST_THRESHOLD = 0.75
 _STEP_TOLERANCE = 30
 
 
-def _load_steps_from_config(run_dir: Path) -> tuple[int, int] | None:
+def load_steps_from_config(run_dir: Path) -> tuple[int, int] | None:
+    """Return (total_steps, reversion_steps) from run config, or None if missing."""
     cfg_path, _, _ = resolve_run_paths(run_dir)
     if not cfg_path.exists():
         return None
@@ -78,7 +79,7 @@ def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
         with all_path.open("rb") as f:
             results = pickle.load(f)  # noqa: S301
 
-    steps_from_cfg = _load_steps_from_config(run_dir)
+    steps_from_cfg = load_steps_from_config(run_dir)
 
     meta_path = probe_dir / "probe_meta.json"
     if not meta_path.exists():
@@ -107,7 +108,8 @@ def load_probe_results(run_dir: Path) -> tuple[list[dict], dict]:
     return results, meta
 
 
-def _layer_labels(n_layers: int) -> list[str]:
+def make_layer_labels(n_layers: int) -> list[str]:
+    """Return display labels: embedding plus one label per transformer block."""
     return ["emb"] + [f"L{i}" for i in range(n_layers)]
 
 
@@ -329,7 +331,7 @@ def plot_layer_depth_dynamics(
 
     n_layers = results[0]["n_layers"]
     total_steps = results[0]["total_steps"]
-    layer_labels = _layer_labels(n_layers)
+    layer_labels = make_layer_labels(n_layers)
     K = n_layers + 1
 
     n_scheds = len(sched_data)
@@ -450,7 +452,7 @@ def plot_layer_schedule_heatmap(
     plt.close(fig)
 
 
-def _pick_representative_seed(results: list[dict], schedule: str) -> dict | None:
+def pick_representative_seed(results: list[dict], schedule: str) -> dict | None:
     """Pick the first seed for a given schedule."""
     for r in results:
         if r["schedule"] == schedule:
@@ -458,7 +460,7 @@ def _pick_representative_seed(results: list[dict], schedule: str) -> dict | None
     return None
 
 
-def _mean_acc_at_step(
+def mean_acc_at_step(
     results: list[dict],
     schedule: str,
     step: int,
@@ -489,7 +491,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     n_layers = meta["n_layers"]
     total_steps = meta["total_steps"]
     reversion_steps = meta["reversion_steps"]
-    layer_labels = _layer_labels(n_layers)
+    layer_labels = make_layer_labels(n_layers)
 
     plots_dir = run_dir / "probes" / "plots"
     plots_dir.mkdir(exist_ok=True)
@@ -538,8 +540,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         phase_label = "end_train" if step == total_steps else "end_reversion"
 
         for s1, s2 in combinations(schedules, 2):
-            acc_s1 = _mean_acc_at_step(results, s1, step, "train_acc_KT")
-            acc_s2 = _mean_acc_at_step(results, s2, step, "train_acc_KT")
+            acc_s1 = mean_acc_at_step(results, s1, step, "train_acc_KT")
+            acc_s2 = mean_acc_at_step(results, s2, step, "train_acc_KT")
             if acc_s1 is None or acc_s2 is None:
                 closest_s1 = min(
                     [s for r in results if r["schedule"] == s1 for s in r["probes"]],
@@ -552,9 +554,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                     default=None,
                 )
                 if closest_s1 is not None and abs(closest_s1 - step) <= _STEP_TOLERANCE:
-                    acc_s1 = _mean_acc_at_step(results, s1, closest_s1, "train_acc_KT")
+                    acc_s1 = mean_acc_at_step(results, s1, closest_s1, "train_acc_KT")
                 if closest_s2 is not None and abs(closest_s2 - step) <= _STEP_TOLERANCE:
-                    acc_s2 = _mean_acc_at_step(results, s2, closest_s2, "train_acc_KT")
+                    acc_s2 = mean_acc_at_step(results, s2, closest_s2, "train_acc_KT")
             if acc_s1 is None or acc_s2 is None:
                 continue
 
@@ -572,8 +574,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
         for sched in schedules:
             si = sched_sort_key(sched)
-            acc_train_end = _mean_acc_at_step(results, sched, total_steps, "train_acc_KT")
-            acc_reversion_end = _mean_acc_at_step(
+            acc_train_end = mean_acc_at_step(results, sched, total_steps, "train_acc_KT")
+            acc_reversion_end = mean_acc_at_step(
                 results, sched, total_steps + reversion_steps, "train_acc_KT"
             )
             if acc_train_end is not None and acc_reversion_end is not None:
@@ -596,7 +598,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     for sched in schedules:
         si = sched_sort_key(sched)
         for step in key_steps:
-            acc = _mean_acc_at_step(results, sched, step, "train_acc_KT")
+            acc = mean_acc_at_step(results, sched, step, "train_acc_KT")
             matched_step = step
             if acc is None:
                 closest = min(
@@ -605,7 +607,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                     default=None,
                 )
                 if closest is not None and abs(closest - step) <= _STEP_TOLERANCE:
-                    acc = _mean_acc_at_step(results, sched, closest, "train_acc_KT")
+                    acc = mean_acc_at_step(results, sched, closest, "train_acc_KT")
                     matched_step = closest
             if acc is None:
                 continue

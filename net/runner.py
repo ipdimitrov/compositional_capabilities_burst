@@ -80,7 +80,7 @@ def configure_optimizers(net: torch.nn.Module, optim_cfg: DictConfig) -> torch.o
     return optimizer
 
 
-def _cosine_segment(t_frac: float, lr_start: float, lr_end: float) -> float:
+def cosine_segment(t_frac: float, lr_start: float, lr_end: float) -> float:
     """Interpolate between two learning rates with a cosine schedule."""
     coeff = 0.5 * (1.0 + math.cos(math.pi * t_frac))
     return lr_end + coeff * (lr_start - lr_end)
@@ -114,14 +114,14 @@ def phase_lr(  # noqa: PLR0913
         if global_step <= warmup_steps:
             return lr_max * global_step / warmup_steps
         t_frac = (global_step - warmup_steps) / max(P - warmup_steps, 1)
-        return _cosine_segment(t_frac, lr_max, lr_pretrain_end)
+        return cosine_segment(t_frac, lr_max, lr_pretrain_end)
 
     if global_step <= P + T:
         t_frac = (global_step - P) / max(T, 1)
-        return _cosine_segment(t_frac, lr_pretrain_end, lr_burst_end)
+        return cosine_segment(t_frac, lr_pretrain_end, lr_burst_end)
 
     t_frac = (global_step - P - T) / max(U, 1)
-    return _cosine_segment(t_frac, lr_burst_end, lr_reversion_end)
+    return cosine_segment(t_frac, lr_burst_end, lr_reversion_end)
 
 
 def reset_optimizer_state(optimizer: torch.optim.Optimizer) -> None:

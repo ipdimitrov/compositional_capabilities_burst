@@ -39,7 +39,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from burst.config import SCHED_COLORS, parse_run_config
-from burst.core.metrics.gradients import _layer_groups
+from burst.core.metrics.gradients import layer_groups_for_net
 from burst.core.train_utils import DEVICE, load_net, resolve_run_paths
 from burst.dev.plot_utils import save_png
 
@@ -150,11 +150,11 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
 
     net_fisher = load_net(base_cfg, fisher_ckpt)
     fisher = compute_diagonal_fisher(net_fisher, other_docs_BL, n_fisher_batches, fisher_batch_size)
-    layer_groups = _layer_groups(net_fisher)
+    layer_groups = layer_groups_for_net(net_fisher)
     del net_fisher
     torch.cuda.empty_cache()
 
-    def _flat(path: str) -> dict[str, torch.Tensor]:
+    def flat_checkpoint_tensors(path: str) -> dict[str, torch.Tensor]:
         return {
             k: v.float().view(-1)
             for k, v in torch.load(path, map_location="cpu", weights_only=True).items()
@@ -186,7 +186,10 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
             post_step = min(available, key=lambda x: abs(x - (T - 1)))
 
             disp = compute_fisher_displacement(
-                fisher, _flat(str(files[pre_step])), _flat(str(files[post_step])), layer_groups
+                fisher,
+                flat_checkpoint_tensors(str(files[pre_step])),
+                flat_checkpoint_tensors(str(files[post_step])),
+                layer_groups,
             )
             total_Ds.append(disp["total_D"])
             for ln, d in disp["per_layer_D"].items():
@@ -224,7 +227,7 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
     colors = [SCHED_COLORS.get(s, "#888888") for s in schedules]
     layer_names = next(iter(per_schedule.values()), {}).get("layer_names", [])
 
-    def _save(fig: object, name: str) -> None:
+    def save_plotly_fig(fig: object, name: str) -> None:
         save_png(fig, str(out_dir / name))
 
     fig = go.Figure(
@@ -247,7 +250,7 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
         template="plotly_white",
         height=500,
     )
-    _save(fig, "ewc_total_displacement.png")
+    save_plotly_fig(fig, "ewc_total_displacement.png")
 
     if layer_names:
         fig = go.Figure(
@@ -273,7 +276,7 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
             template="plotly_white",
             height=500,
         )
-        _save(fig, "ewc_per_layer_displacement.png")
+        save_plotly_fig(fig, "ewc_per_layer_displacement.png")
 
         fig = go.Figure()
         for ln in layer_names:
@@ -294,7 +297,7 @@ def make_ewc_plots(result: dict, out_dir: Path) -> None:
             template="plotly_white",
             height=500,
         )
-        _save(fig, "ewc_stacked_by_layer.png")
+        save_plotly_fig(fig, "ewc_stacked_by_layer.png")
 
     logger.info("EWC plots saved to %s", out_dir)
 

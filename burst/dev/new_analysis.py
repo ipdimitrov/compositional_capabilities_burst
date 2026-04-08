@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from burst.config import (  # noqa: E402, I001
     parse_run_config,
 )
-from burst.core.metrics.gradients import _layer_groups  # noqa: E402
+from burst.core.metrics.gradients import layer_groups_for_net  # noqa: E402
 from burst.core.train_utils import (  # noqa: E402
     DEVICE,
     ckpt_files,
@@ -133,7 +133,7 @@ def compute_layerwise_weight_diff(  # noqa: C901
 
                 if layer_groups is None:
                     net_tmp = load_net(cfg, str(files[step]))
-                    layer_groups = _layer_groups(net_tmp)
+                    layer_groups = layer_groups_for_net(net_tmp)
                     del net_tmp
 
                 per_layer = {}
@@ -493,12 +493,13 @@ def investigate_grad_rank(run_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def style(  # noqa: D103
+def style(
     ax: mpl.axes.Axes,
     xl: str = "",
     yl: str = "",
     t: str = "",
 ) -> None:
+    """Apply shared axis labels, title, ticks, and grid styling."""
     ax.set_xlabel(xl, fontsize=11, fontweight="bold")
     ax.set_ylabel(yl, fontsize=11, fontweight="bold")
     if t:
