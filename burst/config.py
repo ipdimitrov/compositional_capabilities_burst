@@ -50,7 +50,7 @@ LOSS_BURST = f"loss_{CLASS_BURST}"
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10] #[100, 90, 70]
+BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0] #[100, 90, 70]
 
 UNIFORM_PCT = 25
 
@@ -114,7 +114,7 @@ DATA_SEED = 999
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
-BURST_BASE_STEPS = 800
+BURST_BASE_STEPS = 50
 
 MODE_CURRENT = "current"
 MODE_CONSTANT_STEPS = "constant_steps"
