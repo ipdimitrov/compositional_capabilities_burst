@@ -35,9 +35,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import plotly.graph_objects as go
+import plotly.io as pio
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
+from plotly.subplots import make_subplots
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -46,20 +49,27 @@ from burst.config import (
     ACC_OTHER,
     PHASE_BURST,
     PHASE_REVERSION,
+    SCHED_COLORS,
+    ordered_schedules,
     parse_run_config,
 )
-from burst.core.train_utils import DEVICE, make_net_bare
-from burst.dev._shared import ckpt_files as _ckpt_files
-from burst.dev._shared import free_gen_acc as _free_gen_acc
-from burst.dev._shared import sched_color as _color
-from burst.dev._shared import sched_order as _sched_order
-from burst.dev.plot_utils import save_png as _save_png
+from burst.core.gpu import gpu_cfg
+from burst.core.train_utils import (
+    DEVICE,
+    ckpt_files,
+    free_gen_acc,
+    load_results,
+    make_net_bare,
+    sched_order,
+)
+from burst.core.train_utils import sched_color as color
+from burst.dev.plot_utils import save_png, write_text_report
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, update_cosine_warmup_lr
 
 logger = logging.getLogger(__name__)
 
-_rng = np.random.default_rng()
+rng = np.random.default_rng()
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +97,7 @@ class SeedCheckpoints:
 
 
 @torch.no_grad()
-def _batch_eval_hybrids(  # noqa: PLR0913
+def batch_eval_hybrids(  # noqa: PLR0913
     cfg: dict,
     hybrid_sds: list[dict[str, torch.Tensor]],
     burst_sub: np.ndarray,
@@ -100,8 +110,6 @@ def _batch_eval_hybrids(  # noqa: PLR0913
     Returns list of (burst_acc, other_acc) in the same order as hybrid_sds.
     """
     if max_concurrent is None:
-        from burst.core.gpu import gpu_cfg  # noqa: PLC0415
-
         max_concurrent = gpu_cfg.frankenstein_workers
 
     if DEVICE != "cuda" or len(hybrid_sds) <= 1:
@@ -111,8 +119,8 @@ def _batch_eval_hybrids(  # noqa: PLR0913
             net.load_state_dict(sd)
             results.append(
                 (
-                    _free_gen_acc(net, burst_sub, prompt_len),
-                    _free_gen_acc(net, other_sub, prompt_len),
+                    free_gen_acc(net, burst_sub, prompt_len),
+                    free_gen_acc(net, other_sub, prompt_len),
                 )
             )
         return results
@@ -169,7 +177,7 @@ def _batch_eval_hybrids(  # noqa: PLR0913
     return results
 
 
-def _get_key_steps(files: dict[int, Path], r: dict) -> tuple[int, int, int]:
+def get_key_steps(files: dict[int, Path], r: dict) -> tuple[int, int, int]:
     """Find pre-burst, peak-burst, and end-of-reversion checkpoint steps.
 
     Checkpoint files are numbered relative to burst start (P=0 in
@@ -183,14 +191,16 @@ def _get_key_steps(files: dict[int, Path], r: dict) -> tuple[int, int, int]:
     return pre_step, peak_step, rev_step
 
 
-def _subsample_docs(docs_BL: np.ndarray, n: int = 256) -> np.ndarray:
+def subsample_docs(docs_BL: np.ndarray, n: int = 256) -> np.ndarray:
+    """Randomly subsample up to *n* documents."""
     if docs_BL.shape[0] <= n:
         return docs_BL
-    idx = _rng.choice(docs_BL.shape[0], n, replace=False)
+    idx = rng.choice(docs_BL.shape[0], n, replace=False)
     return docs_BL[idx]
 
 
-def _build_layer_groups(n_layer: int) -> dict[str, list[str]]:
+def build_layer_groups(n_layer: int) -> dict[str, list[str]]:
+    """Build named layer groups (emb, attn, mlp, ln_f) for *n_layer* blocks."""
     groups: dict[str, list[str]] = {
         "emb": ["transformer.wte.weight", "transformer.wpe.weight"],
     }
@@ -216,7 +226,7 @@ def _build_layer_groups(n_layer: int) -> dict[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 
-def _preload_seeds(
+def preload_seeds(
     ckpt_root: Path,
     all_results: list[dict],
     n_seeds: int,
@@ -226,7 +236,7 @@ def _preload_seeds(
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     preloaded: dict[str, list[SeedCheckpoints]] = {}
 
     for sched in schedules:
@@ -239,12 +249,12 @@ def _preload_seeds(
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
             cfg = r["config"]
-            pre_step, peak_step, rev_step = _get_key_steps(files, r)
+            pre_step, peak_step, rev_step = get_key_steps(files, r)
 
             sd_pre_cpu = {
                 k: v.float()
@@ -297,16 +307,15 @@ def _preload_seeds(
 # ---------------------------------------------------------------------------
 
 
-def _build_hybrid_sd(
+def build_hybrid_sd(
     sd_bottom: dict[str, torch.Tensor],
     sd_top: dict[str, torch.Tensor],
     cut_after_block: int,
 ) -> dict[str, torch.Tensor]:
+    """Frankenstein state dict: bottom layers from one checkpoint, top from another."""
     hybrid = {}
     for key, val in sd_bottom.items():
-        if (
-            key.startswith(("transformer.wte.", "transformer.wpe.", "transformer.drop."))
-        ):
+        if key.startswith(("transformer.wte.", "transformer.wpe.", "transformer.drop.")):
             hybrid[key] = val
         elif key.startswith("transformer.h."):
             block_idx = int(key.split(".")[2])
@@ -341,11 +350,11 @@ def compute_frankenstein(  # noqa: PLR0913
             hybrid_sds: list[dict] = []
             for k in cut_points:
                 directions.append("pre_bottom")
-                hybrid_sds.append(_build_hybrid_sd(sc.sd_pre, sc.sd_peak, k))
+                hybrid_sds.append(build_hybrid_sd(sc.sd_pre, sc.sd_peak, k))
                 directions.append("post_bottom")
-                hybrid_sds.append(_build_hybrid_sd(sc.sd_peak, sc.sd_pre, k))
+                hybrid_sds.append(build_hybrid_sd(sc.sd_peak, sc.sd_pre, k))
 
-            evals = _batch_eval_hybrids(sc.cfg, hybrid_sds, burst_sub, other_sub, prompt_len)
+            evals = batch_eval_hybrids(sc.cfg, hybrid_sds, burst_sub, other_sub, prompt_len)
 
             seed_data: dict[str, list[float]] = {
                 "pre_bottom_burst": [],
@@ -376,7 +385,7 @@ def compute_cross_burst_frankenstein(  # noqa: PLR0913
 ) -> dict:
     """Evaluate cross-schedule Frankenstein layer-swaps."""
     if schedule_pairs is None:
-        available = sorted(preloaded.keys(), key=_sched_order)
+        available = sorted(preloaded.keys(), key=sched_order)
         schedule_pairs = list(combinations(available, 2))
 
     cut_points = list(range(-1, n_layer))
@@ -397,11 +406,11 @@ def compute_cross_burst_frankenstein(  # noqa: PLR0913
             hybrid_sds: list[dict] = []
             for k in cut_points:
                 directions.append("a_bottom")
-                hybrid_sds.append(_build_hybrid_sd(sc_a.sd_peak, sc_b.sd_peak, k))
+                hybrid_sds.append(build_hybrid_sd(sc_a.sd_peak, sc_b.sd_peak, k))
                 directions.append("b_bottom")
-                hybrid_sds.append(_build_hybrid_sd(sc_b.sd_peak, sc_a.sd_peak, k))
+                hybrid_sds.append(build_hybrid_sd(sc_b.sd_peak, sc_a.sd_peak, k))
 
-            evals = _batch_eval_hybrids(sc_a.cfg, hybrid_sds, burst_sub, other_sub, prompt_len)
+            evals = batch_eval_hybrids(sc_a.cfg, hybrid_sds, burst_sub, other_sub, prompt_len)
 
             seed_data: dict[str, list[float]] = {
                 "a_bottom_burst": [],
@@ -465,19 +474,25 @@ def compute_lmc_dual(
             ]
 
             def _eval_batch(
-                interps: list[dict], _net: nanoGPT = net, _V: int = V,
+                interps: list[dict],
+                _net: nanoGPT = net,
+                _V: int = V,
             ) -> tuple[list[float], list[float]]:
                 burst_losses, other_losses = [], []
                 for interp in interps:
                     _net.load_state_dict(interp)
                     _net.eval()
                     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-                        burst_losses.append(F.cross_entropy(
-                            _net(burst_inp).float().reshape(-1, _V), burst_tgt.reshape(-1)
-                        ).item())
-                        other_losses.append(F.cross_entropy(
-                            _net(other_inp).float().reshape(-1, _V), other_tgt.reshape(-1)
-                        ).item())
+                        burst_losses.append(
+                            F.cross_entropy(
+                                _net(burst_inp).float().reshape(-1, _V), burst_tgt.reshape(-1)
+                            ).item()
+                        )
+                        other_losses.append(
+                            F.cross_entropy(
+                                _net(other_inp).float().reshape(-1, _V), other_tgt.reshape(-1)
+                            ).item()
+                        )
                 return burst_losses, other_losses
 
             pre_peak_burst, pre_peak_other = _eval_batch(all_interps_pre_peak)
@@ -538,13 +553,14 @@ def compute_ema_dual(  # noqa: PLR0913
             ]
 
             def _eval_path(
-                interps: list[dict], _net: nanoGPT = net,
+                interps: list[dict],
+                _net: nanoGPT = net,
             ) -> tuple[list[float], list[float]]:
                 burst_accs, other_accs = [], []
                 for interp in interps:
                     _net.load_state_dict(interp)
-                    burst_accs.append(_free_gen_acc(_net, burst_sub, prompt_len))
-                    other_accs.append(_free_gen_acc(_net, other_sub, prompt_len))
+                    burst_accs.append(free_gen_acc(_net, burst_sub, prompt_len))
+                    other_accs.append(free_gen_acc(_net, other_sub, prompt_len))
                 return burst_accs, other_accs
 
             pre_peak_burst, pre_peak_other = _eval_path(all_pre_peak)
@@ -614,8 +630,8 @@ def compute_pruning_dual(  # noqa: PLR0913
             burst_accs, other_accs = [], []
             for pruned_sd in all_pruned:
                 net.load_state_dict(pruned_sd)
-                burst_accs.append(_free_gen_acc(net, burst_sub, prompt_len))
-                other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
+                burst_accs.append(free_gen_acc(net, burst_sub, prompt_len))
+                other_accs.append(free_gen_acc(net, other_sub, prompt_len))
 
             per_seed.append({"burst_accs": burst_accs, "other_accs": other_accs})
 
@@ -636,7 +652,7 @@ def compute_weight_drift_per_layer(
     n_seeds: int = 10,
 ) -> dict:
     """Frobenius norm of delta-W per layer, decomposed from total weight drift."""
-    layer_groups = _build_layer_groups(n_layer)
+    layer_groups = build_layer_groups(n_layer)
     layer_group_names = list(layer_groups.keys())
 
     results = {}
@@ -670,7 +686,7 @@ def compute_effective_rank_per_layer(
     n_seeds: int = 10,
 ) -> dict:
     """Effective rank = exp(H(p)) where p_i = sigma_i / sum(sigma_j) for SVD of delta-W."""
-    layer_groups = _build_layer_groups(n_layer)
+    layer_groups = build_layer_groups(n_layer)
     layer_group_names = list(layer_groups.keys())
 
     results = {}
@@ -728,17 +744,17 @@ def compute_cka_per_layer(
 
             net.load_state_dict(sc.sd_pre)
             net.eval()
-            pre_acts = _collect_layer_acts(net, inp_t, n_layer)
+            pre_acts = collect_layer_acts(net, inp_t, n_layer)
 
             net.load_state_dict(sc.sd_peak)
             net.eval()
-            peak_acts = _collect_layer_acts(net, inp_t, n_layer)
+            peak_acts = collect_layer_acts(net, inp_t, n_layer)
 
             per_layer: dict[str, float] = {}
             for layer_name in pre_acts:
                 X = pre_acts[layer_name]
                 Y = peak_acts[layer_name]
-                per_layer[layer_name] = _linear_cka(X, Y)
+                per_layer[layer_name] = linear_cka(X, Y)
 
             per_seed.append({"per_layer": per_layer})
         results[sched] = {
@@ -748,7 +764,7 @@ def compute_cka_per_layer(
     return results
 
 
-def _collect_layer_acts(
+def collect_layer_acts(
     net: nanoGPT,
     inp_t: torch.Tensor,
     n_layer: int,
@@ -757,7 +773,7 @@ def _collect_layer_acts(
     acts: dict[str, torch.Tensor] = {}
     hooks = []
 
-    def _make_hook(name: str) -> Callable[..., None]:
+    def make_hook(name: str) -> Callable[..., None]:
         def hook_fn(
             _module: torch.nn.Module,
             _input: tuple[torch.Tensor, ...],
@@ -769,7 +785,7 @@ def _collect_layer_acts(
         return hook_fn
 
     for i in range(n_layer):
-        h = net.transformer.h[i].register_forward_hook(_make_hook(f"block{i}"))
+        h = net.transformer.h[i].register_forward_hook(make_hook(f"block{i}"))
         hooks.append(h)
 
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
@@ -781,7 +797,7 @@ def _collect_layer_acts(
     return acts
 
 
-def _linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
+def linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
     """Linear CKA between two activation matrices (N x D)."""
     X = X - X.mean(dim=0, keepdim=True)
     Y = Y - Y.mean(dim=0, keepdim=True)
@@ -826,8 +842,8 @@ def compute_directional_pruning(  # noqa: PLR0913
             for k in svd_ks:
                 if k == 0:
                     net.load_state_dict(sc.sd_peak)
-                    burst_accs.append(_free_gen_acc(net, burst_sub, prompt_len))
-                    other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
+                    burst_accs.append(free_gen_acc(net, burst_sub, prompt_len))
+                    other_accs.append(free_gen_acc(net, other_sub, prompt_len))
                     continue
 
                 pruned_sd = {}
@@ -849,8 +865,8 @@ def compute_directional_pruning(  # noqa: PLR0913
                         pruned_sd[name] = sc.sd_peak[name]
 
                 net.load_state_dict(pruned_sd)
-                burst_accs.append(_free_gen_acc(net, burst_sub, prompt_len))
-                other_accs.append(_free_gen_acc(net, other_sub, prompt_len))
+                burst_accs.append(free_gen_acc(net, burst_sub, prompt_len))
+                other_accs.append(free_gen_acc(net, other_sub, prompt_len))
 
             per_seed.append({"burst_accs": burst_accs, "other_accs": other_accs})
 
@@ -886,8 +902,8 @@ def compute_transfer_dual(
 
             net = make_net_bare(sc_src.cfg)
             net.load_state_dict(transferred)
-            burst_acc = _free_gen_acc(net, burst_sub, prompt_len)
-            other_acc = _free_gen_acc(net, other_sub, prompt_len)
+            burst_acc = free_gen_acc(net, burst_sub, prompt_len)
+            other_acc = free_gen_acc(net, other_sub, prompt_len)
 
             per_seed.append({"burst_acc": burst_acc, "other_acc": other_acc})
 
@@ -936,13 +952,13 @@ def compute_relearning_dual(  # noqa: PLR0913
             scaler = torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
 
             n = min(256, burst_docs_BL.shape[0])
-            docs_fine = burst_docs_BL[_rng.choice(burst_docs_BL.shape[0], n, replace=False)]
+            docs_fine = burst_docs_BL[rng.choice(burst_docs_BL.shape[0], n, replace=False)]
 
             burst_accs, other_accs, steps_log = [], [], []
             net.train()
             it = 0
             for step in range(relearn_steps):
-                batch_idx = _rng.choice(n, min(cfg["batch_size"], n), replace=True)
+                batch_idx = rng.choice(n, min(cfg["batch_size"], n), replace=True)
                 batch = torch.as_tensor(docs_fine[batch_idx], dtype=torch.long, device=DEVICE)
                 inp, tgt = batch[:, :-1], batch[:, 1:]
                 it, _ = update_cosine_warmup_lr(it, optim_cfg, optimizer, relearn_steps)
@@ -957,8 +973,8 @@ def compute_relearning_dual(  # noqa: PLR0913
                 scaler.update()
 
                 if step % 5 == 0 or step == relearn_steps - 1:
-                    ba = _free_gen_acc(net, burst_sub, prompt_len)
-                    oa = _free_gen_acc(net, other_sub, prompt_len)
+                    ba = free_gen_acc(net, burst_sub, prompt_len)
+                    oa = free_gen_acc(net, other_sub, prompt_len)
                     burst_accs.append(ba)
                     other_accs.append(oa)
                     steps_log.append(step)
@@ -990,7 +1006,7 @@ def compute_trajectory_dim(  # noqa: C901
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -1005,7 +1021,7 @@ def compute_trajectory_dim(  # noqa: C901
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -1090,7 +1106,7 @@ def compute_forgetting_decomposition(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -1138,7 +1154,7 @@ def compute_grad_temporal(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -1171,7 +1187,7 @@ def compute_layer_interference(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -1210,7 +1226,7 @@ def compute_layer_interference(all_results: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _aggregate_layer_metric(
+def aggregate_layer_metric(
     all_results: list[dict], key: str, phase_filter: str = PHASE_BURST
 ) -> dict:
     """Aggregate per-layer time-series dicts stored in grad_sim_log.
@@ -1221,7 +1237,7 @@ def _aggregate_layer_metric(
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -1264,22 +1280,22 @@ def _aggregate_layer_metric(
 
 def compute_grad_norm_ratio(all_results: list[dict]) -> dict:
     """Per-layer ||g_burst|| / ||g_other|| aggregated over burst phase."""
-    return _aggregate_layer_metric(all_results, "grad_norm_ratio")
+    return aggregate_layer_metric(all_results, "grad_norm_ratio")
 
 
 def compute_grad_rank(all_results: list[dict]) -> dict:
     """Per-layer effective gradient rank aggregated over burst phase."""
-    return _aggregate_layer_metric(all_results, "grad_rank")
+    return aggregate_layer_metric(all_results, "grad_rank")
 
 
 def compute_grad_snr(all_results: list[dict]) -> dict:
     """Per-layer gradient SNR aggregated over burst phase."""
-    return _aggregate_layer_metric(all_results, "grad_snr")
+    return aggregate_layer_metric(all_results, "grad_snr")
 
 
 def compute_conflict_rate(all_results: list[dict]) -> dict:
     """Per-layer gradient sign conflict rate aggregated over burst phase."""
-    return _aggregate_layer_metric(all_results, "conflict_rate")
+    return aggregate_layer_metric(all_results, "conflict_rate")
 
 
 def compute_token_pos_grad(all_results: list[dict]) -> dict:
@@ -1291,7 +1307,7 @@ def compute_token_pos_grad(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -1326,7 +1342,7 @@ def compute_grad_attribution(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -1379,7 +1395,7 @@ def compute_forgetting_grad_alignment(
     other_t = torch.as_tensor(other_sub, dtype=torch.long, device=DEVICE)
     other_inp, other_tgt = other_t[:, :-1], other_t[:, 1:]
 
-    layer_groups = _build_layer_groups(n_layer)
+    layer_groups = build_layer_groups(n_layer)
     layer_group_names = list(layer_groups.keys())
 
     results = {}
@@ -1456,7 +1472,7 @@ def compute_forgetting_grad_alignment(
 # ---------------------------------------------------------------------------
 
 
-def _eval_loss_at_eta(  # noqa: PLR0913
+def eval_loss_at_eta(  # noqa: PLR0913
     net: nanoGPT,
     sd_base: dict[str, torch.Tensor],
     delta: dict[str, torch.Tensor],
@@ -1470,12 +1486,10 @@ def _eval_loss_at_eta(  # noqa: PLR0913
     net.load_state_dict(perturbed)
     net.eval()
     with torch.no_grad():
-        return F.cross_entropy(
-            net(inp_t).float().reshape(-1, vocab_size), tgt_t.reshape(-1)
-        ).item()
+        return F.cross_entropy(net(inp_t).float().reshape(-1, vocab_size), tgt_t.reshape(-1)).item()
 
 
-def _critical_lr_line_search(  # noqa: PLR0913
+def critical_lr_line_search(  # noqa: PLR0913
     net: nanoGPT,
     sd_base: dict[str, torch.Tensor],
     delta: dict[str, torch.Tensor],
@@ -1494,7 +1508,7 @@ def _critical_lr_line_search(  # noqa: PLR0913
     Returns η_c ≈ (η_lower + η_upper) / 2.
     """
     eta = eta0
-    loss_eta = _eval_loss_at_eta(net, sd_base, delta, eta, inp_t, tgt_t, vocab_size)
+    loss_eta = eval_loss_at_eta(net, sd_base, delta, eta, inp_t, tgt_t, vocab_size)
     direction = +1 if loss_eta < loss_base else -1
 
     eta_lower, eta_upper = 0.0, 0.0
@@ -1504,7 +1518,7 @@ def _critical_lr_line_search(  # noqa: PLR0913
         if eta < 1e-12:  # noqa: PLR2004
             eta_lower, eta_upper = eta, eta_prev
             break
-        loss_eta = _eval_loss_at_eta(net, sd_base, delta, eta, inp_t, tgt_t, vocab_size)
+        loss_eta = eval_loss_at_eta(net, sd_base, delta, eta, inp_t, tgt_t, vocab_size)
         if direction == +1 and loss_eta > loss_base:
             eta_lower, eta_upper = eta_prev, eta
             break
@@ -1519,7 +1533,7 @@ def _critical_lr_line_search(  # noqa: PLR0913
 
     while abs(1.0 - eta_lower / eta_upper) > binary_tol:
         eta_mid = 0.5 * (eta_lower + eta_upper)
-        loss_mid = _eval_loss_at_eta(net, sd_base, delta, eta_mid, inp_t, tgt_t, vocab_size)
+        loss_mid = eval_loss_at_eta(net, sd_base, delta, eta_mid, inp_t, tgt_t, vocab_size)
         if loss_mid > loss_base:
             eta_upper = eta_mid
         else:
@@ -1544,7 +1558,7 @@ def compute_sharpness(  # noqa: C901
     Only requires forward passes — fully compatible with Flash Attention and distributed training.
     Based on: Kalra & Barkeshli (2024), Kalra et al. (2026) arXiv:2601.16979.
     """
-    layer_groups = _build_layer_groups(n_layer)
+    layer_groups = build_layer_groups(n_layer)
     layer_group_names = list(layer_groups.keys())
 
     burst_t = torch.as_tensor(burst_sub, dtype=torch.long, device=DEVICE)
@@ -1589,10 +1603,10 @@ def compute_sharpness(  # noqa: C901
                     net(other_inp).float().reshape(-1, V), other_tgt.reshape(-1)
                 ).item()
 
-            eta_c_burst = _critical_lr_line_search(
+            eta_c_burst = critical_lr_line_search(
                 net, sc.sd_peak, delta, loss_burst_base, burst_inp, burst_tgt, V, eta0=eta0_burst
             )
-            eta_c_other = _critical_lr_line_search(
+            eta_c_other = critical_lr_line_search(
                 net, sc.sd_peak, delta, loss_other_base, other_inp, other_tgt, V, eta0=eta0_other
             )
 
@@ -1648,7 +1662,7 @@ def compute_sharpness(  # noqa: C901
 # ---------------------------------------------------------------------------
 
 
-def _bar_with_seeds(  # noqa: PLR0913
+def bar_with_seeds(  # noqa: PLR0913
     fig: object,
     schedules: list[str],
     per_seed_values: dict[str, list[float]],
@@ -1656,8 +1670,7 @@ def _bar_with_seeds(  # noqa: PLR0913
     row: int | None = None,
     col: int | None = None,
 ) -> None:
-    import plotly.graph_objects as go  # noqa: PLC0415
-
+    """Add a grouped bar trace with per-seed scatter to a Plotly figure."""
     means = []
     ci95s = []
     for s in schedules:
@@ -1674,7 +1687,7 @@ def _bar_with_seeds(  # noqa: PLR0913
     bar_kwargs = {
         "x": schedules,
         "y": means,
-        "marker_color": [_color(s) for s in schedules],
+        "marker_color": [color(s) for s in schedules],
         "error_y": {"type": "data", "array": ci95s, "visible": True},
         "name": name,
         "showlegend": bool(name),
@@ -1688,7 +1701,7 @@ def _bar_with_seeds(  # noqa: PLR0913
         vals = per_seed_values.get(s, [])
         if not vals:
             continue
-        jitter = _rng.uniform(-0.15, 0.15, len(vals))
+        jitter = rng.uniform(-0.15, 0.15, len(vals))
         scatter_kwargs = {
             "x": [s_idx + j for j in jitter],
             "y": vals,
@@ -1705,9 +1718,6 @@ def _bar_with_seeds(  # noqa: PLR0913
 
 def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
     """Build and save the unified burstiness analysis dashboard."""
-    import plotly.graph_objects as go  # noqa: PLC0415
-    from plotly.subplots import make_subplots  # noqa: PLC0415
-
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1715,7 +1725,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
 
     def _add(key: str, title: str, fig: go.Figure) -> None:
         all_figs.append((key, title, fig))
-        _save_png(fig, str(charts_dir / f"{key}.png"))
+        save_png(fig, str(charts_dir / f"{key}.png"))
 
     run_names = results.get("run_names", [])
     results.get("n_layer", 6)
@@ -1727,7 +1737,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         ema = results.get("ema_dual", {}).get(rn, {})
         if not ema:
             continue
-        schedules = sorted(ema.keys(), key=_sched_order)
+        schedules = sorted(ema.keys(), key=sched_order)
         alphas = ema[schedules[0]]["alphas"]
 
         for path_key, path_label, burst_key, other_key in [
@@ -1752,7 +1762,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=alphas,
                         y=burst_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=True,
                     ),
@@ -1764,7 +1774,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=alphas,
                         y=other_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=False,
                     ),
@@ -1776,7 +1786,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=alphas,
                         y=diff_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                     )
                 )
@@ -1802,7 +1812,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
 
         cliff_vals = {s: [p["cliff_pre_peak_burst"] for p in ema[s]["per_seed"]] for s in schedules}
         fig_cliff = go.Figure()
-        _bar_with_seeds(fig_cliff, schedules, cliff_vals)
+        bar_with_seeds(fig_cliff, schedules, cliff_vals)
         fig_cliff.update_layout(
             title=f"EMA Cliff Alpha (Pre→Peak) — {rn}<br>"
             "<sup>Higher = capability concentrated in narrow direction (shallow wrapper)</sup>",
@@ -1820,7 +1830,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         lmc = results.get("lmc_dual", {}).get(rn, {})
         if not lmc:
             continue
-        schedules = sorted(lmc.keys(), key=_sched_order)
+        schedules = sorted(lmc.keys(), key=sched_order)
         alphas = lmc[schedules[0]]["alphas"]
 
         for path_key, path_label, burst_key, other_key in [
@@ -1847,7 +1857,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=alphas,
                         y=burst_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=True,
                     ),
@@ -1859,7 +1869,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=alphas,
                         y=other_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=False,
                     ),
@@ -1871,7 +1881,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=alphas,
                         y=diff_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                     )
                 )
@@ -1901,7 +1911,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         ]:
             vals = {s: [p[barrier_key] for p in lmc[s]["per_seed"]] for s in schedules}
             fig_b = go.Figure()
-            _bar_with_seeds(fig_b, schedules, vals)
+            bar_with_seeds(fig_b, schedules, vals)
             fig_b.update_layout(
                 title=f"LMC Barrier: {barrier_label} — {rn}",
                 xaxis_title="Schedule",
@@ -1918,7 +1928,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         frank = results.get("frankenstein", {}).get(rn, {})
         if not frank:
             continue
-        schedules = sorted(frank.keys(), key=_sched_order)
+        schedules = sorted(frank.keys(), key=sched_order)
         cut_points = frank[schedules[0]]["cut_points"]
         cut_labels = ["emb"] + [f"block {i}" for i in range(len(cut_points) - 1)]
 
@@ -1954,7 +1964,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=cut_labels,
                         y=burst_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=True,
                     ),
@@ -1966,7 +1976,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=cut_labels,
                         y=other_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=False,
                     ),
@@ -1978,7 +1988,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=cut_labels,
                         y=diff_mean,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                     )
                 )
@@ -2009,7 +2019,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         frank = results.get("frankenstein", {}).get(rn, {})
         if not frank:
             continue
-        schedules = sorted(frank.keys(), key=_sched_order)
+        schedules = sorted(frank.keys(), key=sched_order)
         cut_points = frank[schedules[0]]["cut_points"]
         cut_labels = ["emb"] + [f"block {i}" for i in range(len(cut_points) - 1)]
 
@@ -2032,7 +2042,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=cut_labels,
                     y=loc_gap,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2054,7 +2064,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             go.Bar(
                 x=list(deepest_gaps.keys()),
                 y=list(deepest_gaps.values()),
-                marker_color=[_color(s) for s in deepest_gaps],
+                marker_color=[color(s) for s in deepest_gaps],
             )
         )
         fig_bar.add_hline(y=0, line_dash="dash", line_color="gray")
@@ -2106,7 +2116,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=cut_labels,
                     y=a_burst,
                     name=f"{sa} bottom",
-                    line={"color": _color(sa), "width": 2},
+                    line={"color": color(sa), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -2117,7 +2127,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=cut_labels,
                     y=b_burst,
                     name=f"{sb} bottom",
-                    line={"color": _color(sb), "width": 2},
+                    line={"color": color(sb), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -2128,7 +2138,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=cut_labels,
                     y=a_other,
                     name=f"{sa} bottom",
-                    line={"color": _color(sa), "width": 2, "dash": "dash"},
+                    line={"color": color(sa), "width": 2, "dash": "dash"},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -2140,7 +2150,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=cut_labels,
                     y=b_other,
                     name=f"{sb} bottom",
-                    line={"color": _color(sb), "width": 2, "dash": "dash"},
+                    line={"color": color(sb), "width": 2, "dash": "dash"},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -2152,7 +2162,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=cut_labels,
                     y=a_diff,
                     name=f"{sa} bottom",
-                    line={"color": _color(sa), "width": 2},
+                    line={"color": color(sa), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2161,7 +2171,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=cut_labels,
                     y=b_diff,
                     name=f"{sb} bottom",
-                    line={"color": _color(sb), "width": 2},
+                    line={"color": color(sb), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2191,14 +2201,14 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         tvt = results.get("transfer_dual", {}).get(rn, {})
         if not tvt:
             continue
-        schedules = sorted(tvt.keys(), key=_sched_order)
+        schedules = sorted(tvt.keys(), key=sched_order)
         for class_key, class_label in [
             ("burst_acc", "Burst Class"),
             ("other_acc", "Other Classes"),
         ]:
             vals = {s: [p[class_key] for p in tvt[s]["per_seed"]] for s in schedules}
             fig = go.Figure()
-            _bar_with_seeds(fig, schedules, vals)
+            bar_with_seeds(fig, schedules, vals)
             fig.update_layout(
                 title=f"Task Vector Transfer: {class_label} — {rn}",
                 xaxis_title="Schedule",
@@ -2216,7 +2226,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         pr = results.get("pruning_dual", {}).get(rn, {})
         if not pr:
             continue
-        schedules = sorted(pr.keys(), key=_sched_order)
+        schedules = sorted(pr.keys(), key=sched_order)
         sparsities = pr[schedules[0]]["sparsities"]
 
         fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class", "Other Classes"])
@@ -2237,7 +2247,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=[s * 100 for s in sparsities],
                     y=burst_mean,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -2248,7 +2258,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=[s * 100 for s in sparsities],
                     y=other_mean,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -2260,7 +2270,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=[s * 100 for s in sparsities],
                     y=diff_mean,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2290,7 +2300,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         rl = results.get("relearning_dual", {}).get(rn, {})
         if not rl:
             continue
-        schedules = sorted(rl.keys(), key=_sched_order)
+        schedules = sorted(rl.keys(), key=sched_order)
 
         fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Class", "Other Classes"])
         fig_delta = go.Figure()
@@ -2311,7 +2321,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=steps,
                     y=burst_mean,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -2322,7 +2332,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=steps,
                     y=other_mean,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -2334,7 +2344,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=steps,
                     y=diff_mean,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -2363,12 +2373,13 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             ps = rl[sched]["per_seed"]
             aucs = [
                 float(_trapz(s["burst_accs"], s["steps"])) / max(s["steps"][-1], 1)
-                for s in ps if s["steps"]
+                for s in ps
+                if s["steps"]
             ]
             auc_vals[sched] = aucs
 
         fig_auc = go.Figure()
-        _bar_with_seeds(fig_auc, schedules, auc_vals)
+        bar_with_seeds(fig_auc, schedules, auc_vals)
         fig_auc.update_layout(
             title=f"Relearning AUC (Burst Class) — {rn}",
             xaxis_title="Schedule",
@@ -2385,10 +2396,10 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         ftd = results.get("trajectory_dim", {}).get(rn, {})
         if not ftd:
             continue
-        schedules = sorted(ftd.keys(), key=_sched_order)
+        schedules = sorted(ftd.keys(), key=sched_order)
         vals = {s: ftd[s]["per_seed"] for s in schedules}
         fig = go.Figure()
-        _bar_with_seeds(fig, schedules, vals)
+        bar_with_seeds(fig, schedules, vals)
         fig.update_layout(
             title=f"Forgetting Trajectory Dimensionality — {rn}<br>"
             "<sup>PCA components for 95% variance of reversion weight path</sup>",
@@ -2406,14 +2417,14 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         fsd = results.get("forgetting_decomposition", {}).get(rn, {})
         if not fsd:
             continue
-        schedules = sorted(fsd.keys(), key=_sched_order)
+        schedules = sorted(fsd.keys(), key=sched_order)
 
         for metric_key, metric_label in [
             ("reversion_auc", "Reversion AUC"),
         ]:
             vals = {s: [p[metric_key] for p in fsd[s]["per_seed"]] for s in schedules}
             fig = go.Figure()
-            _bar_with_seeds(fig, schedules, vals)
+            bar_with_seeds(fig, schedules, vals)
             fig.update_layout(
                 title=f"Forgetting: {metric_label} — {rn}",
                 xaxis_title="Schedule",
@@ -2430,7 +2441,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         gt = results.get("grad_temporal", {}).get(rn, {})
         if not gt:
             continue
-        schedules = sorted(gt.keys(), key=_sched_order)
+        schedules = sorted(gt.keys(), key=sched_order)
         fig = go.Figure()
         for sched in schedules:
             d = gt[sched]
@@ -2441,7 +2452,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=d["steps"],
                     y=d["mean_sims"],
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines",
                 )
             )
@@ -2461,7 +2472,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         pli = results.get("layer_interference", {}).get(rn, {})
         if not pli:
             continue
-        schedules = sorted(pli.keys(), key=_sched_order)
+        schedules = sorted(pli.keys(), key=sched_order)
         sample = next((pli[s] for s in schedules if pli.get(s)), None)
         if not sample or "layer_names" not in sample:
             continue
@@ -2524,7 +2535,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         sharp = results.get("sharpness", {}).get(rn, {})
         if not sharp:
             continue
-        schedules = sorted(sharp.keys(), key=_sched_order)
+        schedules = sorted(sharp.keys(), key=sched_order)
 
         for class_key, class_label in [
             ("burst_critical", "Burst Class"),
@@ -2543,7 +2554,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             if not vals:
                 continue
             fig = go.Figure()
-            _bar_with_seeds(fig, list(vals.keys()), vals)
+            bar_with_seeds(fig, list(vals.keys()), vals)
             fig.update_layout(
                 title=f"Critical Sharpness λ_c at Peak Burst: {class_label} — {rn}<br>"
                 "<sup>λ_c = 2/η_c where η_c is the critical LR along the burst direction Δθ. "
@@ -2568,7 +2579,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     diff_vals[s] = diffs
         if diff_vals:
             fig_diff = go.Figure()
-            _bar_with_seeds(fig_diff, list(diff_vals.keys()), diff_vals)
+            bar_with_seeds(fig_diff, list(diff_vals.keys()), diff_vals)
             fig_diff.update_layout(
                 title=f"Critical Sharpness Δ (Burst − Other) at Peak Burst — {rn}<br>"  # noqa: RUF001
                 "<sup>Positive = burst class has sharper loss landscape along burst direction</sup>",  # noqa: E501
@@ -2586,7 +2597,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         sharp = results.get("sharpness", {}).get(rn, {})
         if not sharp:
             continue
-        schedules = sorted(sharp.keys(), key=_sched_order)
+        schedules = sorted(sharp.keys(), key=sched_order)
         sample_sched = next((s for s in schedules if sharp[s].get("per_seed")), None)
         if not sample_sched:
             continue
@@ -2717,7 +2728,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     m - c if not np.isnan(m) else float("nan")
                     for m, c in zip(means, ci95, strict=True)
                 ]
-                col = _color(sched)
+                col = color(sched)
                 fig.add_trace(
                     go.Scatter(
                         x=layer_group_names + layer_group_names[::-1],
@@ -2786,7 +2797,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 m - c if not np.isnan(m) else float("nan")
                 for m, c in zip(diff_means, ci95_diff, strict=True)
             ]
-            col = _color(sched)
+            col = color(sched)
             fig_diff.add_trace(
                 go.Scatter(
                     x=layer_group_names + layer_group_names[::-1],
@@ -2839,7 +2850,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 fsd = results.get("forgetting_decomposition", {}).get(rn, {})
                 if not fsd:
                     continue
-                schedules = sorted(fsd.keys(), key=_sched_order)
+                schedules = sorted(fsd.keys(), key=sched_order)
                 burst_pcts = [int(s.replace("burst_", "")) for s in schedules]
                 vals = [extract_fn(fsd, s) for s in schedules]
                 bp = results.get("burst_positions", {}).get(rn, "?")
@@ -2868,7 +2879,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         gnr = results.get("grad_norm_ratio", {}).get(rn, {})
         if not gnr:
             continue
-        schedules = sorted(gnr.keys(), key=_sched_order)
+        schedules = sorted(gnr.keys(), key=sched_order)
         sample = next((gnr[s] for s in schedules if gnr.get(s)), None)
         if not sample or "layer_names" not in sample:
             continue
@@ -2908,7 +2919,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         gr = results.get("grad_rank", {}).get(rn, {})
         if not gr:
             continue
-        schedules = sorted(gr.keys(), key=_sched_order)
+        schedules = sorted(gr.keys(), key=sched_order)
         sample = next((gr[s] for s in schedules if gr.get(s)), None)
         if not sample or "layer_names" not in sample:
             continue
@@ -2947,7 +2958,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         gsnr = results.get("grad_snr", {}).get(rn, {})
         if not gsnr:
             continue
-        schedules = sorted(gsnr.keys(), key=_sched_order)
+        schedules = sorted(gsnr.keys(), key=sched_order)
         sample = next((gsnr[s] for s in schedules if gsnr.get(s)), None)
         if not sample or "layer_names" not in sample:
             continue
@@ -2986,7 +2997,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         gcr = results.get("conflict_rate", {}).get(rn, {})
         if not gcr:
             continue
-        schedules = sorted(gcr.keys(), key=_sched_order)
+        schedules = sorted(gcr.keys(), key=sched_order)
         sample = next((gcr[s] for s in schedules if gcr.get(s)), None)
         if not sample or "layer_names" not in sample:
             continue
@@ -3029,7 +3040,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         tpg = results.get("token_pos_grad", {}).get(rn, {})
         if not tpg:
             continue
-        schedules = sorted(tpg.keys(), key=_sched_order)
+        schedules = sorted(tpg.keys(), key=sched_order)
         fig = go.Figure()
         for sched in schedules:
             d = tpg.get(sched, {})
@@ -3042,7 +3053,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=positions,
                     y=norms,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -3064,14 +3075,14 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         ga = results.get("grad_attribution", {}).get(rn, {})
         if not ga:
             continue
-        schedules = sorted(ga.keys(), key=_sched_order)
+        schedules = sorted(ga.keys(), key=sched_order)
 
         int_vals = {s: ga[s]["per_seed_intermediate"] for s in schedules if ga.get(s)}
         fin_vals = {s: ga[s]["per_seed_final"] for s in schedules if ga.get(s)}
 
         if int_vals:
             fig = go.Figure()
-            _bar_with_seeds(fig, list(int_vals.keys()), int_vals)
+            bar_with_seeds(fig, list(int_vals.keys()), int_vals)
             fig.update_layout(
                 title=f"Gradient Attribution: Intermediate Output Fraction — {rn}<br>"
                 "<sup>Fraction of total gradient norm from intermediate output positions. "
@@ -3087,7 +3098,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
 
         if fin_vals:
             fig = go.Figure()
-            _bar_with_seeds(fig, list(fin_vals.keys()), fin_vals)
+            bar_with_seeds(fig, list(fin_vals.keys()), fin_vals)
             fig.update_layout(
                 title=f"Gradient Attribution: Final Output Fraction — {rn}<br>"
                 "<sup>Fraction of total gradient norm from the final output position only. "
@@ -3106,7 +3117,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         fga = results.get("forgetting_grad_alignment", {}).get(rn, {})
         if not fga:
             continue
-        schedules = sorted(fga.keys(), key=_sched_order)
+        schedules = sorted(fga.keys(), key=sched_order)
 
         global_vals = {}
         for s in schedules:
@@ -3118,7 +3129,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
 
         if global_vals:
             fig = go.Figure()
-            _bar_with_seeds(fig, list(global_vals.keys()), global_vals)
+            bar_with_seeds(fig, list(global_vals.keys()), global_vals)
             fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
             fig.update_layout(
                 title=f"Forgetting Gradient Alignment at Peak Burst — {rn}<br>"
@@ -3169,7 +3180,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         wdpl = results.get("weight_drift_per_layer", {}).get(rn, {})
         if not wdpl:
             continue
-        schedules = sorted(wdpl.keys(), key=_sched_order)
+        schedules = sorted(wdpl.keys(), key=sched_order)
         layer_group_names = wdpl[schedules[0]].get("layer_group_names", [])
         if not layer_group_names:
             continue
@@ -3209,7 +3220,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         erpl = results.get("effective_rank_per_layer", {}).get(rn, {})
         if not erpl:
             continue
-        schedules = sorted(erpl.keys(), key=_sched_order)
+        schedules = sorted(erpl.keys(), key=sched_order)
         layer_group_names = erpl[schedules[0]].get("layer_group_names", [])
         if not layer_group_names:
             continue
@@ -3248,7 +3259,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         cka = results.get("cka_per_layer", {}).get(rn, {})
         if not cka:
             continue
-        schedules = sorted(cka.keys(), key=_sched_order)
+        schedules = sorted(cka.keys(), key=sched_order)
         layer_names = cka[schedules[0]].get("layer_names", [])
         if not layer_names:
             continue
@@ -3288,7 +3299,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         dp = results.get("directional_pruning", {}).get(rn, {})
         if not dp:
             continue
-        schedules = sorted(dp.keys(), key=_sched_order)
+        schedules = sorted(dp.keys(), key=sched_order)
         svd_ks = dp[schedules[0]]["svd_ks"]
 
         fig = make_subplots(rows=1, cols=2, subplot_titles=["Burst Accuracy", "Other Accuracy"])
@@ -3307,7 +3318,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=svd_ks,
                     y=burst_mean,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                 ),
                 row=1,
@@ -3318,7 +3329,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     x=svd_ks,
                     y=other_mean,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": color(sched), "width": 2},
                     mode="lines+markers",
                     showlegend=False,
                 ),
@@ -3388,8 +3399,6 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
     with html_path.open("w") as f:
         f.write("".join(html_parts))
 
-    from burst.dev.plot_utils import write_text_report  # noqa: PLC0415
-
     write_text_report(
         all_figs, out_dir / "dashboard.txt", dashboard_title="Unified Burstiness Analysis Dashboard"
     )
@@ -3400,7 +3409,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
 # ---------------------------------------------------------------------------
 
 
-def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:  # noqa: C901, PLR0912, PLR0915
+def compute_extended_metrics(results: list[dict]) -> dict[str, dict]:  # noqa: C901, PLR0912, PLR0915
     """Compute 11 additional scalar metrics + curve data per schedule from training logs.
 
     Dimension key:
@@ -3552,7 +3561,7 @@ def _compute_extended_metrics(results: list[dict]) -> dict[str, dict]:  # noqa: 
     return metrics
 
 
-def _ext_bar_fig(  # noqa: PLR0913
+def ext_bar_fig(  # noqa: PLR0913
     schedules: list[str],
     metric_key: str,
     title: str,
@@ -3560,8 +3569,7 @@ def _ext_bar_fig(  # noqa: PLR0913
     metrics: dict[str, dict],
     colors: dict[str, str],
 ) -> object:
-    import plotly.graph_objects as go  # noqa: PLC0415
-
+    """Build a Plotly bar chart for one extended metric across schedules."""
     means, cis, all_vals = [], [], []
     for s in schedules:
         vals = np.array(metrics[s][metric_key])
@@ -3601,7 +3609,7 @@ def _ext_bar_fig(  # noqa: PLR0913
     return fig
 
 
-def _ext_curve_burst_aligned(  # noqa: PLR0913
+def ext_curve_burst_aligned(  # noqa: PLR0913
     schedules: list[str],
     metrics: dict[str, dict],
     colors: dict[str, str],
@@ -3610,8 +3618,6 @@ def _ext_curve_burst_aligned(  # noqa: PLR0913
     yaxis_title: str,
 ) -> object:
     """Curve chart aligned to burst start (x=0 at start of burst)."""
-    import plotly.graph_objects as go  # noqa: PLC0415
-
     fig = go.Figure()
     for s in schedules:
         m = metrics[s]
@@ -3650,7 +3656,7 @@ def _ext_curve_burst_aligned(  # noqa: PLR0913
     return fig
 
 
-def _ext_curve_reversal_aligned(  # noqa: PLR0913
+def ext_curve_reversal_aligned(  # noqa: PLR0913
     schedules: list[str],
     metrics: dict[str, dict],
     colors: dict[str, str],
@@ -3664,8 +3670,6 @@ def _ext_curve_reversal_aligned(  # noqa: PLR0913
     Burst phase shown on negative x (different schedules start at different negative x
     because burst lengths differ). Reversal shown on positive x (all start at 0).
     """
-    import plotly.graph_objects as go  # noqa: PLC0415
-
     fig = go.Figure()
     for s in schedules:
         m = metrics[s]
@@ -3751,12 +3755,6 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
       - out_dir/extended_metrics.html  (interactive Plotly)
       - out_dir/charts/extended_*.png  (static PNG via kaleido if available)
     """
-    import plotly.graph_objects as go  # noqa: PLC0415
-    import plotly.io as pio  # noqa: PLC0415
-
-    from burst.config import SCHED_COLORS, ordered_schedules  # noqa: PLC0415
-    from burst.core.train_utils import load_results  # noqa: PLC0415
-
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(exist_ok=True)
 
@@ -3771,7 +3769,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
     if not all_results_combined:
         return
 
-    metrics = _compute_extended_metrics(all_results_combined)
+    metrics = compute_extended_metrics(all_results_combined)
     schedules = ordered_schedules(list(metrics.keys()))
     colors = SCHED_COLORS
 
@@ -3792,7 +3790,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
             pio.write_image(fig, str(charts_dir / name), width=1200, height=500)
 
     for key, title, ylabel in scalar_metrics:
-        fig = _ext_bar_fig(schedules, key, title, ylabel, metrics, colors)
+        fig = ext_bar_fig(schedules, key, title, ylabel, metrics, colors)
         all_figs.append((key, title, fig))
         _try_save_png(fig, f"extended_{key}.png")
 
@@ -3801,7 +3799,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
         ("other_curve", "Other-Class Accuracy During Burst", "Accuracy"),
         ("burst_loss_curve", "Training Loss During Burst", "Cross-Entropy Loss"),
     ]:
-        fig_ba = _ext_curve_burst_aligned(schedules, metrics, colors, curve_key, title, ylabel)
+        fig_ba = ext_curve_burst_aligned(schedules, metrics, colors, curve_key, title, ylabel)
         all_figs.append((f"{curve_key}_burst_aligned", f"{title} — Burst-Start Aligned", fig_ba))
         _try_save_png(fig_ba, f"extended_{curve_key}_burst_aligned.png")
 
@@ -3875,8 +3873,6 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
     with html_path.open("w") as f:
         f.write("".join(html_parts))
 
-    from burst.dev.plot_utils import write_text_report  # noqa: PLC0415
-
     write_text_report(
         all_figs, out_dir / "extended_metrics.txt", dashboard_title="Extended Metrics Dashboard"
     )
@@ -3887,7 +3883,7 @@ def make_extended_metrics_dashboard(run_dirs: list[Path], out_dir: Path) -> None
 # ---------------------------------------------------------------------------
 
 
-def _resolve_unified_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
+def resolve_unified_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
     """Return (config_path, data_path, all_results_path, ckpt_root)."""
     results_dir = run_dir / "results"
     logs_dir = run_dir / "logs"
@@ -3923,7 +3919,7 @@ def analyse_run(  # noqa: PLR0913, C901, PLR0912, PLR0915
     subsample_n: int = 256,
 ) -> dict:
     """Run all analysis metrics on a single training run directory."""
-    config_path, data_path, all_results_path, ckpt_root = _resolve_unified_paths(run_dir)
+    config_path, data_path, all_results_path, ckpt_root = resolve_unified_paths(run_dir)
 
     with config_path.open() as f:
         run_cfg = json.load(f)
@@ -3944,8 +3940,8 @@ def analyse_run(  # noqa: PLR0913, C901, PLR0912, PLR0915
 
     run_name = run_dir.name
 
-    burst_sub = _subsample_docs(burst_docs_BL, n=subsample_n)
-    other_sub = _subsample_docs(other_docs_BL, n=subsample_n)
+    burst_sub = subsample_docs(burst_docs_BL, n=subsample_n)
+    other_sub = subsample_docs(other_docs_BL, n=subsample_n)
 
     result = {"run_name": run_name, "burst_pos": rc["burst_pos"], "n_layer": n_layer}
 
@@ -4004,7 +4000,7 @@ def analyse_run(  # noqa: PLR0913, C901, PLR0912, PLR0915
 
     max_seeds = max(n_seeds, frank_seeds, xfrank_seeds)
     time.time()
-    preloaded = _preload_seeds(ckpt_root, all_results, max_seeds)
+    preloaded = preload_seeds(ckpt_root, all_results, max_seeds)
 
     if ANALYSIS_METRICS.get("ema_dual", True):
         result["ema_dual"] = compute_ema_dual(
@@ -4167,7 +4163,6 @@ def main() -> None:
     make_dashboard(combined, args.out_dir)
 
     make_extended_metrics_dashboard(args.run_dirs, args.out_dir)
-
 
 
 if __name__ == "__main__":

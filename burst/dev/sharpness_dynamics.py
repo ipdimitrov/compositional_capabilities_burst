@@ -33,9 +33,13 @@ from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+import matplotlib as mpl
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+mpl.use("Agg")
+import matplotlib.pyplot as plt
 
 from burst.config import (
     CLASS_BURST,
@@ -89,8 +93,8 @@ def _extract_adam_delta_named(
                 continue
 
             beta1, beta2 = group["betas"]
-            bc1 = 1.0 - beta1 ** step_t
-            bc2 = 1.0 - beta2 ** step_t
+            bc1 = 1.0 - beta1**step_t
+            bc2 = 1.0 - beta2**step_t
             m_hat = m / bc1
             v_hat = v / bc2
 
@@ -306,9 +310,7 @@ def compute_sharpness_dynamics(  # noqa: C901, PLR0913, PLR0915
     def _train_step(batch_np: np.ndarray, global_step: int) -> float:
         tokens_BL = torch.as_tensor(batch_np, dtype=torch.long, device=DEVICE)
         inputs_BT, targets_BT = tokens_BL[:, :-1], tokens_BL[:, 1:]
-        update_phase_lr(
-            global_step, optimizer, warmup_steps, P, T, U, lr_max, lr_pe, lr_be, lr_re
-        )
+        update_phase_lr(global_step, optimizer, warmup_steps, P, T, U, lr_max, lr_pe, lr_be, lr_re)
         optimizer.zero_grad(set_to_none=True)
         n = inputs_BT.size(0)
         n_accum = (n + max_micro_bs - 1) // max_micro_bs
@@ -335,14 +337,27 @@ def compute_sharpness_dynamics(  # noqa: C901, PLR0913, PLR0915
         nonlocal eta0_burst, eta0_other
         lr = optimizer.param_groups[0]["lr"]
         lc_b, lc_o, eta0_burst, eta0_other = _measure_sharpness_at_step(
-            net, optimizer, burst_inp, burst_tgt, other_inp, other_tgt,
-            V, eta0_burst, eta0_other,
+            net,
+            optimizer,
+            burst_inp,
+            burst_tgt,
+            other_inp,
+            other_tgt,
+            V,
+            eta0_burst,
+            eta0_other,
         )
-        trace.steps.append(StepSharpness(
-            global_step=gs, phase=phase, lr=lr,
-            lambda_c_burst=lc_b, lambda_c_other=lc_o,
-            eos_threshold=_eos_threshold(lr), train_loss=loss_val,
-        ))
+        trace.steps.append(
+            StepSharpness(
+                global_step=gs,
+                phase=phase,
+                lr=lr,
+                lambda_c_burst=lc_b,
+                lambda_c_other=lc_o,
+                eos_threshold=_eos_threshold(lr),
+                train_loss=loss_val,
+            )
+        )
 
     net.train()
 
@@ -376,8 +391,6 @@ def plot_sharpness_dynamics(
     out_dir: Path,
 ) -> None:
     """Plot per-step critical sharpness for each schedule, with EoS threshold."""
-    import matplotlib.pyplot as plt  # noqa: PLC0415
-
     out_dir.mkdir(parents=True, exist_ok=True)
     schedules = [s for s in SCHEDULE_ORDER if s in traces]
 
@@ -444,8 +457,6 @@ def _plot_sharpness_vs_eos(
     out_dir: Path,
 ) -> None:
     """Plot lambda_c / EoS_threshold ratio -- values near 1.0 mean Edge of Stability."""
-    import matplotlib.pyplot as plt  # noqa: PLC0415
-
     _fig, ax = plt.subplots(figsize=(14, 5))
     schedules = [s for s in SCHEDULE_ORDER if s in traces]
 
@@ -455,9 +466,7 @@ def _plot_sharpness_vs_eos(
         for tr in traces[sched]:
             for sp in tr.steps:
                 ratio = (
-                    sp.lambda_c_burst / sp.eos_threshold
-                    if sp.eos_threshold > 0
-                    else float("nan")
+                    sp.lambda_c_burst / sp.eos_threshold if sp.eos_threshold > 0 else float("nan")
                 )
                 all_steps.setdefault(sp.global_step, []).append(ratio)
 
@@ -539,13 +548,20 @@ def main() -> None:  # noqa: D103
 
             t0 = time.time()
             trace = compute_sharpness_dynamics(
-                job, target_pool, bg_pool, burst_sub, other_sub,
+                job,
+                target_pool,
+                bg_pool,
+                burst_sub,
+                other_sub,
                 measure_every=args.measure_every,
             )
             elapsed = time.time() - t0
             logger.info(
                 "%s seed=%d: %d measurements in %.1fs",
-                sched, seed, len(trace.steps), elapsed,
+                sched,
+                seed,
+                len(trace.steps),
+                elapsed,
             )
 
             all_traces.setdefault(sched, []).append(trace)

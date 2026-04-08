@@ -34,12 +34,16 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
+import shutil  # noqa: E402
+
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from einops import rearrange  # noqa: E402
+from torch.func import functional_call, grad, vmap  # noqa: E402
 
 from burst.config import (  # noqa: E402
+    CLASS_BURST,
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
     MIN_VECTORS_FOR_SIMILARITY,
@@ -244,8 +248,6 @@ def _grad_snr_per_layer(
     Uses torch.func.vmap + grad to compute all per-example gradients in one
     vectorised call instead of n_examples sequential backward passes.
     """
-    from torch.func import functional_call, grad, vmap  # noqa: PLC0415
-
     n = min(n_examples, docs_np.shape[0])
     idx = get_rng().choice(docs_np.shape[0], n, replace=False)
     dat = torch.as_tensor(docs_np[idx], dtype=torch.long, device=DEVICE)
@@ -529,8 +531,6 @@ def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
       ALL_OTHER   -- all other-class tasks pooled
       ALL_DATA    -- everything pooled
     """
-    from burst.config import CLASS_BURST  # noqa: PLC0415
-
     net.train()
 
     depth = len(next(iter(task_docs))) - 1
@@ -1085,8 +1085,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         logger.info("Updated all_results.pkl with grad-sim data for %d labels", len(per_label))
 
     if args.delete_checkpoints:
-        import shutil  # noqa: PLC0415
-
         shutil.rmtree(ckpt_root)
         logger.info("Cleaned up checkpoints")
 

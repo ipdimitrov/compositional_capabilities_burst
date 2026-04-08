@@ -26,6 +26,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from burst.core.gpu import gpu_cfg
+
 # ---------------------------------------------------------------------------
 # Phase names (three-phase experiment)
 # ---------------------------------------------------------------------------
@@ -50,7 +52,7 @@ LOSS_BURST = f"loss_{CLASS_BURST}"
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0] #[100, 90, 70]
+BURST_FRACTIONS = [100, 90, 70]  # [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0] #
 
 UNIFORM_PCT = 25
 
@@ -59,12 +61,12 @@ UNIFORM_PCT = 25
 # ---------------------------------------------------------------------------
 
 
-def _sched_name(pct: int) -> str:
+def sched_name(pct: int) -> str:
     """Return the canonical schedule name for a burst percentage."""
     return f"burst_{pct}"
 
 
-def _build_gradient(n: int) -> list[str]:
+def build_gradient(n: int) -> list[str]:
     """Red (high %) -> Blue (low %) gradient via HSL interpolation."""
     if n == 1:
         return ["#D32F2F"]
@@ -79,22 +81,22 @@ def _build_gradient(n: int) -> list[str]:
 
 
 _sorted_pcts = sorted(BURST_FRACTIONS, reverse=True)
-_gradient = _build_gradient(len(_sorted_pcts))
+_gradient = build_gradient(len(_sorted_pcts))
 
-SCHEDULE_ORDER: list[str] = [_sched_name(p) for p in _sorted_pcts]
+SCHEDULE_ORDER: list[str] = [sched_name(p) for p in _sorted_pcts]
 
-UNIFORM_SCHEDULE: str = _sched_name(UNIFORM_PCT)
+UNIFORM_SCHEDULE: str = sched_name(UNIFORM_PCT)
 
 FULL_PCT = 100
 MIXED_FRACTIONS: dict[str, float] = {
-    _sched_name(p): p / 100.0 for p in _sorted_pcts if p != FULL_PCT
+    sched_name(p): p / 100.0 for p in _sorted_pcts if p != FULL_PCT
 }
 
 SCHED_COLORS: dict[str, str] = {
-    _sched_name(p): c for p, c in zip(_sorted_pcts, _gradient, strict=False)
+    sched_name(p): c for p, c in zip(_sorted_pcts, _gradient, strict=False)
 }
 
-SCHED_DISPLAY: dict[str, str] = {_sched_name(p): f"Burst {p}%" for p in _sorted_pcts}
+SCHED_DISPLAY: dict[str, str] = {sched_name(p): f"Burst {p}%" for p in _sorted_pcts}
 
 EVAL_KEYS = [ACC_OTHER, ACC_BURST]
 
@@ -132,7 +134,7 @@ CORE_CLI_MODES = ("train", "gradients", "bundle", "charts", "pipeline")
 # ---------------------------------------------------------------------------
 PRETRAIN_ACC_THRESHOLD = 0.99
 GRAD_NORM_EPS = 1e-6
-CHECKPOINT_EVERY = 10 # 50
+CHECKPOINT_EVERY = 10  # 50
 MIN_VECTORS_FOR_SIMILARITY = 2
 N_PROBE_DOCS_PER_TASK = 200
 ACTIVATION_COLLECT_BATCH_SIZE = 512
@@ -261,8 +263,6 @@ class ExperimentConfig:
             msg = f"burst_mode must be one of {BURST_MODES}, got {self.burst_mode!r}"
             raise ValueError(msg)
         if self.n_workers == 0:
-            from burst.core.gpu import gpu_cfg  # noqa: PLC0415
-
             self.n_workers = gpu_cfg.train_workers
 
     @property
@@ -283,18 +283,24 @@ def parse_run_config(cfg: dict[str, Any]) -> dict[str, Any]:
     base_cfg = cfg["base_cfg"]
     task_info = cfg.get("task_info", {})
 
-    def _get(key: str) -> int:
+    def get(key: str) -> int:
         v = cfg.get(key)
         return v if v is not None else task_info.get(key)
 
-    depth = _get("depth")
-    assert depth is not None, "config missing 'depth'"  # noqa: S101
+    depth = get("depth")
+    if depth is None:
+        msg = "config missing 'depth'"
+        raise ValueError(msg)
 
-    burst_pos = _get("burst_pos")
-    assert burst_pos is not None, "config missing 'burst_pos'"  # noqa: S101
+    burst_pos = get("burst_pos")
+    if burst_pos is None:
+        msg = "config missing 'burst_pos'"
+        raise ValueError(msg)
 
-    n_a = _get("n_a")
-    assert n_a is not None, "config missing 'n_a'"  # noqa: S101
+    n_a = get("n_a")
+    if n_a is None:
+        msg = "config missing 'n_a'"
+        raise ValueError(msg)
 
     return {"depth": depth, "burst_pos": burst_pos, "n_a": n_a, "base_cfg": base_cfg}
 

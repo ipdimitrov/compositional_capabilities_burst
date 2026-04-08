@@ -28,7 +28,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import matplotlib.pyplot as plt
 
-from burst.config import SCHED_COLORS, SCHEDULE_ORDER, ordered_schedules, sched_sort_key
+from burst.config import (
+    SCHED_COLORS,
+    SCHEDULE_ORDER,
+    ordered_schedules,
+    sched_sort_key,
+)
+from burst.core.train_utils import resolve_run_paths
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +43,6 @@ _STEP_TOLERANCE = 30
 
 
 def _load_steps_from_config(run_dir: Path) -> tuple[int, int] | None:
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
-
     cfg_path, _, _ = resolve_run_paths(run_dir)
     if not cfg_path.exists():
         return None
@@ -415,9 +419,7 @@ def plot_layer_schedule_heatmap(
         if seed_means:
             grid[:, ci] = np.mean(seed_means, axis=0)
 
-    fig, ax = plt.subplots(
-        figsize=(max(6, len(col_scheds) * 1.4), max(3, n_layers * 0.6))
-    )
+    fig, ax = plt.subplots(figsize=(max(6, len(col_scheds) * 1.4), max(3, n_layers * 0.6)))
     im = ax.imshow(grid, aspect="auto", cmap="Blues", vmin=0.4, vmax=1.0, interpolation="nearest")
 
     ax.set_xticks(range(len(col_scheds)))
@@ -457,13 +459,14 @@ def _pick_representative_seed(results: list[dict], schedule: str) -> dict | None
 
 
 def _mean_acc_at_step(
-    results: list[dict], schedule: str, step: int, key: str,
+    results: list[dict],
+    schedule: str,
+    step: int,
+    key: str,
 ) -> np.ndarray | None:
     """Average probe accuracy across seeds for a schedule at a given step."""
     arrs = [
-        r["probes"][step][key]
-        for r in results
-        if r["schedule"] == schedule and step in r["probes"]
+        r["probes"][step][key] for r in results if r["schedule"] == schedule and step in r["probes"]
     ]
     if not arrs:
         return None

@@ -51,10 +51,12 @@ from burst.config import (
     DATA_SEED,
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
+    EVAL_KEYS,
     LOSS_BURST,
     LOSS_OTHER,
     MODE_CURRENT,
     N_A,
+    PHASE_PRE_BURST,
     PRETRAIN_ACC_THRESHOLD,
     ExperimentConfig,
     TrainConfig,
@@ -67,6 +69,7 @@ from burst.config import (
 from burst.core.data import pad_pools_to_same_length
 from burst.core.gpu import gpu_cfg
 from burst.core.repro import write_repro_manifest
+from burst.core.train.worker import eval_free_gen, eval_loss
 from burst.core.train_utils import (
     DEVICE,
     _cross_entropy_logits_BTV_targets_BT,
@@ -285,9 +288,6 @@ def run_pretrain(  # noqa: C901, PLR0913, PLR0915
     Returns a pretrain log dict with step/loss/phase/ACC_OTHER/ACC_BURST lists
     so charts can show the pretraining trajectory.
     """
-    from burst.config import EVAL_KEYS, PHASE_PRE_BURST  # noqa: PLC0415
-    from burst.core.train.worker import eval_free_gen, eval_loss  # noqa: PLC0415
-
     seed_all(seed)
     net = make_net(cfg)
     optimizer = configure_optimizers(net, make_optim_cfg(cfg))

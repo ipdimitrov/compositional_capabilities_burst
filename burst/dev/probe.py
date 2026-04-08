@@ -40,6 +40,7 @@ from burst.core.train_utils import (
     N_PROBE_DOCS_PER_TASK,
     build_probe_docs,
     load_net,
+    resolve_run_paths,
     retrain_with_callbacks,
 )
 from synthetic.init import set_seed
@@ -270,8 +271,6 @@ def _worker_main() -> None:
 
 def main() -> None:  # noqa: PLR0915
     """Run linear probes across training checkpoints."""
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
-
     parser = argparse.ArgumentParser(
         description="Linear probes for Other-vs-Burst representation analysis"
     )
@@ -289,7 +288,9 @@ def main() -> None:  # noqa: PLR0915
         help="Max samples per class for activation collection",
     )
     parser.add_argument(
-        "--seed-override", type=int, default=None,
+        "--seed-override",
+        type=int,
+        default=None,
         help="Run only this seed across all schedules",
     )
     parser.add_argument("--n-workers", type=int, default=None)
@@ -311,19 +312,28 @@ def main() -> None:  # noqa: PLR0915
     )
     logger.info(
         "Checkpoint steps (%d): %s...%s",
-        len(checkpoint_steps), checkpoint_steps[:8], checkpoint_steps[-3:],
+        len(checkpoint_steps),
+        checkpoint_steps[:8],
+        checkpoint_steps[-3:],
     )
 
     logger.info("Rebuilding data (seed=%d)...", DATA_SEED)
     tp, bp, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
     logger.info(
         "Other tasks: %d  Burst tasks: %d  doc_len: %d",
-        ti["n_other_train"], ti["n_burst_train"], ti["doc_len"],
+        ti["n_other_train"],
+        ti["n_burst_train"],
+        ti["doc_len"],
     )
 
     set_seed(DATA_SEED)
     d = DepthNData(
-        bcfg["n_alphabets"], bcfg["seq_len"], n_a, depth, burst_pos, DATA_SEED,
+        bcfg["n_alphabets"],
+        bcfg["seq_len"],
+        n_a,
+        depth,
+        burst_pos,
+        DATA_SEED,
     )
     doc_len = ti["doc_len"]
     other_docs, burst_docs = build_probe_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
@@ -332,7 +342,9 @@ def main() -> None:  # noqa: PLR0915
     token_labels = get_token_position_labels(doc_len, bcfg["seq_len"], depth)
     logger.info(
         "Token positions (%d): %s...%s",
-        len(token_labels), token_labels[:6], token_labels[-3:],
+        len(token_labels),
+        token_labels[:6],
+        token_labels[-3:],
     )
 
     ckpt_root = logs_dir / "checkpoints"
@@ -346,9 +358,7 @@ def main() -> None:  # noqa: PLR0915
     if args.jobs:
         jobs_cfg = [j for j in jobs_cfg if j["label"] in args.jobs]
     if args.seed_override is not None:
-        jobs_cfg = [
-            j for j in jobs_cfg if j["seed"] == args.seed_override
-        ]
+        jobs_cfg = [j for j in jobs_cfg if j["seed"] == args.seed_override]
 
     n_workers = min(len(jobs_cfg), args.n_workers or gpu_cfg.probe_workers)
     logger.info("%s", gpu_cfg.summary())
@@ -382,15 +392,25 @@ def main() -> None:  # noqa: PLR0915
     ckpt_args = [str(s) for s in checkpoint_steps]
 
     def build_cmd(
-        script: str, job_path: str, data_path: str, output_path: str,
+        script: str,
+        job_path: str,
+        data_path: str,
+        output_path: str,
     ) -> list[str]:
         return [
-            sys.executable, script, "--worker",
-            "--job-path", job_path,
-            "--data-path", data_path,
-            "--output-path", output_path,
-            "--checkpoint-steps", *ckpt_args,
-            "--probe-max-samples", str(args.probe_max_samples),
+            sys.executable,
+            script,
+            "--worker",
+            "--job-path",
+            job_path,
+            "--data-path",
+            data_path,
+            "--output-path",
+            output_path,
+            "--checkpoint-steps",
+            *ckpt_args,
+            "--probe-max-samples",
+            str(args.probe_max_samples),
         ]
 
     all_probe_results: list[dict] = []
@@ -412,7 +432,10 @@ def main() -> None:  # noqa: PLR0915
             logger.info("[%d/%d] %s -> %s (%.0fs)", _n_done, _n_total, lbl, pkl, elapsed)
         else:
             logger.info(
-                "FAIL [%d/%d]: %s", _n_done, _n_total, jr.label,  # type: ignore[attr-defined]
+                "FAIL [%d/%d]: %s",
+                _n_done,
+                _n_total,
+                jr.label,  # type: ignore[attr-defined]
             )
             if jr.error:  # type: ignore[attr-defined]
                 logger.info("  %s", jr.error)

@@ -53,9 +53,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import numpy as np
+import plotly.graph_objects as go
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
+from plotly.subplots import make_subplots
 
 from burst.config import (
     ACC_BURST,
@@ -63,20 +65,16 @@ from burst.config import (
     PHASE_REVERSION,
     parse_run_config,
 )
-from burst.core.train_utils import DEVICE, load_net
-from burst.dev._shared import (
-    ckpt_files as _ckpt_files,
+from burst.core.train_utils import (
+    DEVICE,
+    ckpt_files,
+    free_gen_acc,
+    load_net,
+    resolve_run_paths,
+    sched_color,
+    sched_order,
 )
-from burst.dev._shared import (
-    free_gen_acc as _free_gen_acc,
-)
-from burst.dev._shared import (
-    sched_color as _color,
-)
-from burst.dev._shared import (
-    sched_order as _sched_order,
-)
-from burst.dev.plot_utils import save_png as _save_png
+from burst.dev.plot_utils import save_png, write_text_report
 from net.runner import configure_optimizers, update_cosine_warmup_lr
 
 _rng = np.random.default_rng()
@@ -107,7 +105,7 @@ def compute_task_vector_transfer(
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -122,7 +120,7 @@ def compute_task_vector_transfer(
             ckpt_dir_src = ckpt_root / label_src
             if not ckpt_dir_src.exists():
                 continue
-            files_src = _ckpt_files(ckpt_dir_src)
+            files_src = ckpt_files(ckpt_dir_src)
             if not files_src:
                 continue
 
@@ -145,7 +143,7 @@ def compute_task_vector_transfer(
 
             label_tgt = r_tgt["label"]
             ckpt_dir_tgt = ckpt_root / label_tgt
-            files_tgt = _ckpt_files(ckpt_dir_tgt)
+            files_tgt = ckpt_files(ckpt_dir_tgt)
             if not files_tgt:
                 continue
             pre_step_tgt = min(files_tgt.keys())
@@ -181,7 +179,7 @@ def compute_task_vector_transfer(
 
             n = min(256, burst_docs_BL.shape[0])
             idx = _rng.choice(burst_docs_BL.shape[0], n, replace=False)
-            acc = _free_gen_acc(net_pre_tgt, burst_docs_BL[idx], prompt_len)
+            acc = free_gen_acc(net_pre_tgt, burst_docs_BL[idx], prompt_len)
             transfer_accs.append(acc)
             seeds_done += 1
 
@@ -220,7 +218,7 @@ def compute_forgetting_trajectory_dim(  # noqa: C901
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -235,7 +233,7 @@ def compute_forgetting_trajectory_dim(  # noqa: C901
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -307,7 +305,7 @@ def compute_relearning_efficiency(  # noqa: PLR0913, PLR0915
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -322,7 +320,7 @@ def compute_relearning_efficiency(  # noqa: PLR0913, PLR0915
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -368,7 +366,7 @@ def compute_relearning_efficiency(  # noqa: PLR0913, PLR0915
                 scaler.update()
 
                 if step % 5 == 0 or step == relearn_steps - 1:
-                    acc = _free_gen_acc(net, docs_fine, prompt_len)
+                    acc = free_gen_acc(net, docs_fine, prompt_len)
                     accs.append((step, acc))
 
             all_accs.append(accs)
@@ -420,7 +418,7 @@ def compute_linear_mode_connectivity(  # noqa: PLR0915
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     alphas = np.linspace(0, 1, n_alphas).tolist()
     results = {}
 
@@ -442,7 +440,7 @@ def compute_linear_mode_connectivity(  # noqa: PLR0915
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -527,7 +525,7 @@ def compute_pruning_robustness(  # noqa: PLR0913
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     sparsities = np.linspace(0, 0.9, n_prune_levels).tolist()
     results = {}
 
@@ -547,7 +545,7 @@ def compute_pruning_robustness(  # noqa: PLR0913
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -568,7 +566,7 @@ def compute_pruning_robustness(  # noqa: PLR0913
                         k: v * (v.abs() >= threshold).to(v.dtype) for k, v in base_sd.items()
                     }
                     net.load_state_dict(pruned_sd)
-                acc = _free_gen_acc(net, docs, prompt_len)
+                acc = free_gen_acc(net, docs, prompt_len)
                 acc_curve.append(acc)
 
             all_acc_curves.append(acc_curve)
@@ -615,7 +613,7 @@ def compute_pairwise_grad_separation(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -665,7 +663,7 @@ def compute_forgetting_speed_decomposition(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -745,7 +743,7 @@ def compute_layer_interference_localisation(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -804,7 +802,7 @@ def compute_grad_interference_temporal(all_results: list[dict]) -> dict:
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -879,7 +877,7 @@ def compute_grad_projection_metrics(all_results: list[dict]) -> dict:  # noqa: C
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
     results = {}
-    for sched, sched_results in sorted(jobs_by_schedule.items(), key=lambda x: _sched_order(x[0])):
+    for sched, sched_results in sorted(jobs_by_schedule.items(), key=lambda x: sched_order(x[0])):
         step_data: dict[int, dict[str, list[float]]] = {}
         step_phases: dict[int, str] = {}
 
@@ -947,7 +945,7 @@ def compute_burst_position_comparison(existing_analyses: list[dict]) -> dict:
         wdr = analysis.get("weight_delta_rank", {})
         adl = analysis.get("adl", {})
 
-        schedules = sorted(sm.keys(), key=_sched_order)
+        schedules = sorted(sm.keys(), key=sched_order)
         pos_data = {}
 
         for sched in schedules:
@@ -1210,9 +1208,6 @@ _METRIC_DESCRIPTIONS = {
 
 def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
     """Generate HTML dashboard with charts for all new metrics."""
-    import plotly.graph_objects as go  # noqa: PLC0415
-    from plotly.subplots import make_subplots  # noqa: PLC0415
-
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1222,7 +1217,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         desc = _METRIC_DESCRIPTIONS.get(key, {})
         title = desc.get("title", key)
         all_figs.append((key, title, fig))
-        _save_png(fig, str(charts_dir / f"{key}.png"))
+        save_png(fig, str(charts_dir / f"{key}.png"))
 
     # ------------------------------------------------------------------
     # Chart 1: Task Vector Transfer
@@ -1232,13 +1227,13 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         tvt = new_results.get("task_vector_transfer", {}).get(run_name, {})
         if not tvt:
             continue
-        schedules = sorted(tvt.keys(), key=_sched_order)
+        schedules = sorted(tvt.keys(), key=sched_order)
         fig = go.Figure()
         fig.add_trace(
             go.Bar(
                 x=schedules,
                 y=[tvt[s]["mean_transfer_acc"] for s in schedules],
-                marker_color=[_color(s) for s in schedules],
+                marker_color=[sched_color(s) for s in schedules],
                 name=run_name,
             )
         )
@@ -1259,13 +1254,13 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         ftd = new_results.get("forgetting_trajectory_dim", {}).get(run_name, {})
         if not ftd:
             continue
-        schedules = sorted(ftd.keys(), key=_sched_order)
+        schedules = sorted(ftd.keys(), key=sched_order)
         fig = go.Figure()
         fig.add_trace(
             go.Bar(
                 x=schedules,
                 y=[ftd[s]["mean_dim"] for s in schedules],
-                marker_color=[_color(s) for s in schedules],
+                marker_color=[sched_color(s) for s in schedules],
                 name=run_name,
             )
         )
@@ -1287,7 +1282,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         rle = new_results.get("relearning_efficiency", {}).get(run_name, {})
         if not rle:
             continue
-        schedules = sorted(rle.keys(), key=_sched_order)
+        schedules = sorted(rle.keys(), key=sched_order)
         fig = go.Figure()
         for sched in schedules:
             d = rle[sched]
@@ -1298,7 +1293,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=d["steps"],
                     y=d["mean_accs"],
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": sched_color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1319,13 +1314,13 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         rle = new_results.get("relearning_efficiency", {}).get(run_name, {})
         if not rle:
             continue
-        schedules = sorted(rle.keys(), key=_sched_order)
+        schedules = sorted(rle.keys(), key=sched_order)
         fig = go.Figure()
         fig.add_trace(
             go.Bar(
                 x=schedules,
                 y=[rle[s]["auc"] for s in schedules],
-                marker_color=[_color(s) for s in schedules],
+                marker_color=[sched_color(s) for s in schedules],
                 name=run_name,
             )
         )
@@ -1351,7 +1346,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         pr = new_results.get("pruning_robustness", {}).get(run_name, {})
         if not pr:
             continue
-        schedules = sorted(pr.keys(), key=_sched_order)
+        schedules = sorted(pr.keys(), key=sched_order)
         fig = go.Figure()
         for sched in schedules:
             d = pr[sched]
@@ -1360,7 +1355,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=[s * 100 for s in d["sparsities"]],
                     y=d["mean_accs"],
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": sched_color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1385,7 +1380,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         pgs = new_results.get("pairwise_grad_separation", {}).get(run_name, {})
         if not pgs:
             continue
-        schedules = sorted(pgs.keys(), key=_sched_order)
+        schedules = sorted(pgs.keys(), key=sched_order)
         fig = go.Figure()
         for sched in schedules:
             d = pgs[sched]
@@ -1396,7 +1391,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=d["steps"],
                     y=d["mean_sims"],
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": sched_color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1421,14 +1416,14 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         fsd = new_results.get("forgetting_speed_decomposition", {}).get(run_name, {})
         if not fsd:
             continue
-        schedules = sorted(fsd.keys(), key=_sched_order)
+        schedules = sorted(fsd.keys(), key=sched_order)
 
         fig = make_subplots(
             rows=1,
             cols=3,
             subplot_titles=["Initial Drop Rate", "Plateau Accuracy", "Reversion AUC"],
         )
-        colors = [_color(s) for s in schedules]
+        colors = [sched_color(s) for s in schedules]
 
         fig.add_trace(
             go.Bar(
@@ -1477,7 +1472,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         pli = new_results.get("layer_interference_localisation", {}).get(run_name, {})
         if not pli:
             continue
-        schedules = sorted(pli.keys(), key=_sched_order)
+        schedules = sorted(pli.keys(), key=sched_order)
         sample = next((pli[s] for s in schedules if pli.get(s)), None)
         if not sample:
             continue
@@ -1518,7 +1513,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         git = new_results.get("grad_interference_temporal", {}).get(run_name, {})
         if not git:
             continue
-        schedules = sorted(git.keys(), key=_sched_order)
+        schedules = sorted(git.keys(), key=sched_order)
         fig = go.Figure()
         for sched in schedules:
             d = git[sched]
@@ -1529,7 +1524,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                     x=d["steps"],
                     y=d["mean_sims"],
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": sched_color(sched), "width": 2},
                     mode="lines",
                 )
             )
@@ -1554,13 +1549,13 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         git = new_results.get("grad_interference_temporal", {}).get(run_name, {})
         if not git:
             continue
-        schedules = sorted(git.keys(), key=_sched_order)
+        schedules = sorted(git.keys(), key=sched_order)
         fig = go.Figure()
         fig.add_trace(
             go.Bar(
                 x=schedules,
                 y=[git[s]["realign_speed"] for s in schedules],
-                marker_color=[_color(s) for s in schedules],
+                marker_color=[sched_color(s) for s in schedules],
                 name=run_name,
             )
         )
@@ -1581,8 +1576,12 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
     # ------------------------------------------------------------------
 
     def _proj_timeseries_fig(  # noqa: PLR0913
-        gp: dict, schedules: list[str], metric_key: str,
-        title: str, yaxis_label: str, hline: float | None = None,
+        gp: dict,
+        schedules: list[str],
+        metric_key: str,
+        title: str,
+        yaxis_label: str,
+        hline: float | None = None,
     ) -> go.Figure:
         """Line + shaded-band figure for one projection metric across schedules."""
         fig = go.Figure()
@@ -1593,7 +1592,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             steps = d["steps"]
             y = d.get(metric_key, [])
             y_std = d.get(f"{metric_key}_std", [0.0] * len(steps))
-            color = _color(sched)
+            color = sched_color(sched)
             fig.add_trace(
                 go.Scatter(
                     x=steps,
@@ -1635,7 +1634,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         gp = new_results.get("grad_projection", {}).get(run_name, {})
         if not gp:
             continue
-        schedules = sorted(gp.keys(), key=_sched_order)
+        schedules = sorted(gp.keys(), key=sched_order)
 
         _add_fig(
             "grad_interference_magnitude",
@@ -1693,7 +1692,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                 x=sched_labels,
                 y=mean_ratios,
                 error_y={"type": "data", "array": std_ratios, "visible": True},
-                marker_color=[_color(s) for s in sched_labels],
+                marker_color=[sched_color(s) for s in sched_labels],
             )
         )
         fig_bar.update_layout(
@@ -1723,7 +1722,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
             run_names = sorted(bpc.keys())
             for run_name in run_names:
                 pos_data = bpc[run_name]
-                schedules = sorted(pos_data["per_schedule"].keys(), key=_sched_order)
+                schedules = sorted(pos_data["per_schedule"].keys(), key=sched_order)
                 burst_pcts = [int(s.replace("burst_", "")) for s in schedules]
                 vals = [
                     pos_data["per_schedule"][s].get(metric_key, float("nan")) for s in schedules
@@ -1756,7 +1755,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
         analysis = existing_analyses[0]
         run_name = analysis["run_name"]
         sm = analysis.get("summary_metrics", {})
-        schedules = sorted(sm.keys(), key=_sched_order)
+        schedules = sorted(sm.keys(), key=sched_order)
         burst_pcts = [int(s.replace("burst_", "")) for s in schedules]
 
         def _get_scalar(metric_dict: dict, sched: str, key: str) -> float:
@@ -1775,7 +1774,7 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
                 "Grad Re-Alignment Speed",
             ],
         )
-        colors = [_color(s) for s in schedules]
+        colors = [sched_color(s) for s in schedules]
 
         def _add_scatter_summary(fig: go.Figure, row: int, col: int, y_vals: list[float]) -> None:
             fig.add_trace(
@@ -1967,8 +1966,6 @@ def make_dashboard(new_results: dict, existing_analyses: list[dict], out_dir: Pa
     with html_path.open("w") as f:
         f.write("".join(html_parts))
 
-    from burst.dev.plot_utils import write_text_report  # noqa: PLC0415
-
     write_text_report(
         all_figs,
         out_dir / "dashboard.txt",
@@ -1990,8 +1987,6 @@ def analyse_run(
     _relearn_steps: int = 50,
 ) -> dict:
     """Run all 10 new metrics on a single run directory."""
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
-
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
         run_cfg = json.load(f)

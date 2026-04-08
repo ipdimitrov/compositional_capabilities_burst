@@ -43,13 +43,10 @@ from burst.config import PHASE_BURST, PHASE_PRE_BURST, PHASE_REVERSION, parse_ru
 from burst.core.activations import collect_activations_KPTN
 from burst.core.gpu import gpu_cfg
 from burst.core.parallel import JobResult, run_job_pool
-from burst.core.train_utils import load_net
+from burst.core.train_utils import DEVICE, free_gen_acc, load_net, resolve_run_paths
 
 if TYPE_CHECKING:
     from net.nanogpt import nanoGPT
-
-from burst.core.train_utils import DEVICE
-from burst.dev._shared import free_gen_acc as _free_gen_acc
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +156,7 @@ def causal_ablation_accuracy(
     acc_ablated_K = np.zeros(K)
 
     for k in range(K):
-        acc_ablated_K[k] = _free_gen_accuracy_with_ablation(
+        acc_ablated_K[k] = free_gen_accuracy_with_ablation(
             net, docs_BL, prompt_len, delta_KTN, ablate_layer=k
         )
 
@@ -171,11 +168,11 @@ def causal_ablation_accuracy(
     }
 
 
-_free_gen_accuracy = _free_gen_acc
+_free_gen_accuracy = free_gen_acc
 
 
 @torch.no_grad()
-def _free_gen_accuracy_with_ablation(
+def free_gen_accuracy_with_ablation(
     net: nanoGPT,
     docs_BL: np.ndarray,
     prompt_len: int,
@@ -197,7 +194,9 @@ def _free_gen_accuracy_with_ablation(
     delta_unit_TN = delta_TN / norms_T
 
     def _ablate_hook(
-        _module: object, _input: object, output: object,
+        _module: object,
+        _input: object,
+        output: object,
     ) -> object:
         if isinstance(output, tuple):
             x_raw, rest = output[0], output[1:]
@@ -208,10 +207,7 @@ def _free_gen_accuracy_with_ablation(
         T_delta = delta_unit_TN.shape[0]
         T_use = min(T_cur, T_delta)
         d_TN = delta_unit_TN[:T_use]
-        proj = (
-            torch.einsum("btn,tn->bt", x_BTN[:, :T_use], d_TN).unsqueeze(-1)
-            * d_TN.unsqueeze(0)
-        )
+        proj = torch.einsum("btn,tn->bt", x_BTN[:, :T_use], d_TN).unsqueeze(-1) * d_TN.unsqueeze(0)
         x_BTN[:, :T_use] -= proj
         x_BTN = x_BTN.to(x_raw.dtype)
         if rest is not None:
@@ -231,7 +227,7 @@ def _free_gen_accuracy_with_ablation(
     return (generated[:, -6:] == target_B6).all(dim=1).float().mean().item()
 
 
-def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
+def burst_token_ids_local(cfg: dict, n_a: int, depth: int) -> list[int]:
     """Return token IDs associated with the burst function b*.
 
     Vocab layout: X0..X{n_alphabets-1}, then F0..F{n_a*depth+1}, then specials.
@@ -254,7 +250,8 @@ def _burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
     return [i for i in ids if i < vocab_size]
 
 
-def _worker_main() -> None:
+def worker_main() -> None:
+    """CLI entry point for ADL worker subprocess."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--job-path", required=True)
@@ -282,7 +279,7 @@ def _worker_main() -> None:
 
     delta_KTN = compute_delta_KTN(net_checkpoint, net_pre_burst, other_docs_BL, n_samples=bs)
 
-    burst_ids = _burst_token_ids(cfg, n_a, depth)
+    burst_ids = burst_token_ids_local(cfg, n_a, depth)
     readability = logit_lens_readability(net_checkpoint, delta_KTN, burst_ids)
 
     ablation = causal_ablation_accuracy(
@@ -317,8 +314,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     args = parser.parse_args()
 
     run_dir = args.run_dir
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
-
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
         run_cfg = json.load(f)
@@ -408,7 +403,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     worker_script = str(Path(__file__))
 
     def build_cmd(
-        script: str, job_path: str, data_path: str, output_path: str,
+        script: str,
+        job_path: str,
+        data_path: str,
+        output_path: str,
     ) -> list[str]:
         return [
             sys.executable,
@@ -514,12 +512,14 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     logger.info(
         "ADL done: %d labels, %d/%d ok",
-        len(per_label), sum(jr.success for jr in results), len(results),
+        len(per_label),
+        sum(jr.success for jr in results),
+        len(results),
     )
 
 
 if __name__ == "__main__":
     if "--worker" in sys.argv:
-        _worker_main()
+        worker_main()
     else:
         main()

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 from burst.config import (
     ACC_BURST,
@@ -26,6 +27,7 @@ from burst.core.representation import build_representation_summary
 from burst.core.train_utils import (
     compute_lr_schedule,
     load_results,
+    mean_ci,
     n_target_for_step,
     resolve_run_paths,
 )
@@ -68,13 +70,12 @@ def build_and_save_core_bundle(run_dir: str | Path) -> Path:
 def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
     """Assemble the full core bundle dict from training results."""
     results, cfg = load_results(run_dir)
-    assert results, "expected at least one result in all_results.pkl"  # noqa: S101
 
-    grouped = _group_by_schedule(results)
+    grouped = group_records_by_schedule(results)
     schedules = ordered_schedules(grouped.keys())
     thresholds = list(TrainConfig().reversion_thresholds)
     burst_mode = cfg["burst_mode"]
-    grad_records = _load_grad_sim_records(run_dir)
+    grad_records = load_grad_sim_records(run_dir)
 
     return {
         "schema_version": BUNDLE_SCHEMA_VERSION,
@@ -85,20 +86,18 @@ def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
             "thresholds": thresholds,
             "schedules": schedules,
         },
-        "schedule_bars": _build_schedule_bars(grouped),
-        "lr_curves": _build_lr_curves(grouped),
-        "training": _build_training_curves(grouped),
-        "summary": _build_summary(grouped, thresholds),
-        "gradients": _build_gradient_curves(grouped, grad_records, burst_mode),
-        "per_layer_gradients": _build_per_layer_gradient_curves(
-            grouped, grad_records, burst_mode
-        ),
-        "weight_drift": _build_weight_drift(run_dir),
+        "schedule_bars": build_schedule_bars_payload(grouped),
+        "lr_curves": build_lr_curves(grouped),
+        "training": build_training_curves(grouped),
+        "summary": build_summary(grouped, thresholds),
+        "gradients": build_gradient_curves(grouped, grad_records, burst_mode),
+        "per_layer_gradients": build_per_layer_gradient_curves(grouped, grad_records, burst_mode),
+        "weight_drift": build_weight_drift(run_dir),
         "representation": build_representation_summary(run_dir, grouped),
     }
 
 
-def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
+def load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
     """Load gradient cosine similarity records from JSON or pickle files."""
     run_dir = Path(run_dir)
     records: list[dict[str, Any]] = []
@@ -130,6 +129,7 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
                     "label": result.get("label", ""),
                     "grad_sim_log": grad_log,
                     "grad_projection_log": result.get("grad_projection_log"),
+                    "pairwise_snapshots": result.get("pairwise_snapshots", []),
                 }
             )
         if records:
@@ -138,7 +138,7 @@ def _load_grad_sim_records(run_dir: str | Path) -> list[dict[str, Any]]:
     return records
 
 
-def _group_by_schedule(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def group_records_by_schedule(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Group dicts by their 'schedule' key in canonical order."""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
@@ -146,18 +146,7 @@ def _group_by_schedule(records: list[dict[str, Any]]) -> dict[str, list[dict[str
     return {schedule: grouped[schedule] for schedule in ordered_schedules(grouped.keys())}
 
 
-def _mean_ci(values: np.ndarray) -> tuple[float, float]:
-    """Return (mean, 95% CI) for an array of values."""
-    if values.size == 0:
-        return float("nan"), float("nan")
-    mean = float(np.mean(values))
-    if values.size == 1:
-        return mean, 0.0
-    ci = float(1.96 * np.std(values) / np.sqrt(values.size))
-    return mean, ci
-
-
-def _interpolate_to_reference(
+def interpolate_to_reference(
     reference_steps: np.ndarray,
     source_steps: np.ndarray,
     values: np.ndarray,
@@ -168,7 +157,7 @@ def _interpolate_to_reference(
     return np.interp(reference_steps, source_steps, values).astype(float)
 
 
-def _interpolate_optional_metric(
+def interpolate_optional_metric(
     reference_steps: np.ndarray,
     source_steps: np.ndarray,
     values: np.ndarray,
@@ -176,10 +165,10 @@ def _interpolate_optional_metric(
     """Interpolate a metric that may be missing, returning NaN if length mismatches."""
     if len(values) != len(source_steps):
         return np.full_like(reference_steps, np.nan, dtype=float)
-    return _interpolate_to_reference(reference_steps, source_steps, values)
+    return interpolate_to_reference(reference_steps, source_steps, values)
 
 
-def _aggregate_series(
+def aggregate_series(
     runs: list[dict[str, Any]],
     key: str,
 ) -> dict[str, Any]:
@@ -189,23 +178,23 @@ def _aggregate_series(
     for run in runs:
         steps = np.array(run["log"]["step"], dtype=float)
         values = np.array(run["log"].get(key, [float("nan")] * len(steps)), dtype=float)
-        stacked.append(_interpolate_to_reference(first_steps, steps, values))
+        stacked.append(interpolate_to_reference(first_steps, steps, values))
     arr = np.stack(stacked)
     return {
         "steps": first_steps.tolist(),
         "mean": np.nanmean(arr, axis=0).tolist(),
-        "ci": _series_ci(arr).tolist(),
+        "ci": series_ci(arr).tolist(),
     }
 
 
-def _series_ci(arr: np.ndarray) -> np.ndarray:
+def series_ci(arr: np.ndarray) -> np.ndarray:
     """Return per-timestep 95% CI across the first axis."""
     if arr.shape[0] <= 1:
         return np.nanstd(arr, axis=0)
     return 1.96 * np.nanstd(arr, axis=0) / np.sqrt(arr.shape[0])
 
 
-def _build_schedule_bars(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def build_schedule_bars_payload(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     """Build per-schedule burst fraction time-series for bar charts."""
     payload: dict[str, Any] = {}
     for schedule, runs in grouped.items():
@@ -230,7 +219,7 @@ def _build_schedule_bars(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, 
     return payload
 
 
-def _build_lr_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def build_lr_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     """Build per-schedule learning rate curves."""
     payload: dict[str, Any] = {}
     for schedule, runs in grouped.items():
@@ -240,7 +229,7 @@ def _build_lr_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]
     return payload
 
 
-def _build_training_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def build_training_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     """Build per-schedule aggregated training curves (acc, loss)."""
     payload: dict[str, Any] = {}
     for schedule, runs in grouped.items():
@@ -249,16 +238,16 @@ def _build_training_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str
             "pre_steps": int(cfg["pre_burst_steps"]),
             "burst_steps": int(cfg["total_steps"]),
             "reversion_steps": int(cfg["reversion_steps"]),
-            ACC_BURST: _aggregate_series(runs, ACC_BURST),
-            ACC_OTHER: _aggregate_series(runs, ACC_OTHER),
-            "loss": _aggregate_series(runs, "loss"),
-            LOSS_BURST: _aggregate_series(runs, LOSS_BURST),
-            LOSS_OTHER: _aggregate_series(runs, LOSS_OTHER),
+            ACC_BURST: aggregate_series(runs, ACC_BURST),
+            ACC_OTHER: aggregate_series(runs, ACC_OTHER),
+            "loss": aggregate_series(runs, "loss"),
+            LOSS_BURST: aggregate_series(runs, LOSS_BURST),
+            LOSS_OTHER: aggregate_series(runs, LOSS_OTHER),
         }
     return payload
 
 
-def _reversion_auc_for_key(run: dict[str, Any], key: str) -> float:
+def reversion_auc_for_key(run: dict[str, Any], key: str) -> float:
     """Compute AUC of *key* over the reversion phase via trapezoid rule."""
     log = run["log"]
     burst_end = run["pre_burst_steps"] + run["config"]["total_steps"]
@@ -271,7 +260,7 @@ def _reversion_auc_for_key(run: dict[str, Any], key: str) -> float:
     return float(np.trapezoid(rev_vals, rev_steps))
 
 
-def _build_summary(
+def build_summary(
     grouped: dict[str, list[dict[str, Any]]],
     thresholds: list[float],
 ) -> dict[str, Any]:
@@ -282,18 +271,14 @@ def _build_summary(
         peak_vals = np.array([run["peak_burst"] for run in runs], dtype=float)
         auc_vals = np.array([run["reversion_auc"] for run in runs], dtype=float)
         other_end_vals = np.array([run["log"][ACC_OTHER][-1] for run in runs], dtype=float)
-        peak_mean, peak_ci = _mean_ci(peak_vals)
-        auc_mean, auc_ci = _mean_ci(auc_vals)
-        other_mean, other_ci = _mean_ci(other_end_vals)
+        peak_mean, peak_ci = mean_ci(peak_vals)
+        auc_mean, auc_ci = mean_ci(auc_vals)
+        other_mean, other_ci = mean_ci(other_end_vals)
 
-        auc_loss_burst = np.array(
-            [_reversion_auc_for_key(r, LOSS_BURST) for r in runs], dtype=float
-        )
-        auc_acc_other = np.array(
-            [_reversion_auc_for_key(r, ACC_OTHER) for r in runs], dtype=float
-        )
-        auc_lb_mean, auc_lb_ci = _mean_ci(auc_loss_burst)
-        auc_ao_mean, auc_ao_ci = _mean_ci(auc_acc_other)
+        auc_loss_burst = np.array([reversion_auc_for_key(r, LOSS_BURST) for r in runs], dtype=float)
+        auc_acc_other = np.array([reversion_auc_for_key(r, ACC_OTHER) for r in runs], dtype=float)
+        auc_lb_mean, auc_lb_ci = mean_ci(auc_loss_burst)
+        auc_ao_mean, auc_ao_ci = mean_ci(auc_acc_other)
 
         life_stats: dict[str, Any] = {}
         for threshold in thresholds:
@@ -302,7 +287,7 @@ def _build_summary(
             vals = np.array(
                 [run.get(key, runs[0]["config"]["reversion_steps"]) for run in runs], dtype=float
             )
-            mean, ci = _mean_ci(vals)
+            mean, ci = mean_ci(vals)
             life_stats[key] = {"label": label, "mean": mean, "ci": ci}
 
         by_schedule[schedule] = {
@@ -317,13 +302,13 @@ def _build_summary(
     return {"schedules": schedules, "by_schedule": by_schedule}
 
 
-def _build_gradient_curves(
+def build_gradient_curves(
     grouped: dict[str, list[dict[str, Any]]],
     grad_records: list[dict[str, Any]],
     burst_mode: str,
 ) -> dict[str, Any]:
     """Build per-schedule gradient metric curves (cosine, norms, etc.)."""
-    grouped_grad = _group_by_schedule(grad_records)
+    grouped_grad = group_records_by_schedule(grad_records)
     payload: dict[str, Any] = {}
     for schedule, runs in grouped_grad.items():
         if schedule not in grouped:
@@ -331,7 +316,7 @@ def _build_gradient_curves(
         burst_steps = burst_steps_for_mode(
             schedule, burst_mode, grouped[schedule][0]["config"]["total_steps"]
         )
-        series = _gradient_series_for_schedule(runs)
+        series = gradient_series_for_schedule(runs)
         if not series:
             continue
         payload[schedule] = {
@@ -341,7 +326,7 @@ def _build_gradient_curves(
     return payload
 
 
-def _gradient_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
+def gradient_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate gradient series across seeds for one schedule."""
     runs = [run for run in runs if run["grad_sim_log"].get("step")]
     if not runs:
@@ -371,11 +356,11 @@ def _gradient_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
         if len(cosine) != len(steps):
             continue
 
-        cosine_i = _interpolate_to_reference(first_steps, steps, cosine)
-        burst_norm_i = _interpolate_optional_metric(first_steps, steps, burst_norm)
-        other_norm_i = _interpolate_optional_metric(first_steps, steps, other_norm)
-        burst_l1_i = _interpolate_optional_metric(first_steps, steps, burst_l1)
-        other_l1_i = _interpolate_optional_metric(first_steps, steps, other_l1)
+        cosine_i = interpolate_to_reference(first_steps, steps, cosine)
+        burst_norm_i = interpolate_optional_metric(first_steps, steps, burst_norm)
+        other_norm_i = interpolate_optional_metric(first_steps, steps, other_norm)
+        burst_l1_i = interpolate_optional_metric(first_steps, steps, burst_l1)
+        other_l1_i = interpolate_optional_metric(first_steps, steps, other_l1)
 
         signed_dot_i = burst_norm_i * other_norm_i * cosine_i
         interference_power_i = burst_norm_i * np.maximum(0.0, -cosine_i)
@@ -393,22 +378,22 @@ def _gradient_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "steps": first_steps.tolist(),
-        "cosine": _bundle_metric(cosine_arr),
-        "burst_norm": _bundle_metric(burst_norm_arr),
-        "other_norm": _bundle_metric(other_norm_arr),
-        "burst_l1": _bundle_metric(burst_l1_arr),
-        "other_l1": _bundle_metric(other_l1_arr),
-        "signed_dot": _bundle_metric(signed_dot_arr),
-        "interference_power": _bundle_metric(interference_power_arr),
+        "cosine": bundle_metric(cosine_arr),
+        "burst_norm": bundle_metric(burst_norm_arr),
+        "other_norm": bundle_metric(other_norm_arr),
+        "burst_l1": bundle_metric(burst_l1_arr),
+        "other_l1": bundle_metric(other_l1_arr),
+        "signed_dot": bundle_metric(signed_dot_arr),
+        "interference_power": bundle_metric(interference_power_arr),
     }
 
 
-def _bundle_metric(series_list: list[np.ndarray]) -> dict[str, Any]:
+def bundle_metric(series_list: list[np.ndarray]) -> dict[str, Any]:
     """Stack series and return mean + CI dict."""
     arr = np.stack(series_list)
     return {
         "mean": np.nanmean(arr, axis=0).tolist(),
-        "ci": _series_ci(arr).tolist(),
+        "ci": series_ci(arr).tolist(),
     }
 
 
@@ -417,13 +402,13 @@ def _bundle_metric(series_list: list[np.ndarray]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _build_per_layer_gradient_curves(
+def build_per_layer_gradient_curves(
     grouped: dict[str, list[dict[str, Any]]],
     grad_records: list[dict[str, Any]],
     burst_mode: str,
 ) -> dict[str, Any]:
     """Build per-layer gradient metric curves (cosine, norms) per schedule."""
-    grouped_grad = _group_by_schedule(grad_records)
+    grouped_grad = group_records_by_schedule(grad_records)
     payload: dict[str, Any] = {}
     for schedule, runs in grouped_grad.items():
         if schedule not in grouped:
@@ -431,14 +416,14 @@ def _build_per_layer_gradient_curves(
         burst_steps = burst_steps_for_mode(
             schedule, burst_mode, grouped[schedule][0]["config"]["total_steps"]
         )
-        series = _per_layer_series_for_schedule(runs)
+        series = per_layer_series_for_schedule(runs)
         if not series:
             continue
         payload[schedule] = {"burst_steps": burst_steps, **series}
     return payload
 
 
-def _accumulate_per_layer_metric(
+def accumulate_per_layer_metric(
     runs: list[dict[str, Any]],
     layer_names: list[str],
     first_steps: np.ndarray,
@@ -452,11 +437,11 @@ def _accumulate_per_layer_metric(
         layer_dict = gsl.get(gsl_key, {})
         for ln in layer_names:
             vals = np.array(layer_dict.get(ln, []), dtype=float)
-            acc[ln].append(_interpolate_optional_metric(first_steps, steps, vals))
+            acc[ln].append(interpolate_optional_metric(first_steps, steps, vals))
     return acc
 
 
-def _per_layer_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
+def per_layer_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate per-layer gradient series across seeds for one schedule."""
     runs = [r for r in runs if r["grad_sim_log"].get("step")]
     if not runs:
@@ -469,19 +454,16 @@ def _per_layer_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]
 
     first_steps = np.array(gsl0["step"], dtype=float)
 
-    cosine_by_layer = _accumulate_per_layer_metric(
-        runs, layer_names, first_steps, "per_layer"
-    )
-    burst_norm_by_layer = _accumulate_per_layer_metric(
+    cosine_by_layer = accumulate_per_layer_metric(runs, layer_names, first_steps, "per_layer")
+    burst_norm_by_layer = accumulate_per_layer_metric(
         runs, layer_names, first_steps, "burst_norm_per_layer"
     )
-    other_norm_by_layer = _accumulate_per_layer_metric(
+    other_norm_by_layer = accumulate_per_layer_metric(
         runs, layer_names, first_steps, "other_norm_per_layer"
     )
 
     has_any_cosine = any(
-        cosine_by_layer[ln] and not np.all(np.isnan(cosine_by_layer[ln][0]))
-        for ln in layer_names
+        cosine_by_layer[ln] and not np.all(np.isnan(cosine_by_layer[ln][0])) for ln in layer_names
     )
     if not has_any_cosine:
         return {}
@@ -493,17 +475,16 @@ def _per_layer_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]
 
     for ln in layer_names:
         if cosine_by_layer[ln]:
-            cosine_out[ln] = _bundle_metric(cosine_by_layer[ln])
+            cosine_out[ln] = bundle_metric(cosine_by_layer[ln])
         if burst_norm_by_layer[ln]:
-            burst_norm_out[ln] = _bundle_metric(burst_norm_by_layer[ln])
+            burst_norm_out[ln] = bundle_metric(burst_norm_by_layer[ln])
         if other_norm_by_layer[ln]:
-            other_norm_out[ln] = _bundle_metric(other_norm_by_layer[ln])
+            other_norm_out[ln] = bundle_metric(other_norm_by_layer[ln])
         if cosine_by_layer[ln] and burst_norm_by_layer[ln]:
             nxc = [
-                bn * cs
-                for bn, cs in zip(burst_norm_by_layer[ln], cosine_by_layer[ln], strict=True)
+                bn * cs for bn, cs in zip(burst_norm_by_layer[ln], cosine_by_layer[ln], strict=True)
             ]
-            norm_x_cosine_out[ln] = _bundle_metric(nxc)
+            norm_x_cosine_out[ln] = bundle_metric(nxc)
 
     return {
         "layer_names": layer_names,
@@ -520,7 +501,7 @@ def _per_layer_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-def _build_weight_drift(run_dir: str | Path) -> dict[str, Any]:
+def build_weight_drift(run_dir: str | Path) -> dict[str, Any]:
     """Compute per-layer weight drift from saved checkpoints."""
     run_dir = Path(run_dir)
     _, logs_dir, results_dir = resolve_run_paths(run_dir)
@@ -551,18 +532,14 @@ def _build_weight_drift(run_dir: str | Path) -> dict[str, Any]:
 
     payload: dict[str, Any] = {}
     for schedule in ordered_schedules(by_schedule.keys()):
-        result = _weight_drift_for_schedule(by_schedule[schedule], n_layer)
+        result = weight_drift_for_schedule(by_schedule[schedule], n_layer)
         if result:
             payload[schedule] = result
     return payload
 
 
-def _weight_drift_for_schedule(
-    seed_dirs: list[Path], n_layer: int
-) -> dict[str, Any] | None:
+def weight_drift_for_schedule(seed_dirs: list[Path], n_layer: int) -> dict[str, Any] | None:
     """Compute weight drift arrays for one schedule across seeds."""
-    import torch  # noqa: PLC0415
-
     seed_cumulative: list[np.ndarray] = []
     seed_stepwise: list[np.ndarray] = []
     layer_names: list[str] | None = None
@@ -574,13 +551,13 @@ def _weight_drift_for_schedule(
             continue
 
         sorted_steps = sorted(ckpt_files)
-        base_sd = _load_sd_cpu(torch, ckpt_files[sorted_steps[0]])
-        groups = _layer_groups_from_state_dict(base_sd, n_layer)
+        base_sd = load_state_dict_cpu(ckpt_files[sorted_steps[0]])
+        groups = layer_groups_from_state_dict(base_sd, n_layer)
         if layer_names is None:
             layer_names = [g[0] for g in groups]
             steps = sorted_steps
 
-        cum, stepwise = _drift_arrays(torch, ckpt_files, sorted_steps, groups, base_sd)
+        cum, stepwise = weight_drift_arrays(ckpt_files, sorted_steps, groups, base_sd)
         seed_cumulative.append(cum)
         seed_stepwise.append(stepwise)
 
@@ -594,11 +571,11 @@ def _weight_drift_for_schedule(
     for li, ln in enumerate(layer_names):
         cum_out[ln] = {
             "mean": np.nanmean(cum_stack[:, li, :], axis=0).tolist(),
-            "ci": _series_ci(cum_stack[:, li, :]).tolist(),
+            "ci": series_ci(cum_stack[:, li, :]).tolist(),
         }
         stepwise_out[ln] = {
             "mean": np.nanmean(step_stack[:, li, :], axis=0).tolist(),
-            "ci": _series_ci(step_stack[:, li, :]).tolist(),
+            "ci": series_ci(step_stack[:, li, :]).tolist(),
         }
 
     return {
@@ -609,16 +586,15 @@ def _weight_drift_for_schedule(
     }
 
 
-def _load_sd_cpu(torch_mod: Any, path: Path) -> dict[str, Any]:
+def load_state_dict_cpu(path: Path) -> dict[str, Any]:
     """Load a state dict to CPU as float32."""
     return {
         k: v.float().cpu()
-        for k, v in torch_mod.load(str(path), map_location="cpu", weights_only=True).items()
+        for k, v in torch.load(str(path), map_location="cpu", weights_only=True).items()
     }
 
 
-def _drift_arrays(
-    torch_mod: Any,
+def weight_drift_arrays(
     ckpt_files: dict[int, Path],
     sorted_steps: list[int],
     groups: list[tuple[str, list[str]]],
@@ -632,28 +608,25 @@ def _drift_arrays(
     prev_sd = base_sd
 
     for ci, step in enumerate(sorted_steps):
-        sd = _load_sd_cpu(torch_mod, ckpt_files[step])
+        path = ckpt_files[step]
+        if not path.exists():
+            cum[:, ci] = np.nan
+            stepwise[:, ci] = np.nan
+            continue
+        sd = load_state_dict_cpu(path)
         for li, (_gname, pnames) in enumerate(groups):
-            cum[li, ci] = sum(
-                (sd[p] - base_sd[p]).norm().item() ** 2 for p in pnames
-            ) ** 0.5
-            stepwise[li, ci] = sum(
-                (sd[p] - prev_sd[p]).norm().item() ** 2 for p in pnames
-            ) ** 0.5
+            cum[li, ci] = sum((sd[p] - base_sd[p]).norm().item() ** 2 for p in pnames) ** 0.5
+            stepwise[li, ci] = sum((sd[p] - prev_sd[p]).norm().item() ** 2 for p in pnames) ** 0.5
         prev_sd = sd
 
     return cum, stepwise
 
 
-def _layer_groups_from_state_dict(
-    sd: dict[str, Any], n_layer: int
-) -> list[tuple[str, list[str]]]:
+def layer_groups_from_state_dict(sd: dict[str, Any], n_layer: int) -> list[tuple[str, list[str]]]:
     """Build ordered layer groups from a state dict."""
     all_keys = set(sd.keys())
     groups: list[tuple[str, list[str]]] = []
-    emb = sorted(
-        k for k in all_keys if k in ("transformer.wte.weight", "transformer.wpe.weight")
-    )
+    emb = sorted(k for k in all_keys if k in ("transformer.wte.weight", "transformer.wpe.weight"))
     if emb:
         groups.append(("emb", emb))
     for i in range(n_layer):

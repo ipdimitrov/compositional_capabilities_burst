@@ -9,7 +9,7 @@ import numpy as np
 from einops import reduce
 
 from burst.core.activations import collect_activations_KPTN
-from burst.core.train_utils import load_net, resolve_run_paths
+from burst.core.train_utils import load_net, mean_ci, resolve_run_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -154,7 +154,5 @@ def _subsample_pool(pool: _TaskPool, n_docs: int, *, seed: int) -> np.ndarray:
 
 def _mean_ci_payload(values: np.ndarray) -> dict[str, float]:
     """Return {mean, ci} dict with 95% confidence interval."""
-    from burst.core.bundle import _mean_ci  # noqa: PLC0415
-
-    mean, ci = _mean_ci(values)
+    mean, ci = mean_ci(values)
     return {"mean": mean, "ci": ci}

@@ -50,8 +50,10 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import numpy as np
+import plotly.graph_objects as go
 import torch
 import torch.nn.functional as F
+from plotly.subplots import make_subplots
 
 from burst.config import (
     PHASE_BURST,
@@ -59,10 +61,18 @@ from burst.config import (
     parse_run_config,
 )
 from burst.core.activations import collect_activations_KPTN
-from burst.core.train_utils import DEVICE, load_net
-from burst.dev._shared import burst_token_ids as _burst_token_ids
-from burst.dev._shared import free_gen_acc as _free_gen_acc
-from burst.dev.plot_utils import plotly_to_png_matplotlib as _plotly_to_png_matplotlib
+from burst.core.train_utils import (
+    DEVICE,
+    free_gen_acc,
+    load_net,
+    resolve_run_paths,
+    sched_color,
+    sched_order,
+)
+from burst.core.train_utils import (
+    burst_token_ids as burst_token_ids_fn,
+)
+from burst.dev.plot_utils import plotly_to_png_matplotlib
 from net.nanogpt import nanoGPT
 
 _rng = np.random.default_rng()
@@ -75,12 +85,13 @@ KEY_STEPS = [0, 499, 749, 999]
 
 
 @torch.no_grad()
-def _compute_delta_KTN(  # noqa: N802
+def compute_delta_KTN(  # noqa: N802
     net_ckpt: nanoGPT,
     net_pre: nanoGPT,
     other_docs_BL: np.ndarray,
     n_samples: int,
 ) -> torch.Tensor:
+    """Mean activation difference (checkpoint minus pre-burst) per layer and token."""
     n = min(n_samples, other_docs_BL.shape[0])
     idx = _rng.choice(other_docs_BL.shape[0], n, replace=False)
     docs = other_docs_BL[idx]
@@ -92,12 +103,13 @@ def _compute_delta_KTN(  # noqa: N802
 
 
 @torch.no_grad()
-def _logit_lens_readability(
+def logit_lens_readability(
     net: nanoGPT,
     delta_KTN: torch.Tensor,
     burst_token_ids: list[int],
     top_k: int = 10,
 ) -> dict:
+    """Logit-lens readability of activation deltas for burst tokens."""
     K, T, _N = delta_KTN.shape
     unembed_VN = net.transformer.wte.weight.detach().float().cpu()
     delta_KTN_f = delta_KTN.float()
@@ -117,13 +129,14 @@ def _logit_lens_readability(
 
 
 @torch.no_grad()
-def _free_gen_acc_ablated(
+def free_gen_acc_ablated(
     net: nanoGPT,
     docs_BL: np.ndarray,
     prompt_len: int,
     delta_KTN: torch.Tensor,
     ablate_layer: int,
 ) -> float:
+    """Free-generation accuracy with one layer's activation delta ablated."""
     net.eval()
     docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
     _B, L = docs_t.shape
@@ -189,19 +202,19 @@ def compute_adl_for_label(  # noqa: PLR0913
 
     pre_burst_step = steps_to_run[0]
     net_pre = load_net(cfg, str(ckpt_files[pre_burst_step]))
-    burst_ids = _burst_token_ids(cfg, n_a, depth)
+    burst_ids = burst_token_ids_fn(cfg, n_a, depth)
 
     results = []
     for step in steps_to_run:
         net_ckpt = load_net(cfg, str(ckpt_files[step]))
-        delta_KTN = _compute_delta_KTN(net_ckpt, net_pre, other_docs_BL, n_samples)
-        readability = _logit_lens_readability(net_ckpt, delta_KTN, burst_ids)
+        delta_KTN = compute_delta_KTN(net_ckpt, net_pre, other_docs_BL, n_samples)
+        readability = logit_lens_readability(net_ckpt, delta_KTN, burst_ids)
         delta_norm_K = delta_KTN.norm(dim=(1, 2)).tolist()
 
-        acc_baseline = _free_gen_acc(net_ckpt, burst_docs_BL[:n_samples], prompt_len)
+        acc_baseline = free_gen_acc(net_ckpt, burst_docs_BL[:n_samples], prompt_len)
         K = delta_KTN.shape[0]
         acc_ablated_K = [
-            _free_gen_acc_ablated(net_ckpt, burst_docs_BL[:n_samples], prompt_len, delta_KTN, k)
+            free_gen_acc_ablated(net_ckpt, burst_docs_BL[:n_samples], prompt_len, delta_KTN, k)
             for k in range(K)
         ]
         acc_drop_K = [acc_baseline - a for a in acc_ablated_K]
@@ -315,7 +328,7 @@ def ema_interpolation_probe(  # noqa: PLR0913
     for alpha in alphas:
         interp_sd = {k: (1 - alpha) * rev_sd[k] + alpha * peak_sd[k] for k in peak_sd}
         net_interp.load_state_dict(interp_sd)
-        acc = _free_gen_acc(net_interp, docs, prompt_len)
+        acc = free_gen_acc(net_interp, docs, prompt_len)
         accs.append(acc)
 
     # Compute "cliff sharpness": alpha at which accuracy first exceeds 0.5
@@ -495,8 +508,6 @@ def analyse_run(  # noqa: C901, PLR0912, PLR0915
     n_hutchinson: int = 10,
 ) -> dict:
     """Run all five analyses on a single run directory."""
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
-
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
         run_cfg = json.load(f)
@@ -744,21 +755,15 @@ def analyse_run(  # noqa: C901, PLR0912, PLR0915
 
 def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
     """Generate HTML dashboard + PNG charts from analysis results."""
-    import plotly.graph_objects as go  # noqa: PLC0415
-    from plotly.subplots import make_subplots  # noqa: PLC0415
-
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
-
-    from burst.dev._shared import sched_color as _color  # noqa: PLC0415
-    from burst.dev._shared import sched_order as _sched_order  # noqa: PLC0415
 
     def _save_png(fig: Any, name: str) -> str:  # noqa: ANN401
         path = charts_dir / f"{name}.png"
         try:
             fig.write_image(str(path), width=1200, height=600, scale=2)
         except (ValueError, OSError):
-            _plotly_to_png_matplotlib(fig, str(path), width=1200, height=600)
+            plotly_to_png_matplotlib(fig, str(path), width=1200, height=600)
         return str(path)
 
     all_figs = []
@@ -770,7 +775,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         gi = analysis["grad_interference"]
-        schedules = sorted({v["schedule"] for v in gi.values()}, key=_sched_order)
+        schedules = sorted({v["schedule"] for v in gi.values()}, key=sched_order)
         for sched in schedules:
             sched_entries = [v for v in gi.values() if v["schedule"] == sched]
             all_steps = sorted({s for e in sched_entries for s in e["steps"]})
@@ -785,7 +790,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                     x=steps_arr,
                     y=mean_sims,
                     name=f"{sched} ({run_name})",
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": sched_color(sched), "width": 2},
                     mode="lines",
                 )
             )
@@ -834,7 +839,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                 col_idx = x_col * n_runs + run_idx + 1
                 gi = analysis["grad_interference"]
                 sm = analysis["summary_metrics"]
-                schedules = sorted({v["schedule"] for v in gi.values()}, key=_sched_order)
+                schedules = sorted({v["schedule"] for v in gi.values()}, key=sched_order)
                 xs, ys, colors, labels = [], [], [], []
                 for sched in schedules:
                     if sched not in sm:
@@ -844,7 +849,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                     y_val = sm[sched][y_key]
                     xs.append(x_val)
                     ys.append(y_val)
-                    colors.append(_color(sched))
+                    colors.append(sched_color(sched))
                     labels.append(sched)
                 fig2.add_trace(
                     go.Scatter(
@@ -876,7 +881,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         gi = analysis["grad_interference"]
         run_name = analysis["run_name"]
-        schedules = sorted({v["schedule"] for v in gi.values()}, key=_sched_order)
+        schedules = sorted({v["schedule"] for v in gi.values()}, key=sched_order)
         sample_entry = next(iter(gi.values()))
         layer_names = list(sample_entry["mean_layer_interference"].keys())
 
@@ -917,7 +922,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         tv = analysis["task_vectors"]
-        schedules = sorted(tv.keys(), key=_sched_order)
+        schedules = sorted(tv.keys(), key=sched_order)
         fig4 = go.Figure()
         for sched in schedules:
             data = tv[sched]
@@ -926,7 +931,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                     x=data["alphas"],
                     y=data["mean_accs"],
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": sched_color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -952,7 +957,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for col_idx, analysis in enumerate(analyses, start=1):
         tv = analysis["task_vectors"]
         sm = analysis["summary_metrics"]
-        schedules = sorted(tv.keys(), key=_sched_order)
+        schedules = sorted(tv.keys(), key=sched_order)
         x_cliff = []
         y_auc = []
         colors = []
@@ -962,7 +967,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                 continue
             x_cliff.append(tv[sched]["mean_cliff_alpha"])
             y_auc.append(sm[sched]["mean_reversion_auc"])
-            colors.append(_color(sched))
+            colors.append(sched_color(sched))
             labels.append(sched)
         fig5.add_trace(
             go.Scatter(
@@ -998,7 +1003,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for col_idx, analysis in enumerate(analyses, start=1):
         sh = analysis["sharpness"]
         sm = analysis["summary_metrics"]
-        schedules = sorted(sh.keys(), key=_sched_order)
+        schedules = sorted(sh.keys(), key=sched_order)
         x_sharp = []
         y_auc = []
         colors = []
@@ -1008,7 +1013,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                 continue
             x_sharp.append(sh[sched]["mean"])
             y_auc.append(sm[sched]["mean_reversion_auc"])
-            colors.append(_color(sched))
+            colors.append(sched_color(sched))
             labels.append(sched)
         fig6.add_trace(
             go.Scatter(
@@ -1041,14 +1046,14 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         sh = analysis["sharpness"]
         run_name = analysis["run_name"]
-        schedules = sorted(sh.keys(), key=_sched_order)
+        schedules = sorted(sh.keys(), key=sched_order)
         fig7.add_trace(
             go.Bar(
                 x=schedules,
                 y=[sh[s]["mean"] for s in schedules],
                 error_y={"type": "data", "array": [sh[s]["std"] for s in schedules]},
                 name=run_name,
-                marker_color=[_color(s) for s in schedules],
+                marker_color=[sched_color(s) for s in schedules],
             )
         )
     fig7.update_layout(
@@ -1068,7 +1073,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         wdr = analysis["weight_delta_rank"]
-        schedules = sorted(wdr.keys(), key=_sched_order)
+        schedules = sorted(wdr.keys(), key=sched_order)
         fig8 = go.Figure()
         for sched in schedules:
             data = wdr[sched]
@@ -1079,7 +1084,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                     x=groups,
                     y=ranks,
                     name=sched,
-                    marker_color=_color(sched),
+                    marker_color=sched_color(sched),
                 )
             )
         fig8.update_layout(
@@ -1104,7 +1109,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for col_idx, analysis in enumerate(analyses, start=1):
         wdr = analysis["weight_delta_rank"]
         sm = analysis["summary_metrics"]
-        schedules = sorted(wdr.keys(), key=_sched_order)
+        schedules = sorted(wdr.keys(), key=sched_order)
         x_rank = []
         y_auc = []
         colors = []
@@ -1114,7 +1119,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                 continue
             x_rank.append(wdr[sched]["total_rank"])
             y_auc.append(sm[sched]["mean_reversion_auc"])
-            colors.append(_color(sched))
+            colors.append(sched_color(sched))
             labels.append(sched)
         fig9.add_trace(
             go.Scatter(
@@ -1147,7 +1152,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         adl = analysis["adl"]
-        schedules = sorted(adl.keys(), key=_sched_order)
+        schedules = sorted(adl.keys(), key=sched_order)
         x_sched = []
         y_readability = []
         colors = []
@@ -1159,7 +1164,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             peak_step = max(peak_steps)
             x_sched.append(sched)
             y_readability.append(step_data[peak_step]["mean_readability"])
-            colors.append(_color(sched))
+            colors.append(sched_color(sched))
         fig10.add_trace(
             go.Bar(
                 x=x_sched,
@@ -1188,7 +1193,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         adl = analysis["adl"]
-        schedules = sorted(adl.keys(), key=_sched_order)
+        schedules = sorted(adl.keys(), key=sched_order)
         x_sched = []
         y_drop = []
         colors = []
@@ -1200,7 +1205,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
             peak_step = max(peak_steps)
             x_sched.append(sched)
             y_drop.append(step_data[peak_step]["mean_max_acc_drop"])
-            colors.append(_color(sched))
+            colors.append(sched_color(sched))
         fig11.add_trace(
             go.Bar(
                 x=x_sched,
@@ -1228,7 +1233,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         adl = analysis["adl"]
-        schedules = sorted(adl.keys(), key=_sched_order)
+        schedules = sorted(adl.keys(), key=sched_order)
         fig12 = go.Figure()
         for sched in schedules:
             step_data = adl[sched]
@@ -1239,7 +1244,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                     x=steps_sorted,
                     y=norms,
                     name=sched,
-                    line={"color": _color(sched), "width": 2},
+                    line={"color": sched_color(sched), "width": 2},
                     mode="lines+markers",
                 )
             )
@@ -1270,7 +1275,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         tv = analysis["task_vectors"]
         adl = analysis["adl"]
 
-        schedules = sorted(sm.keys(), key=_sched_order)
+        schedules = sorted(sm.keys(), key=sched_order)
         burst_pct = [int(s.replace("burst_", "")) for s in schedules]
 
         fig13 = make_subplots(
@@ -1290,7 +1295,13 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         )
 
         def _add_scatter(  # noqa: PLR0913
-            fig: Any, row: int, col: int, x: Any, y: Any, colors: Any, labels: Any,  # noqa: ANN401
+            fig: Any,  # noqa: ANN401
+            row: int,
+            col: int,
+            x: Any,  # noqa: ANN401
+            y: Any,  # noqa: ANN401
+            colors: Any,  # noqa: ANN401
+            labels: Any,  # noqa: ANN401
         ) -> None:
             fig.add_trace(
                 go.Scatter(
@@ -1307,7 +1318,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                 col=col,
             )
 
-        colors = [_color(s) for s in schedules]
+        colors = [sched_color(s) for s in schedules]
 
         _add_scatter(
             fig13,
@@ -1445,7 +1456,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
 # ---------------------------------------------------------------------------
 
 
-def _is_valid_run_dir(d: Path) -> bool:
+def is_valid_run_dir(d: Path) -> bool:
     """Return True if the directory has checkpoints and all_results.pkl."""
     return (
         (d / "all_results.pkl").exists()
@@ -1454,15 +1465,15 @@ def _is_valid_run_dir(d: Path) -> bool:
     )
 
 
-def _find_all_run_dirs(data_root: Path) -> list[Path]:
+def find_all_run_dirs(data_root: Path) -> list[Path]:
     """Scan data_root for all valid burst run directories."""
     candidates = sorted(
         p for p in data_root.iterdir() if p.is_dir() and p.name.startswith("burst_")
     )
-    return [p for p in candidates if _is_valid_run_dir(p)]
+    return [p for p in candidates if is_valid_run_dir(p)]
 
 
-def _analyse_run_worker(args_tuple: tuple) -> dict:
+def analyse_run_worker(args_tuple: tuple) -> dict:
     """Subprocess entry point for parallel analysis of one run dir."""
     run_dir, adl_seeds, adl_samples, sharpness_seeds, n_hutchinson = args_tuple
     return analyse_run(
@@ -1534,7 +1545,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.all:
-        run_dirs = _find_all_run_dirs(args.data_root)
+        run_dirs = find_all_run_dirs(args.data_root)
         if not run_dirs:
             return
     elif args.run_dirs:
@@ -1554,11 +1565,11 @@ def main() -> None:
         # spawn context avoids CUDA fork issues
         ctx = multiprocessing.get_context("spawn")
         with ctx.Pool(processes=args.n_parallel) as pool:
-            analyses = pool.map(_analyse_run_worker, worker_args)
+            analyses = pool.map(analyse_run_worker, worker_args)
     else:
         analyses = []
         for wa in worker_args:
-            analysis = _analyse_run_worker(wa)
+            analysis = analyse_run_worker(wa)
             analyses.append(analysis)
 
     results_path = out_dir / "results.pkl"

@@ -35,13 +35,17 @@ from burst.config import (
     SCHED_DISPLAY as SCHED_SHORT,
 )
 from burst.config import (
-    burst_steps_for_mode as _burst_T_mode,
+    burst_steps_for_mode as burst_T_mode,
 )
 from burst.config import (
-    ordered_schedules as _ordered,
+    ordered_schedules as ordered,
 )
-from burst.core.train.worker import n_target_for_step
-from burst.core.train_utils import compute_lr_schedule as _compute_lr
+from burst.core.bundle import (
+    build_schedule_bars_payload,
+    group_records_by_schedule,
+    load_grad_sim_records,
+)
+from burst.core.train_utils import compute_lr_schedule as compute_lr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -52,67 +56,32 @@ _Groups = dict[str, list[dict[str, Any]]]
 _PathLike = str | os.PathLike[str]
 
 
-def load_grad_sim_data(run_dir: _PathLike) -> list[dict]:
-    """Load all grad cosine sim records from the dedicated folder.
-
-    Falls back to extracting from all_results.pkl if the folder doesn't exist.
-    """
-    rd = Path(run_dir)
-    records: list[dict] = []
-    for gs_dir in [rd / "results" / "grad_cosine_sim", rd / "grad_cosine_sim"]:
-        if gs_dir.is_dir():
-            for fp in sorted(gs_dir.glob("*.json")):
-                with fp.open() as f:
-                    records.append(json.load(f))
-            if records:
-                return records
-
-    for pkl in [rd / "logs" / "all_results.pkl", rd / "all_results.pkl"]:
-        if pkl.exists():
-            with pkl.open("rb") as f:
-                results = pickle.load(f)  # noqa: S301
-            records.extend(
-                {
-                    "schedule": r["schedule"],
-                    "seed": r["seed"],
-                    "label": r.get("label", ""),
-                    "grad_sim_log": r["grad_sim_log"],
-                    "pairwise_snapshots": r.get("pairwise_snapshots", []),
-                }
-                for r in results
-                if "grad_sim_log" in r and r["grad_sim_log"]["step"]
-            )
-            if records:
-                return records
-    return records
-
-
-def _group_gs(records: list[dict]) -> _Groups:
+def group_gs(records: list[dict]) -> _Groups:  # noqa: D103
     g: _Groups = defaultdict(list)
     for r in records:
         g[r["schedule"]].append(r)
     return g
 
 
-def _group(results: list[dict]) -> _Groups:
+def group(results: list[dict]) -> _Groups:  # noqa: D103
     g: _Groups = defaultdict(list)
     for r in results:
         g[r["schedule"]].append(r)
     return g
 
 
-def _sched_T(groups: dict) -> dict[str, int]:  # noqa: N802
+def sched_T(groups: dict) -> dict[str, int]:  # noqa: N802
     """Per-schedule burst length T from the first run's config."""
     return {s: runs[0]["config"]["total_steps"] for s, runs in groups.items()}
 
 
-def _T_for(sched: str, bcfg: dict) -> int:  # noqa: N802
+def T_for(sched: str, bcfg: dict) -> int:  # noqa: N802
     """Burst length T for a schedule, using base_steps from bcfg."""
     mode = bcfg.get("_burst_mode", MODE_CURRENT)
-    return _burst_T_mode(sched, mode, bcfg["total_steps"])
+    return burst_T_mode(sched, mode, bcfg["total_steps"])
 
 
-def _style(ax: mpl.axes.Axes, xl: str = "", yl: str = "", t: str = "") -> None:
+def style(ax: mpl.axes.Axes, xl: str = "", yl: str = "", t: str = "") -> None:
     """Apply standard axis styling."""
     ax.set_xlabel(xl, fontsize=13, fontweight="bold")
     ax.set_ylabel(yl, fontsize=13, fontweight="bold")
@@ -127,32 +96,30 @@ def _style(ax: mpl.axes.Axes, xl: str = "", yl: str = "", t: str = "") -> None:
 def schedule_bars(
     pdir: Path,
     results: list[dict],
-    cfg: _Cfg,
+    _cfg: _Cfg,
 ) -> Path:
     """Render schedule bar charts showing fraction of burst data per step."""
-    bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
-    P = bcfg.get("pre_burst_steps", 0)
-    U, bs, p = bcfg["reversion_steps"], bcfg["batch_size"], bcfg["p_target"]
-    groups = _group(results)
-    Ts = _sched_T(groups)
-    scheds = _ordered(groups.keys())
+    grouped = group_records_by_schedule(results)
+    bars = build_schedule_bars_payload(grouped)
+    scheds = ordered(bars.keys())
     n = len(scheds)
-    max_total = max(P + Ts[s] + U for s in scheds)
+    max_total = max(
+        bars[s]["pre_steps"] + bars[s]["burst_steps"] + bars[s]["reversion_steps"] for s in scheds
+    )
     fig, axes = plt.subplots(n, 1, figsize=(14, 1.8 * n), sharex=True)
     if n == 1:
         axes = [axes]
     for i, sched in enumerate(scheds):
         ax = axes[i]
-        T_s = Ts[sched]
-        total_s = P + T_s + U
-        fracs = np.zeros(total_s)
-        for s in range(T_s):
-            np.random.seed(107 * 10000 + s)  # noqa: NPY002
-            fracs[P + s] = n_target_for_step(s, T_s, sched, p, bs) / bs
+        bsched = bars[sched]
+        T_s = bsched["burst_steps"]
+        total_s = bsched["pre_steps"] + T_s + bsched["reversion_steps"]
+        fracs = np.array(bsched["fractions"], dtype=float)
         ax.fill_between(range(total_s), fracs, color=PALETTE[sched], alpha=0.7)
-        if P > 0:
-            ax.axvline(P, color="black", lw=2, ls="--")
-        ax.axvline(P + T_s, color="black", lw=2, ls="--")
+        pre = bsched["pre_steps"]
+        if pre > 0:
+            ax.axvline(pre, color="black", lw=2, ls="--")
+        ax.axvline(pre + T_s, color="black", lw=2, ls="--")
         ax.set_ylim(0, 1.05)
         ax.set_xlim(0, max_total)
         ax.set_ylabel(
@@ -201,10 +168,10 @@ def overlay(  # noqa: PLR0913
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
     if groups is None:
-        groups = _group(results)
-    Ts = _sched_T(groups)
+        groups = group(results)
+    Ts = sched_T(groups)
     fig, ax = plt.subplots(figsize=(14, 7))
-    for sched in _ordered(groups.keys()):
+    for sched in ordered(groups.keys()):
         runs = groups[sched]
         T_s = Ts[sched]
         burst_end_s = P + T_s
@@ -297,7 +264,7 @@ def overlay(  # noqa: PLR0913
     is_acc = key.startswith("acc_") or clamp_01 is True
     if is_acc:
         ax.set_ylim(-0.05, 1.05)
-    _style(ax, xl, yl, title)
+    style(ax, xl, yl, title)
     ax.legend(fontsize=11, loc=loc, framealpha=0.9, edgecolor="gray")
     fig.tight_layout()
     p_ = pdir / fname
@@ -321,11 +288,11 @@ def bar_chart(  # noqa: PLR0913
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     if groups is None:
-        groups = _group(results)
+        groups = group(results)
     if not any(metric in r for r in results):
         logger.debug("    [skip] no results contain metric '%s'", metric)
         return None
-    scheds = _ordered(groups.keys())
+    scheds = ordered(groups.keys())
     n = len(scheds)
     fig, ax = plt.subplots(figsize=(12, 7))
     xs = np.arange(n)
@@ -371,7 +338,7 @@ def bar_chart(  # noqa: PLR0913
         )
     ax.set_xticks(xs)
     ax.set_xticklabels([SCHED_SHORT[s] for s in scheds], fontsize=10, fontweight="bold")
-    _style(ax, "", yl, title)
+    style(ax, "", yl, title)
     if metric.startswith("life_"):
         ax.axhline(U, color="gray", ls=":", alpha=0.5, lw=1.5)
     fig.tight_layout()
@@ -389,8 +356,8 @@ def auc_diff(
 ) -> Path:
     """Render a pairwise reversion AUC difference heatmap."""
     if groups is None:
-        groups = _group(results)
-    scheds = _ordered(groups.keys())
+        groups = group(results)
+    scheds = ordered(groups.keys())
     n = len(scheds)
     mean_aucs = {s: np.mean([r["reversion_auc"] for r in groups[s]]) for s in scheds}
     grid = np.zeros((n, n))
@@ -447,9 +414,9 @@ def lr_schedule(pdir: Path, cfg: _Cfg) -> Path:
     schedules = cfg.get("schedules", list(SCHEDULE_ORDER))
 
     fig, ax = plt.subplots(figsize=(14, 5))
-    for sched in _ordered(schedules):
-        T_s = _T_for(sched, bcfg)
-        steps, lrs = _compute_lr(bcfg, pretrain_steps=P, burst_steps=T_s)
+    for sched in ordered(schedules):
+        T_s = T_for(sched, bcfg)
+        steps, lrs = compute_lr(bcfg, pretrain_steps=P, burst_steps=T_s)
         ax.plot(
             steps,
             lrs,
@@ -459,7 +426,7 @@ def lr_schedule(pdir: Path, cfg: _Cfg) -> Path:
             alpha=0.85,
         )
 
-    T_ref = _T_for(schedules[0], bcfg)
+    T_ref = T_for(schedules[0], bcfg)
     ax.axvline(P, color="black", lw=1.5, ls="--", alpha=0.6)
     ylim = ax.get_ylim()
     ax.text(
@@ -490,7 +457,7 @@ def lr_schedule(pdir: Path, cfg: _Cfg) -> Path:
         fontweight="bold",
     )
 
-    _style(ax, "Step", "Learning Rate", "Learning Rate Schedule (three-phase cosine)")
+    style(ax, "Step", "Learning Rate", "Learning Rate Schedule (three-phase cosine)")
     ax.legend(fontsize=8, loc="upper right", ncol=2)
     fig.tight_layout()
     p_ = pdir / "lr_schedule.png"
@@ -511,11 +478,11 @@ def reversion_zoom(
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
     if groups is None:
-        groups = _group(results)
-    Ts = _sched_T(groups)
+        groups = group(results)
+    Ts = sched_T(groups)
     fig, ax = plt.subplots(figsize=(14, 7))
     burst_log_key = ACC_BURST
-    for sched in _ordered(groups.keys()):
+    for sched in ordered(groups.keys()):
         runs = groups[sched]
         T_s = Ts[sched]
         burst_end_s = P + T_s
@@ -536,7 +503,7 @@ def reversion_zoom(
     ax.set_xlim(0, U)
     ax.set_ylim(-0.05, 1.05)
     ns = len(next(iter(groups.values())))
-    _style(
+    style(
         ax,
         "Reversion Steps (after Special Class removal)",
         "Special Class Accuracy",
@@ -563,8 +530,8 @@ def summary_table(
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
     if groups is None:
-        groups = _group(results)
-    scheds = _ordered(groups.keys())
+        groups = group(results)
+    scheds = ordered(groups.keys())
     thresholds = TrainConfig().reversion_thresholds
     fig_w = max(14, 6 + 2.5 * len(thresholds))
     fig, ax = plt.subplots(figsize=(fig_w, 4))
@@ -640,10 +607,10 @@ def per_sched(
     P = bcfg.get("pre_burst_steps", 0)
     U = bcfg["reversion_steps"]
     if groups is None:
-        groups = _group(results)
-    Ts = _sched_T(groups)
+        groups = group(results)
+    Ts = sched_T(groups)
     paths = []
-    for sched in _ordered(groups.keys()):
+    for sched in ordered(groups.keys()):
         runs = groups[sched]
         T_s = Ts[sched]
         burst_end_s = P + T_s
@@ -673,7 +640,7 @@ def per_sched(
             ax.set_xlim(0, P + T_s + U)
         ax.set_ylim(-0.05, 1.05)
         n_s = len(runs)
-        _style(
+        style(
             ax,
             "Step",
             "Accuracy (free generation)",
@@ -689,7 +656,7 @@ def per_sched(
     return paths
 
 
-def _interp_gs(
+def interp_gs(
     gs_groups: _Groups, scheds: list[str], key: str = "burst_vs_other"
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Interpolate grad sim traces to a common step grid, per schedule.
@@ -719,9 +686,9 @@ def grad_cosine_sim_overlay(
     """Render gradient cosine similarity overlay across schedules."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
-    interp = _interp_gs(gs_groups, scheds)
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
+    interp = interp_gs(gs_groups, scheds)
     if not interp:
         return None
 
@@ -738,7 +705,7 @@ def grad_cosine_sim_overlay(
         ax.plot(steps_ref, m, color=PALETTE[sched], lw=2, label=SCHED_SHORT[sched])
         ax.fill_between(steps_ref, m - ci, m + ci, color=PALETTE[sched], alpha=0.12)
 
-    T_max = max(_T_for(s, bcfg) for s in scheds)
+    T_max = max(T_for(s, bcfg) for s in scheds)
     ax.axvline(T_max, color="black", ls="--", lw=2, alpha=0.6)
     ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
     ax.text(
@@ -762,7 +729,7 @@ def grad_cosine_sim_overlay(
         transform=ax.get_xaxis_transform(),
     )
     ax.set_xlim(0, T_max + U)
-    _style(
+    style(
         ax,
         "Step",
         "Cosine Similarity",
@@ -781,14 +748,14 @@ def grad_cosine_sim_by_schedule(
 ) -> Path | None:
     """Render bar chart of gradient cosine similarity at end of burst phase."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
     if not scheds:
         return None
 
     means, cis, all_v = [], [], []
     for sched in scheds:
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         runs = [r for r in gs_groups[sched] if r["grad_sim_log"]["step"]]
         end_vals = []
         for r in runs:
@@ -837,7 +804,7 @@ def grad_cosine_sim_by_schedule(
         ax.text(i, y, f"{m:.3f}", ha="center", va=va, fontsize=11, fontweight="bold")
     ax.set_xticks(xs)
     ax.set_xticklabels([SCHED_SHORT[s] for s in scheds], fontsize=10, fontweight="bold")
-    _style(
+    style(
         ax,
         "",
         "Cosine Similarity (end of burst phase)",
@@ -859,14 +826,14 @@ def grad_cosine_per_seed(
     """Render individual seed traces for each schedule -- shows variance."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
     if not scheds:
         return []
 
     paths = []
     for sched in scheds:
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         runs = [r for r in gs_groups[sched] if r["grad_sim_log"]["step"]]
         if not runs:
             continue
@@ -878,7 +845,7 @@ def grad_cosine_per_seed(
         ax.axvline(T_s, color="black", ls="--", lw=2, alpha=0.6)
         ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
         ax.set_xlim(0, T_s + U)
-        _style(
+        style(
             ax,
             "Step",
             "Cosine Similarity",
@@ -899,9 +866,9 @@ def grad_cosine_rate_of_change(
     """Render derivative of cosine similarity over time."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
-    interp = _interp_gs(gs_groups, scheds)
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
+    interp = interp_gs(gs_groups, scheds)
     if not interp:
         return None
 
@@ -919,11 +886,11 @@ def grad_cosine_rate_of_change(
         mid_steps = (steps_ref[:-1] + steps_ref[1:]) / 2
         ax.plot(mid_steps, rate, color=PALETTE[sched], lw=2, label=SCHED_SHORT[sched])
 
-    T_max = max(_T_for(s, bcfg) for s in scheds)
+    T_max = max(T_for(s, bcfg) for s in scheds)
     ax.axvline(T_max, color="black", ls="--", lw=2, alpha=0.6)
     ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
     ax.set_xlim(0, T_max + U)
-    _style(
+    style(
         ax,
         "Step",
         "d(Cosine Similarity)/d(Step)",
@@ -942,15 +909,15 @@ def grad_cosine_phase_comparison(
 ) -> Path | None:
     """Render grouped bar chart of mean cosine sim during burst vs reversion phase."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
     if not scheds:
         return None
 
     burst_means, burst_cis = [], []
     rev_means, rev_cis = [], []
     for sched in scheds:
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         runs = [r for r in gs_groups[sched] if r["grad_sim_log"]["step"]]
         b_vals, r_vals = [], []
         for r in runs:
@@ -1006,7 +973,7 @@ def grad_cosine_phase_comparison(
     ax.axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
     ax.set_xticks(xs)
     ax.set_xticklabels([SCHED_SHORT[s] for s in scheds], fontsize=10, fontweight="bold")
-    _style(
+    style(
         ax,
         "",
         "Mean Cosine Similarity",
@@ -1031,7 +998,7 @@ def grad_cosine_vs_auc_scatter(
     auc_lookup = {(r["schedule"], r["seed"]): r.get("reversion_auc", 0) for r in results}
     xs, ys, cs, labels = [], [], [], []
     for rec in gs_records:
-        T_rec = _T_for(rec["schedule"], bcfg)
+        T_rec = T_for(rec["schedule"], bcfg)
         steps = np.array(rec["grad_sim_log"]["step"])
         sims = np.array(rec["grad_sim_log"]["burst_vs_other"])
         burst_mask = steps <= T_rec
@@ -1080,7 +1047,7 @@ def grad_cosine_vs_auc_scatter(
             va="top",
         )
 
-    _style(
+    style(
         ax,
         "Cosine Similarity (end of burst phase)",
         "Reversion AUC",
@@ -1100,8 +1067,8 @@ def grad_cosine_mean_over_phases_bars(
     """Render bar chart of mean cosine sim across training phases."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
     if not scheds:
         return None
 
@@ -1116,7 +1083,7 @@ def grad_cosine_mean_over_phases_bars(
     for ci, _cp_name in enumerate(cp_names):
         means = []
         for sched in scheds:
-            T_s = _T_for(sched, bcfg)
+            T_s = T_for(sched, bcfg)
             checkpoints = [
                 (0, T_s // 4),
                 (T_s // 4, 3 * T_s // 4),
@@ -1148,7 +1115,7 @@ def grad_cosine_mean_over_phases_bars(
     ax.axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
     ax.set_xticks(xs)
     ax.set_xticklabels([SCHED_SHORT[s] for s in scheds], fontsize=10, fontweight="bold")
-    _style(
+    style(
         ax,
         "",
         "Mean Cosine Similarity",
@@ -1162,7 +1129,7 @@ def grad_cosine_mean_over_phases_bars(
     return p_
 
 
-def _draw_pairwise_heatmap(  # noqa: PLR0913
+def draw_pairwise_heatmap(  # noqa: PLR0913, D103
     ax: mpl.axes.Axes,
     mean_matrix: np.ndarray,
     labels: list[str],
@@ -1215,8 +1182,8 @@ def pairwise_grad_cosine_heatmap(  # noqa: C901
     pdir: Path, _cfg: _Cfg, gs_records: list[dict]
 ) -> list[Path]:
     """Render pairwise gradient cosine similarity heatmaps per schedule and step."""
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
 
     paths = []
     for sched in scheds:
@@ -1250,7 +1217,7 @@ def pairwise_grad_cosine_heatmap(  # noqa: C901
             )
 
             ref_snap = snaps_at_step[0]
-            new_fmt = _is_new_format(ref_snap)
+            new_fmt = is_new_format(ref_snap)
             if new_fmt:
                 n_burst = ref_snap["n_burst"]
                 n_other_sub = ref_snap["n_other_sub"]
@@ -1266,7 +1233,7 @@ def pairwise_grad_cosine_heatmap(  # noqa: C901
                 fig_w = max(7, n * 1.1) if show_error else max(6, n * 0.9)
                 fig_h = max(6, n * 1.0) if show_error else max(5, n * 0.8)
                 fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-                im = _draw_pairwise_heatmap(
+                im = draw_pairwise_heatmap(
                     ax,
                     mean_matrix,
                     hm_labels,
@@ -1295,11 +1262,11 @@ def pairwise_grad_cosine_heatmap(  # noqa: C901
     return paths
 
 
-def _is_new_format(snap: dict) -> bool:
+def is_new_format(snap: dict) -> bool:  # noqa: D103
     return "n_other_sub" in snap
 
 
-def _extract_pairwise_metrics(snap: dict) -> dict[str, float]:
+def extract_pairwise_metrics(snap: dict) -> dict[str, float]:
     """Extract scalar summary metrics from a pairwise snapshot matrix.
 
     New format [BURST, O_F1..O_Fn, ALL_OTHER, ALL_DATA]:
@@ -1318,7 +1285,7 @@ def _extract_pairwise_metrics(snap: dict) -> dict[str, float]:
     if n < _MIN_DIM:
         return {}
 
-    if _is_new_format(snap):
+    if is_new_format(snap):
         n_b = snap["n_burst"]
         n_os = snap["n_other_sub"]
         burst_idx = 0
@@ -1369,7 +1336,7 @@ PAIRWISE_METRIC_COLORS = {
 }
 
 
-def _collect_pairwise_series(  # noqa: C901
+def collect_pairwise_series(  # noqa: C901
     _gs_records: list[dict], scheds_grouped: _Groups
 ) -> dict[str, dict[str, Any]]:
     """Build {sched: {metric: (steps_ref, vals_array_SxT)}} from pairwise snapshots."""
@@ -1391,7 +1358,7 @@ def _collect_pairwise_series(  # noqa: C901
                 continue
             seed_steps, seed_metrics = [], defaultdict(list)
             for snap in sorted(r["pairwise_snapshots"], key=lambda s: s["step"]):
-                m = _extract_pairwise_metrics(snap)
+                m = extract_pairwise_metrics(snap)
                 if not m:
                     continue
                 seed_steps.append(snap["step"])
@@ -1420,13 +1387,13 @@ def pairwise_grad_cosine_evolution_by_metric(
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
 
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
-    series = _collect_pairwise_series(gs_records, gs_groups)
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
+    series = collect_pairwise_series(gs_records, gs_groups)
     if not series:
         return []
 
-    T_max = max(_T_for(s, bcfg) for s in scheds)
+    T_max = max(T_for(s, bcfg) for s in scheds)
     metrics = list(PAIRWISE_METRIC_LABELS.keys())
     paths = []
     for metric in metrics:
@@ -1467,7 +1434,7 @@ def pairwise_grad_cosine_evolution_by_metric(
             color="gray", fontweight="bold", transform=ax.get_xaxis_transform(),
         )
         ax.set_xlim(0, T_max + U)
-        _style(
+        style(
             ax, "Step", "Cosine Similarity",
             f"{PAIRWISE_METRIC_LABELS[metric]}\n(mean +/- 95% CI per schedule)",
         )
@@ -1488,9 +1455,9 @@ def pairwise_grad_cosine_evolution_per_schedule(
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
 
-    gs_groups = _group_gs(gs_records)
-    scheds = _ordered(gs_groups.keys())
-    series = _collect_pairwise_series(gs_records, gs_groups)
+    gs_groups = group_gs(gs_records)
+    scheds = ordered(gs_groups.keys())
+    series = collect_pairwise_series(gs_records, gs_groups)
     if not series:
         return None
 
@@ -1504,7 +1471,7 @@ def pairwise_grad_cosine_evolution_per_schedule(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.5 * n_rows), squeeze=False)
 
     for idx, sched in enumerate(active_scheds):
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         row, col = divmod(idx, n_cols)
         ax = axes[row][col]
         steps_ref = series[sched]["_steps"]
@@ -1555,7 +1522,7 @@ def pairwise_grad_cosine_evolution_per_schedule(
     return p_
 
 
-def _load_probe_data(
+def load_probe_data(
     run_dir: _PathLike,
 ) -> tuple[list[dict] | None, dict | None]:
     """Load probe results if available. Returns (results, meta) or (None, None)."""
@@ -1607,7 +1574,7 @@ def probe_heatmap_aggregated(
 
     _STEP_TOLERANCE = 30
     _PROBE_HI = 0.75
-    for sched in _ordered(sched_data.keys()):
+    for sched in ordered(sched_data.keys()):
         runs = sched_data[sched]
         for target_step in key_steps:
             arrs = []
@@ -1678,7 +1645,7 @@ def probe_dynamics_aggregated(
         sched_data[r["schedule"]].append(r)
 
     fig, ax = plt.subplots(figsize=(14, 7))
-    for sched in _ordered(sched_data.keys()):
+    for sched in ordered(sched_data.keys()):
         runs = sched_data[sched]
         all_steps: set[int] = set()
         for r in runs:
@@ -1708,7 +1675,7 @@ def probe_dynamics_aggregated(
     ax.axvline(T, color="black", ls="--", lw=2, alpha=0.6)
     ax.axhline(0.5, color="gray", ls=":", alpha=0.3)
     ns = len({r["seed"] for r in probe_results})
-    _style(
+    style(
         ax,
         "Step",
         "Mean Probe Accuracy (all layers & tokens)",
@@ -1806,7 +1773,7 @@ def probe_layer_schedule_heatmap(  # noqa: C901, PLR0915
     return paths
 
 
-def _load_per_layer_data(
+def load_per_layer_data(
     gs_records: list[dict],
 ) -> tuple[list[str], dict[str, dict[str, tuple[np.ndarray, np.ndarray]]]]:
     """Extract per-layer cossim data from gs_records.
@@ -1820,7 +1787,7 @@ def _load_per_layer_data(
             layer_names = names
             break
 
-    gs_groups = _group_gs(gs_records)
+    gs_groups = group_gs(gs_records)
     out: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
 
     for sched, records in gs_groups.items():
@@ -1854,7 +1821,7 @@ def grad_cosine_per_layer_overlay(
     """Render one chart per schedule with all layers overlaid as lines over time."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    layer_names, sched_layer_data = load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return []
 
@@ -1865,7 +1832,7 @@ def grad_cosine_per_layer_overlay(
 
     paths = []
     for sched, layer_data in sched_layer_data.items():
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         fig, ax = plt.subplots(figsize=(14, 7))
         for layer in layer_names:
             if layer not in layer_data:
@@ -1885,7 +1852,7 @@ def grad_cosine_per_layer_overlay(
         ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
         ax.set_xlim(0, T_s + U)
         sched_label = SCHED_SHORT.get(sched, sched)
-        _style(
+        style(
             ax,
             "Step",
             "Cosine Similarity",
@@ -1909,12 +1876,12 @@ def grad_cosine_per_layer_all_scheds(
     """Render one chart per layer with all schedules overlaid."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    layer_names, sched_layer_data = load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return []
 
-    scheds = _ordered(sched_layer_data.keys())
-    T_max = max(_T_for(s, bcfg) for s in scheds)
+    scheds = ordered(sched_layer_data.keys())
+    T_max = max(T_for(s, bcfg) for s in scheds)
     paths = []
     for layer in layer_names:
         fig, ax = plt.subplots(figsize=(14, 6))
@@ -1935,7 +1902,7 @@ def grad_cosine_per_layer_all_scheds(
         ax.axvline(T_max, color="black", ls="--", lw=2, alpha=0.6)
         ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
         ax.set_xlim(0, T_max + U)
-        _style(
+        style(
             ax,
             "Step",
             "Cosine Similarity",
@@ -1958,13 +1925,13 @@ def grad_cosine_layer_step_heatmap(
 ) -> list[Path]:
     """Render heatmap of rows=layers, cols=steps, one chart per schedule."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
-    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    layer_names, sched_layer_data = load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return []
 
     paths = []
     for sched, layer_data in sched_layer_data.items():
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         layers_present = [ln for ln in layer_names if ln in layer_data]
         if not layers_present:
             continue
@@ -2021,11 +1988,11 @@ def grad_cosine_layer_schedule_heatmap(  # noqa: C901
     """Render heatmap of rows=layers, cols=schedules, at key training phases."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    layer_names, sched_layer_data = load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return []
 
-    scheds = _ordered(sched_layer_data.keys())
+    scheds = ordered(sched_layer_data.keys())
     phase_labels = ["End-Burst", "End-Rev"]
 
     _CONTRAST = 0.55
@@ -2035,7 +2002,7 @@ def grad_cosine_layer_schedule_heatmap(  # noqa: C901
         for ci_idx, sched in enumerate(scheds):
             if sched not in sched_layer_data:
                 continue
-            T_s = _T_for(sched, bcfg)
+            T_s = T_for(sched, bcfg)
             if phase_label == "End-Burst":
                 lo, hi = int(3 * T_s / 4), T_s
             else:
@@ -2091,14 +2058,14 @@ def grad_cosine_layer_change_heatmap(
 ) -> list[Path]:
     """Render heatmap showing rate-of-change of cossim per layer over time."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
-    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    layer_names, sched_layer_data = load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return []
 
     _MIN_STEPS = 3
     paths = []
     for sched, layer_data in sched_layer_data.items():
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         layers_present = [ln for ln in layer_names if ln in layer_data]
         if not layers_present:
             continue
@@ -2163,11 +2130,11 @@ def grad_cosine_layer_end_burst_bars(
 ) -> Path | None:
     """Render grouped bar chart of per-layer gradient cosine similarity at end of burst."""
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
-    layer_names, sched_layer_data = _load_per_layer_data(gs_records)
+    layer_names, sched_layer_data = load_per_layer_data(gs_records)
     if not layer_names or not sched_layer_data:
         return None
 
-    scheds = _ordered(sched_layer_data.keys())
+    scheds = ordered(sched_layer_data.keys())
     n_layers = len(layer_names)
     n_scheds = len(scheds)
 
@@ -2175,7 +2142,7 @@ def grad_cosine_layer_end_burst_bars(
     for ci_idx, sched in enumerate(scheds):
         if sched not in sched_layer_data:
             continue
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         for ri, layer in enumerate(layer_names):
             if layer not in sched_layer_data[sched]:
                 continue
@@ -2204,7 +2171,7 @@ def grad_cosine_layer_end_burst_bars(
     ax.axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
     ax.set_xticks(xs)
     ax.set_xticklabels(layer_names, fontsize=9, fontweight="bold", rotation=30, ha="right")
-    _style(
+    style(
         ax,
         "Layer",
         "Cosine Similarity (end of burst)",
@@ -2235,7 +2202,7 @@ def load_adl_data(run_dir: _PathLike) -> list[dict]:
     return []
 
 
-def _group_adl(records: list[dict]) -> _Groups:
+def group_adl(records: list[dict]) -> _Groups:  # noqa: D103
     g: _Groups = defaultdict(list)
     for r in records:
         g[r["schedule"]].append(r)
@@ -2250,9 +2217,9 @@ def adl_delta_norm_overlay(
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    groups = _group_adl(adl_records)
-    scheds = _ordered(groups.keys())
-    T_max = max(_T_for(s, bcfg) for s in scheds)
+    groups = group_adl(adl_records)
+    scheds = ordered(groups.keys())
+    T_max = max(T_for(s, bcfg) for s in scheds)
 
     fig, ax = plt.subplots(figsize=(14, 6))
     for sched in scheds:
@@ -2275,7 +2242,7 @@ def adl_delta_norm_overlay(
         ax.fill_between(steps_ref, m - ci, m + ci, color=PALETTE[sched], alpha=0.15)
     ax.axvline(T_max, color="black", ls="--", lw=2, alpha=0.6)
     ax.set_xlim(0, T_max + U)
-    _style(
+    style(
         ax,
         "Step",
         "||delta|| (sum over layers)",
@@ -2297,9 +2264,9 @@ def adl_readability_overlay(
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    groups = _group_adl(adl_records)
-    scheds = _ordered(groups.keys())
-    T_max = max(_T_for(s, bcfg) for s in scheds)
+    groups = group_adl(adl_records)
+    scheds = ordered(groups.keys())
+    T_max = max(T_for(s, bcfg) for s in scheds)
 
     fig, ax = plt.subplots(figsize=(14, 6))
     for sched in scheds:
@@ -2323,7 +2290,7 @@ def adl_readability_overlay(
     ax.axvline(T_max, color="black", ls="--", lw=2, alpha=0.6)
     ax.set_xlim(0, T_max + U)
     ax.set_ylim(-0.02, None)
-    _style(
+    style(
         ax,
         "Step",
         "Burst-token readability (frac. top-10)",
@@ -2345,9 +2312,9 @@ def adl_causal_ablation_overlay(
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
     U = bcfg["reversion_steps"]
-    groups = _group_adl(adl_records)
-    scheds = _ordered(groups.keys())
-    T_max = max(_T_for(s, bcfg) for s in scheds)
+    groups = group_adl(adl_records)
+    scheds = ordered(groups.keys())
+    T_max = max(T_for(s, bcfg) for s in scheds)
 
     fig, ax = plt.subplots(figsize=(14, 6))
     for sched in scheds:
@@ -2371,7 +2338,7 @@ def adl_causal_ablation_overlay(
     ax.axvline(T_max, color="black", ls="--", lw=2, alpha=0.6)
     ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
     ax.set_xlim(0, T_max + U)
-    _style(
+    style(
         ax,
         "Step",
         "Accuracy drop (baseline - ablated)",
@@ -2392,14 +2359,14 @@ def adl_end_burst_bars(
     if not adl_records:
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
-    groups = _group_adl(adl_records)
-    scheds = _ordered(groups.keys())
+    groups = group_adl(adl_records)
+    scheds = ordered(groups.keys())
 
     readability_means, readability_cis = [], []
     ablation_means, ablation_cis = [], []
 
     for sched in scheds:
-        T_s = _T_for(sched, bcfg)
+        T_s = T_for(sched, bcfg)
         runs = groups[sched]
         r_vals, a_vals = [], []
         for r in runs:
@@ -2438,7 +2405,7 @@ def adl_end_burst_bars(
     )
     axes[0].set_xticks(xs)
     axes[0].set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
-    _style(axes[0], "", "Burst-token readability (frac. top-10)", "ADL Readability at End of Burst")
+    style(axes[0], "", "Burst-token readability (frac. top-10)", "ADL Readability at End of Burst")
 
     axes[1].bar(
         xs, ablation_means, yerr=ablation_cis,
@@ -2447,7 +2414,7 @@ def adl_end_burst_bars(
     axes[1].axhline(0, color="gray", ls=":", lw=1.5, alpha=0.6)
     axes[1].set_xticks(xs)
     axes[1].set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
-    _style(axes[1], "", "Accuracy drop", "Causal Ablation Drop at End of Burst")
+    style(axes[1], "", "Accuracy drop", "Causal Ablation Drop at End of Burst")
 
     fig.suptitle("ADL End-of-Burst Summary (mean +/- 95% CI)", fontsize=14, fontweight="bold")
     fig.tight_layout()
@@ -2464,12 +2431,12 @@ def adl_readability_vs_auc(
     if not adl_records:
         return None
     bcfg = {**cfg.get("base_cfg", cfg), "_burst_mode": cfg.get("burst_mode", MODE_CURRENT)}
-    groups = _group_adl(adl_records)
+    groups = group_adl(adl_records)
     res_by_label = {r["label"]: r for r in results}
 
     fig, ax = plt.subplots(figsize=(9, 7))
-    for sched in _ordered(groups.keys()):
-        T_s = _T_for(sched, bcfg)
+    for sched in ordered(groups.keys()):
+        T_s = T_for(sched, bcfg)
         runs = groups[sched]
         for r in runs:
             steps = np.array(r["adl_log"]["step"])
@@ -2505,7 +2472,7 @@ def adl_readability_vs_auc(
         if label not in seen:
             seen[label] = handle
     ax.legend(seen.values(), seen.keys(), fontsize=10, loc="best", framealpha=0.9)
-    _style(
+    style(
         ax,
         "ADL Readability (end of burst)",
         "Reversion AUC",
@@ -2526,7 +2493,7 @@ def generate_all(  # noqa: PLR0915
     pdir.mkdir(exist_ok=True)
     cp: dict[str, Any] = {}
     ns = len({r["seed"] for r in results})
-    gr = _group(results)
+    gr = group(results)
 
     has_training_data = any(r.get("log", {}).get("step") for r in results)
 
@@ -2613,7 +2580,7 @@ def generate_all(  # noqa: PLR0915
     else:
         logger.info("Skipping training-data charts -- no all_results.pkl")
 
-    gs_records = load_grad_sim_data(run_dir)
+    gs_records = load_grad_sim_records(run_dir)
     gs_dir = pdir / "grad_cosine_sim"
     gs_dir.mkdir(exist_ok=True)
 
@@ -2663,7 +2630,7 @@ def generate_all(  # noqa: PLR0915
         layer_gs_dir, cfg, gs_records
     )
 
-    probe_data, probe_meta = _load_probe_data(run_dir)
+    probe_data, probe_meta = load_probe_data(run_dir)
     if probe_data:
         probe_dir = pdir / "probes"
         probe_dir.mkdir(exist_ok=True)

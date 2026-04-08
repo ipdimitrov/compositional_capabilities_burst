@@ -45,27 +45,26 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import numpy as np
+import plotly.graph_objects as go
 import torch
+from plotly.subplots import make_subplots
 
 from burst.config import (
     parse_run_config,
 )
-from burst.core.train_utils import DEVICE, load_net, resolve_run_paths
-from burst.dev._shared import (
-    ckpt_files as _ckpt_files,
+from burst.core.train_utils import (
+    DEVICE,
+    ckpt_files,
+    cross_entropy_loss,
+    free_gen_acc,
+    load_net,
+    resolve_run_paths,
+    sched_order,
 )
-from burst.dev._shared import (
-    cross_entropy_loss as _cross_entropy_loss,
+from burst.core.train_utils import (
+    sched_color as color,
 )
-from burst.dev._shared import (
-    free_gen_acc as _free_gen_acc,
-)
-from burst.dev._shared import (
-    sched_color as _color,
-)
-from burst.dev._shared import (
-    sched_order as _sched_order,
-)
+from burst.dev.plot_utils import save_png, write_text_report
 
 _rng = np.random.default_rng()
 
@@ -78,7 +77,7 @@ _NORM_EPS: float = 1e-10
 _MIN_SAMPLES_FOR_CORR: int = 2
 
 
-def _filter_normalise(
+def filter_normalise(
     direction: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]
 ) -> dict[str, torch.Tensor]:
     """Filter-normalise a random direction to match the scale of reference weights.
@@ -135,7 +134,7 @@ def compute_noise_robustness(  # noqa: PLR0913, PLR0915
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
 
     n_burst = min(n_eval_docs, burst_docs_BL.shape[0])
     n_other = min(n_eval_docs, other_docs_BL.shape[0])
@@ -160,7 +159,7 @@ def compute_noise_robustness(  # noqa: PLR0913, PLR0915
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -190,8 +189,8 @@ def compute_noise_robustness(  # noqa: PLR0913, PLR0915
                     }
                     net.load_state_dict(noisy_sd)
 
-                burst_accs.append(_free_gen_acc(net, burst_eval, prompt_len))
-                other_accs.append(_free_gen_acc(net, other_eval, prompt_len))
+                burst_accs.append(free_gen_acc(net, burst_eval, prompt_len))
+                other_accs.append(free_gen_acc(net, other_eval, prompt_len))
 
             burst_acc_curves.append(burst_accs)
             other_acc_curves.append(other_accs)
@@ -259,7 +258,7 @@ def compute_directed_noise_robustness(  # noqa: C901, PLR0912, PLR0913, PLR0915
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
 
     n_burst = min(n_eval_docs, burst_docs_BL.shape[0])
     burst_idx = _rng.choice(burst_docs_BL.shape[0], n_burst, replace=False)
@@ -280,7 +279,7 @@ def compute_directed_noise_robustness(  # noqa: C901, PLR0912, PLR0913, PLR0915
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -323,7 +322,7 @@ def compute_directed_noise_robustness(  # noqa: C901, PLR0912, PLR0913, PLR0915
 
             for eps in epsilons:
                 if eps == 0.0:
-                    acc = _free_gen_acc(net, burst_eval, prompt_len)
+                    acc = free_gen_acc(net, burst_eval, prompt_len)
                     undo_accs.append(acc)
                     rand_accs.append(acc)
                     continue
@@ -340,10 +339,10 @@ def compute_directed_noise_robustness(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     offset += numel
 
                 net.load_state_dict(sd_undo)
-                undo_accs.append(_free_gen_acc(net, burst_eval, prompt_len))
+                undo_accs.append(free_gen_acc(net, burst_eval, prompt_len))
 
                 net.load_state_dict(sd_rand)
-                rand_accs.append(_free_gen_acc(net, burst_eval, prompt_len))
+                rand_accs.append(free_gen_acc(net, burst_eval, prompt_len))
 
             undo_curves.append(undo_accs)
             random_curves.append(rand_accs)
@@ -403,7 +402,7 @@ def compute_weight_drift_correlation(
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
 
     all_drifts: list[float] = []
     all_aucs: list[float] = []
@@ -422,7 +421,7 @@ def compute_weight_drift_correlation(
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -503,7 +502,7 @@ def compute_loss_surface(  # noqa: PLR0913, PLR0915
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
 
     alphas = np.linspace(-surface_range, surface_range, grid_size)
     betas = np.linspace(-surface_range, surface_range, grid_size)
@@ -530,7 +529,7 @@ def compute_loss_surface(  # noqa: PLR0913, PLR0915
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -549,8 +548,8 @@ def compute_loss_surface(  # noqa: PLR0913, PLR0915
             # Sample two random directions and filter-normalise
             dir1_raw = {k: torch.randn_like(v) for k, v in base_sd.items()}
             dir2_raw = {k: torch.randn_like(v) for k, v in base_sd.items()}
-            dir1 = _filter_normalise(dir1_raw, base_sd)
-            dir2 = _filter_normalise(dir2_raw, base_sd)
+            dir1 = filter_normalise(dir1_raw, base_sd)
+            dir2 = filter_normalise(dir2_raw, base_sd)
 
             net = load_net(cfg, str(files[peak_step]))
 
@@ -564,8 +563,8 @@ def compute_loss_surface(  # noqa: PLR0913, PLR0915
                         for k in base_sd
                     }
                     net.load_state_dict(perturbed_sd)
-                    burst_surface[i, j] = _cross_entropy_loss(net, burst_eval)
-                    other_surface[i, j] = _cross_entropy_loss(net, other_eval)
+                    burst_surface[i, j] = cross_entropy_loss(net, burst_eval)
+                    other_surface[i, j] = cross_entropy_loss(net, other_eval)
 
             burst_surfaces.append(burst_surface)
             other_surfaces.append(other_surface)
@@ -620,11 +619,6 @@ def compute_loss_surface(  # noqa: PLR0913, PLR0915
 
 def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
     """Render basin-geometry dashboard to HTML and PNG charts."""
-    import plotly.graph_objects as go  # noqa: PLC0415
-    from plotly.subplots import make_subplots  # noqa: PLC0415
-
-    from burst.dev.plot_utils import save_png as _save_png  # noqa: PLC0415
-
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -632,7 +626,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
 
     def _add(key: str, fig: go.Figure) -> None:
         all_figs.append((key, fig))
-        _save_png(fig, str(charts_dir / f"{key}.png"))
+        save_png(fig, str(charts_dir / f"{key}.png"))
 
     for run_name, run_data in results.items():
         # ------------------------------------------------------------------
@@ -640,14 +634,16 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         # ------------------------------------------------------------------
         nr = run_data.get("noise_robustness", {})
         if nr:
-            schedules = sorted(nr.keys(), key=_sched_order)
+            schedules = sorted(nr.keys(), key=sched_order)
 
             # Burst accuracy vs sigma
             fig = go.Figure()
             fig_burst_delta = go.Figure()
             for sched in schedules:
                 d = nr[sched]
-                diff = [b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"], strict=True)]  # noqa: E501
+                diff = [
+                    b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"], strict=True)
+                ]
                 diff_std = [
                     float(np.sqrt(sb**2 + so**2))
                     for sb, so in zip(d["std_burst_accs"], d["std_other_accs"], strict=True)
@@ -657,7 +653,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=d["sigmas"],
                         y=d["mean_burst_accs"],
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         error_y={"array": d["std_burst_accs"], "visible": True, "thickness": 1},
                     )
@@ -667,7 +663,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=d["sigmas"],
                         y=diff,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         error_y={"array": diff_std, "visible": True, "thickness": 1},
                     )
@@ -705,7 +701,9 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             fig_other_delta = go.Figure()
             for sched in schedules:
                 d = nr[sched]
-                diff = [b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"], strict=True)]  # noqa: E501
+                diff = [
+                    b - o for b, o in zip(d["mean_burst_accs"], d["mean_other_accs"], strict=True)
+                ]
                 diff_std = [
                     float(np.sqrt(sb**2 + so**2))
                     for sb, so in zip(d["std_burst_accs"], d["std_other_accs"], strict=True)
@@ -715,7 +713,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=d["sigmas"],
                         y=d["mean_other_accs"],
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         error_y={"array": d["std_other_accs"], "visible": True, "thickness": 1},
                     )
@@ -725,12 +723,14 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=d["sigmas"],
                         y=diff,
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         error_y={"array": diff_std, "visible": True, "thickness": 1},
                     )
                 )
-            fig.add_vline(x=0.004, line_dash="dash", line_color="gray", annotation_text="sigma=0.004")  # noqa: E501
+            fig.add_vline(
+                x=0.004, line_dash="dash", line_color="gray", annotation_text="sigma=0.004"
+            )
             fig.update_layout(
                 title=f"Other-Class Accuracy Under Gaussian Weight Noise — {run_name}",
                 xaxis_title="Noise sigma",
@@ -766,7 +766,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                     for s in schedules
                 ]
                 diff_drops = [b - o for b, o in zip(burst_drops, other_drops, strict=True)]
-                colors = [_color(s) for s in schedules]
+                colors = [color(s) for s in schedules]
                 fig_diff_burst = go.Figure(
                     go.Bar(x=schedules, y=burst_drops, marker_color=colors, showlegend=False)
                 )
@@ -808,7 +808,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         # ------------------------------------------------------------------
         dn = run_data.get("directed_noise", {})
         if dn:
-            schedules = sorted(dn.keys(), key=_sched_order)
+            schedules = sorted(dn.keys(), key=sched_order)
             fig = make_subplots(
                 rows=1, cols=2, subplot_titles=["Undo vs Random Direction", "Narrowness Ratio"]
             )
@@ -819,7 +819,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=d["epsilons"],
                         y=d["mean_undo_accs"],
                         name=f"{sched} undo",
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                     ),
                     row=1,
@@ -830,7 +830,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=d["epsilons"],
                         y=d["mean_random_accs"],
                         name=f"{sched} random",
-                        line={"color": _color(sched), "width": 2, "dash": "dot"},
+                        line={"color": color(sched), "width": 2, "dash": "dot"},
                         mode="lines+markers",
                         showlegend=False,
                     ),
@@ -842,7 +842,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         x=d["epsilons"],
                         y=d["narrowness_ratio"],
                         name=sched,
-                        line={"color": _color(sched), "width": 2},
+                        line={"color": color(sched), "width": 2},
                         mode="lines+markers",
                         showlegend=False,
                     ),
@@ -867,7 +867,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         # ------------------------------------------------------------------
         wd = run_data.get("weight_drift", {})
         if wd:
-            schedules = sorted(wd["per_schedule"].keys(), key=_sched_order)
+            schedules = sorted(wd["per_schedule"].keys(), key=sched_order)
 
             # Scatter: drift vs reversion_auc, coloured by schedule
             fig = go.Figure()
@@ -881,7 +881,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                         y=d["aucs"],
                         name=sched,
                         mode="markers",
-                        marker={"color": _color(sched), "size": 10},
+                        marker={"color": color(sched), "size": 10},
                     )
                 )
             r_val = wd.get("correlation_r", float("nan"))
@@ -907,7 +907,7 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
                 go.Bar(
                     x=schedules,
                     y=mean_drifts,
-                    marker_color=[_color(s) for s in schedules],
+                    marker_color=[color(s) for s in schedules],
                 )
             )
             fig.update_layout(
@@ -925,10 +925,10 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
         # ------------------------------------------------------------------
         ls = run_data.get("loss_surface", {})
         if ls:
-            schedules = sorted(ls.keys(), key=_sched_order)
+            schedules = sorted(ls.keys(), key=sched_order)
 
             # Sharpness comparison: burst vs other per schedule (separate figures with CI)
-            colors = [_color(s) for s in schedules]
+            colors = [color(s) for s in schedules]
 
             def _ci95(vals: Any) -> Any:  # noqa: ANN401
                 if len(vals) > 1:
@@ -940,7 +940,9 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
             burst_ci = [_ci95(ls[s].get("per_seed_burst_sharpness", [])) for s in schedules]
             other_ci = [_ci95(ls[s].get("per_seed_other_sharpness", [])) for s in schedules]
             diff_sharpness = [b - o for b, o in zip(burst_sharpness, other_sharpness, strict=True)]
-            diff_ci = [float(np.sqrt(bc**2 + oc**2)) for bc, oc in zip(burst_ci, other_ci, strict=True)]  # noqa: E501
+            diff_ci = [
+                float(np.sqrt(bc**2 + oc**2)) for bc, oc in zip(burst_ci, other_ci, strict=True)
+            ]
 
             fig_sharp_burst = go.Figure(
                 go.Bar(
@@ -1103,8 +1105,6 @@ def make_dashboard(results: dict, out_dir: Path) -> None:  # noqa: C901, PLR0912
     html_path = out_dir / "dashboard.html"
     with html_path.open("w") as f:
         f.write("".join(html_parts))
-
-    from burst.dev.plot_utils import write_text_report  # noqa: PLC0415
 
     write_text_report(
         all_figs,

@@ -4,9 +4,9 @@ Generates:
   results/burst_report.html  — full presentation with all charts
   results/burst_report.txt   — machine-readable companion for LLM ingestion
 
-Usage:
-  python burst/pres_pdf.py <run_dir>
-  python burst/pres_pdf.py <run_dir> --full   # also run unified/basin/extended analysis
+Usage (from repository root):
+  python -m burst.dev.pres_pdf <run_dir>
+  python -m burst.dev.pres_pdf <run_dir> --full   # also run unified/basin/extended analysis
 """
 
 import argparse
@@ -14,13 +14,10 @@ import base64
 import json
 import logging
 import pickle
-import sys
 import traceback
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import numpy as np
 
@@ -32,19 +29,27 @@ from burst.config import (
     reversion_life_key,
     reversion_life_label,
 )
-
-logger = logging.getLogger(__name__)
-from burst.dev.pres_charts import (  # noqa: E402
+from burst.core.bundle import load_grad_sim_records
+from burst.core.train_utils import resolve_run_paths
+from burst.dev.basin_metrics import analyse_run as bm_analyse
+from burst.dev.basin_metrics import make_dashboard as bm_dashboard
+from burst.dev.pres_charts import (
     SCHED_SHORT,
-    _group,
-    _group_gs,
     _ordered,
     generate_all,
-    load_grad_sim_data,
+    group,
+    group_gs,
+)
+from burst.dev.unified_analysis import analyse_run as ua_analyse
+from burst.dev.unified_analysis import (
+    make_dashboard,
+    make_extended_metrics_dashboard,
 )
 
+logger = logging.getLogger(__name__)
 
-def _img_tag(path: Path, max_width: int = 900) -> str:
+
+def img_tag(path: Path, max_width: int = 900) -> str:  # noqa: D103
     p = Path(path)
     if not p.exists():
         return ""
@@ -52,7 +57,7 @@ def _img_tag(path: Path, max_width: int = 900) -> str:
     return f'<img src="data:image/png;base64,{data}" style="max-width:{max_width}px;width:100%;">'
 
 
-_CSS = """
+CSS = """
 body { font-family: Helvetica, Arial, sans-serif; max-width: 1100px; margin: 0 auto;
        padding: 20px 30px; color: #1e1e1e; background: #fff; }
 h1 { color: #0d47a1; border-bottom: 3px solid #0d47a1; padding-bottom: 8px; }
@@ -82,7 +87,7 @@ li { margin-bottom: 4px; }
 """
 
 
-def _verdict_html(verdict: str, explanation: str, kind: str = "supported") -> str:
+def verdict_html(verdict: str, explanation: str, kind: str = "supported") -> str:  # noqa: D103
     css_class = {
         "supported": "vbox-supported",
         "partial": "vbox-partial",
@@ -92,17 +97,17 @@ def _verdict_html(verdict: str, explanation: str, kind: str = "supported") -> st
     return f'<div class="vbox {css_class}"><span class="verdict">VERDICT: {verdict}</span> &mdash; {explanation}</div>'  # noqa: E501
 
 
-def _section(title: str, level: int = 2, *, page_break: bool = True, anchor: str = "") -> str:
+def section(title: str, level: int = 2, *, page_break: bool = True, anchor: str = "") -> str:  # noqa: D103
     pb = ' class="page-break"' if page_break else ""
     aid = f' id="{anchor}"' if anchor else ""
     tag = f"h{level}"
     return f"<div{pb}{aid}><{tag}>{title}</{tag}></div>"
 
 
-def _chart(path: Path | None, max_width: int = 900) -> str:
+def chart(path: Path | None, max_width: int = 900) -> str:  # noqa: D103
     if path is None:
         return ""
-    tag = _img_tag(path, max_width)
+    tag = img_tag(path, max_width)
     return f'<div class="chart">{tag}</div>' if tag else ""
 
 
@@ -111,7 +116,7 @@ def _chart(path: Path | None, max_width: int = 900) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[tuple[str, Path]]]:
+def collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[tuple[str, Path]]]:
     """Run unified_analysis, extended metrics, and basin_metrics; return chart paths."""
     results_dir = run_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -121,15 +126,12 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         "basin": [],
     }
 
-    def _pngs(d: Path) -> list[tuple[str, Path]]:
+    def pngs(d: Path) -> list[tuple[str, Path]]:
         if not d.exists():
             return []
         return [(p.stem.replace("_", " ").title(), p) for p in sorted(d.glob("*.png"))]
 
     try:
-        from burst.dev.unified_analysis import analyse_run as ua_analyse  # noqa: PLC0415
-        from burst.dev.unified_analysis import make_dashboard  # noqa: PLC0415
-
         r = ua_analyse(
             run_dir,
             n_seeds=n_seeds,
@@ -176,33 +178,24 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
         tmp = results_dir / "_unified_tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         make_dashboard(combined, tmp)
-        out["unified"] = _pngs(tmp / "charts")
+        out["unified"] = pngs(tmp / "charts")
     except Exception:
         logger.exception("unified dashboard failed for %s", run_dir)
 
     try:
-        from burst.dev.unified_analysis import make_extended_metrics_dashboard  # noqa: PLC0415
-
         tmp = results_dir / "_extended_tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         make_extended_metrics_dashboard([run_dir], tmp)
-        out["extended"] = _pngs(tmp / "charts")
+        out["extended"] = pngs(tmp / "charts")
     except Exception:
         logger.exception("extended dashboard failed for %s", run_dir)
 
     try:
-        from burst.dev.basin_metrics import (  # noqa: PLC0415
-            analyse_run as bm_analyse,
-        )
-        from burst.dev.basin_metrics import (  # noqa: PLC0415
-            make_dashboard as bm_dashboard,
-        )
-
         r = bm_analyse(run_dir, n_seeds=n_seeds, skip_surface=False)
         tmp = results_dir / "_basin_tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         bm_dashboard({run_dir.name: r}, tmp)
-        out["basin"] = _pngs(tmp / "charts")
+        out["basin"] = pngs(tmp / "charts")
     except Exception:
         logger.exception("basin dashboard failed for %s", run_dir)
 
@@ -214,7 +207,7 @@ def _collect_analysis_charts(run_dir: Path, n_seeds: int = 3) -> dict[str, list[
 # ---------------------------------------------------------------------------
 
 
-def _build_txt(  # noqa: C901, PLR0912, PLR0915
+def build_txt(  # noqa: C901, PLR0912, PLR0915, D103
     rd: Path,
     res: list,
     cfg: dict,
@@ -227,7 +220,7 @@ def _build_txt(  # noqa: C901, PLR0912, PLR0915
     T, U = bcfg["total_steps"], bcfg["reversion_steps"]
     P = bcfg.get("pre_burst_steps", 0)
     ns = cfg.get("n_seeds", 5)
-    gr = _group(res)
+    gr = group(res)
     sc = _ordered(gr.keys())
 
     lines: list[str] = []
@@ -280,7 +273,7 @@ def _build_txt(  # noqa: C901, PLR0912, PLR0915
     lines.append("(burst-vs-other cosine similarity of full-parameter gradient vectors)")
     lines.append("")
     if gs_records:
-        gs_groups = _group_gs(gs_records)
+        gs_groups = group_gs(gs_records)
         for sched in sc:
             if sched not in gs_groups:
                 continue
@@ -460,7 +453,7 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
     nl, ne, nh = bcfg["n_layer"], bcfg["n_embd"], bcfg["n_head"]
     bs, p = bcfg["batch_size"], bcfg["p_target"]
     ns = cfg.get("n_seeds", 5)
-    gr = _group(res)
+    gr = group(res)
     sc = _ordered(gr.keys())
     max(int(p * T), 1)
 
@@ -470,7 +463,7 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
 
     parts: list[str] = []
 
-    def _try(fn: Callable[[], None], label: str = "section") -> None:
+    def try_section(fn: Callable[[], None], label: str = "section") -> None:
         try:
             fn()
         except (ValueError, TypeError, KeyError, IndexError, OSError, RuntimeError):
@@ -479,7 +472,7 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
             )
 
     parts.append(
-        f"<html><head><meta charset='utf-8'><title>Burst Report — {rd.name}</title><style>{_CSS}</style></head><body>"  # noqa: E501
+        f"<html><head><meta charset='utf-8'><title>Burst Report — {rd.name}</title><style>{CSS}</style></head><body>"  # noqa: E501
     )
 
     parts.append(
@@ -539,8 +532,8 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
     except (KeyError, IndexError):
         ae = {s: float("nan") for s in sc}
 
-    def _research_q() -> None:
-        parts.append(_section("Research Question", anchor="research-q"))
+    def research_q() -> None:
+        parts.append(section("Research Question", anchor="research-q"))
         parts.append(
             "<p>How does the training schedule for introducing novel compositional knowledge affect a Transformer's ability to (a) acquire that knowledge and (b) retain it when the novel data is removed?</p>"  # noqa: E501
         )
@@ -548,10 +541,10 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
             "<p>Does interleaving other classes with the special class during the burst window produce more robust representations than presenting the special class in isolation?</p>"  # noqa: E501
         )
 
-    _try(_research_q, "Research Question")
+    try_section(research_q, "Research Question")
 
-    def _setup() -> None:
-        parts.append(_section("Experimental Setup", anchor="setup"))
+    def setup() -> None:
+        parts.append(section("Experimental Setup", anchor="setup"))
         parts.append(
             f"<h3>Task: Depth-{depth} Bijection Composition (burst at position {burst_pos})</h3>"
         )
@@ -570,10 +563,10 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         parts.append(f"<li>AdamW lr={bcfg['lr']}, cosine decay, batch {bs}, bfloat16</li>")
         parts.append("</ul>")
 
-    _try(_setup, "Experimental Setup")
+    try_section(setup, "Experimental Setup")
 
-    def _protocol() -> None:
-        parts.append(_section("Training Protocol", anchor="protocol"))
+    def protocol() -> None:
+        parts.append(section("Training Protocol", anchor="protocol"))
         if P > 0:
             parts.append(f"<h3>All-but-special (0-{P - 1})</h3>")
             parts.append("<p>Other classes only. Shared across all schedules.</p>")
@@ -581,18 +574,18 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         parts.append("<p>Other classes + Special class mixed per schedule.</p>")
         parts.append(f"<h3>All-but-special ({P + T}-{P + T + U - 1})</h3>")
         parts.append("<p>Special class removed. Other classes only.</p>")
-        parts.append(_chart(cp.get("lr")))
-        parts.append(_chart(cp.get("schedule_bars")))
+        parts.append(chart(cp.get("lr")))
+        parts.append(chart(cp.get("schedule_bars")))
 
-    _try(_protocol, "Training Protocol")
+    try_section(protocol, "Training Protocol")
 
-    def _result1() -> None:
-        parts.append(_section("Result: Peak Special Class Accuracy", anchor="result-peak"))
-        parts.append(_chart(cp.get("peak_bars")))
+    def result1() -> None:
+        parts.append(section("Result: Peak Special Class Accuracy", anchor="result-peak"))
+        parts.append(chart(cp.get("peak_bars")))
         parts.append('<div class="hbox">H1: All schedules achieve peak special class ~ 1.0</div>')
         if all(m >= 0.998 for m in pv.values()):  # noqa: PLR2004
             parts.append(
-                _verdict_html(
+                verdict_html(
                     "SUPPORTED",
                     f"All >= 0.998. Range: {min(pv.values()):.3f}-{max(pv.values()):.3f}.",
                     "supported",
@@ -600,83 +593,83 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
             )
         else:
             parts.append(
-                _verdict_html(
+                verdict_html(
                     "PARTIAL", f"Range: {min(pv.values()):.3f}-{max(pv.values()):.3f}.", "partial"
                 )
             )
 
-    _try(_result1, "Result 1")
+    try_section(result1, "Result 1")
 
-    def _result2() -> None:
-        parts.append(_section("Result: Special Class Accuracy Over Time", anchor="result-curves"))
-        parts.append(_chart(cp.get("overlay_burst")))
-        parts.append(_chart(cp.get("overlay_burst_aligned_end")))
+    def result2() -> None:
+        parts.append(section("Result: Special Class Accuracy Over Time", anchor="result-curves"))
+        parts.append(chart(cp.get("overlay_burst")))
+        parts.append(chart(cp.get("overlay_burst_aligned_end")))
 
-    _try(_result2, "Result 2")
+    try_section(result2, "Result 2")
 
-    def _result3() -> None:
-        parts.append(_section("Result: Forgetting Dynamics", anchor="result-forgetting"))
-        parts.append(_chart(cp.get("reversion_zoom")))
+    def result3() -> None:
+        parts.append(section("Result: Forgetting Dynamics", anchor="result-forgetting"))
+        parts.append(chart(cp.get("reversion_zoom")))
         order_str = " &gt; ".join(
             SCHED_SHORT.get(s, s) for s in sorted(av, key=av.get, reverse=True)
         )
         parts.append(f"<p>Ordering by retention: {order_str}</p>")
 
-    _try(_result3, "Result 3")
+    try_section(result3, "Result 3")
 
-    def _result4() -> None:
-        parts.append(_section("Result: Reversion AUC", anchor="result-auc"))
-        parts.append(_chart(cp.get("auc_bars")))
+    def result4() -> None:
+        parts.append(section("Result: Reversion AUC", anchor="result-auc"))
+        parts.append(chart(cp.get("auc_bars")))
         life_bars = cp.get("life_bars", {})
         for _thresh_idx, t in enumerate(thresholds):
             if t not in life_bars:
                 continue
             label = reversion_life_label(t)
             parts.append(f"<h3>{label}</h3>")
-            parts.append(_chart(life_bars[t]))
+            parts.append(chart(life_bars[t]))
 
-    _try(_result4, "Result 4")
+    try_section(result4, "Result 4")
 
-    def _result6() -> None:
-        parts.append(_section("Result: Schedule Ordering", anchor="result-ordering"))
-        parts.append(_chart(cp.get("auc_diff"), 700))
+    def result6() -> None:
+        parts.append(section("Result: Schedule Ordering", anchor="result-ordering"))
+        parts.append(chart(cp.get("auc_diff"), 700))
         order = sorted(av, key=av.get, reverse=True)
         parts.append(
-            _verdict_html(
+            verdict_html(
                 "OBSERVED",
                 f"Got: {' &gt; '.join(SCHED_SHORT.get(s, s) for s in order)}",
                 "observed",
             )
         )
 
-    _try(_result6, "Result 6")
+    try_section(result6, "Result 6")
 
-    def _result7() -> None:
-        parts.append(_section("Result: Other Classes Preservation", anchor="result-other"))
-        parts.append(_chart(cp.get("overlay_other")))
-        parts.append(_chart(cp.get("overlay_other_aligned_end")))
+    def result7() -> None:
+        parts.append(section("Result: Other Classes Preservation", anchor="result-other"))
+        parts.append(chart(cp.get("overlay_other")))
+        parts.append(chart(cp.get("overlay_other_aligned_end")))
         if all(m >= 0.95 for m in ae.values()):  # noqa: PLR2004
             parts.append(
-                _verdict_html("SUPPORTED", "All other classes >= 0.95 at end.", "supported")
+                verdict_html("SUPPORTED", "All other classes >= 0.95 at end.", "supported")
             )
         else:
-            parts.append(_verdict_html("PARTIAL", f"Min: {min(ae.values()):.3f}", "partial"))
+            parts.append(verdict_html("PARTIAL", f"Min: {min(ae.values()):.3f}", "partial"))
 
-    _try(_result7, "Result 7")
+    try_section(result7, "Result 7")
 
-    def _summary() -> None:
-        parts.append(_section("Summary Statistics", anchor="summary-stats"))
-        parts.append(_chart(cp.get("summary_table"), 1000))
+    def summary_section() -> None:
+        parts.append(section("Summary Statistics", anchor="summary-stats"))
+        parts.append(chart(cp.get("summary_table"), 1000))
 
-    _try(_summary, "Summary Statistics")
+    try_section(summary_section, "Summary Statistics")
 
-    def _per_sched() -> None:
-        parts.append(_section("Per-Schedule Detail", anchor="per-sched"))
-        parts.extend(_chart(path) for path in cp.get("per_sched") or [])
+    def per_sched_section() -> None:
+        parts.append(section("Per-Schedule Detail", anchor="per-sched"))
+        parts.extend(chart(path) for path in cp.get("per_sched") or [])
 
-    _try(_per_sched, "Per-Schedule Detail")
+    try_section(per_sched_section, "Per-Schedule Detail")
 
-    def _grad_sim() -> None:
+    def grad_sim() -> None:
         has_gs = any(
             cp.get(k)
             for k in [
@@ -692,7 +685,7 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         if not has_gs:
             return
         parts.append(
-            _section("Gradient Cosine Similarity: Special vs Other Classes", anchor="grad-sim")
+            section("Gradient Cosine Similarity: Special vs Other Classes", anchor="grad-sim")
         )
         parts.append(
             "<p>Cosine similarity between the full-parameter gradient vectors computed on burst-class "  # noqa: E501
@@ -707,20 +700,20 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         ]:
             if cp.get(key):
                 parts.append(f"<h3>{title}</h3>")
-                parts.append(_chart(cp[key], w))
+                parts.append(chart(cp[key], w))
         if cp.get("grad_cosine_rate"):
             parts.append("<h3>Rate of Change</h3>")
-            parts.append(_chart(cp["grad_cosine_rate"]))
+            parts.append(chart(cp["grad_cosine_rate"]))
         if cp.get("grad_cosine_vs_auc"):
             parts.append("<h3>Gradient Alignment vs Forgetting Resistance</h3>")
-            parts.append(_chart(cp["grad_cosine_vs_auc"], 800))
+            parts.append(chart(cp["grad_cosine_vs_auc"], 800))
         if cp.get("grad_cosine_per_seed"):
             parts.append("<h3>Per-Seed Traces</h3>")
-            parts.extend(_chart(p_) for p_ in cp["grad_cosine_per_seed"])
+            parts.extend(chart(p_) for p_ in cp["grad_cosine_per_seed"])
 
-    _try(_grad_sim, "Gradient Cosine Similarity")
+    try_section(grad_sim, "Gradient Cosine Similarity")
 
-    def _layer_grad_sim() -> None:
+    def layer_grad_sim() -> None:
         has_layer = any(
             cp.get(k)
             for k in [
@@ -734,7 +727,7 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         )
         if not has_layer:
             return
-        parts.append(_section("Per-Layer Gradient Cosine Similarity", anchor="layer-grad-sim"))
+        parts.append(section("Per-Layer Gradient Cosine Similarity", anchor="layer-grad-sim"))
         parts.append(
             "<p>Same burst-vs-other gradient cosine similarity, computed independently "
             "for each layer group. Reveals which parts of the network show the strongest "
@@ -742,23 +735,23 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         )
         if cp.get("layer_cossim_end_burst_bars"):
             parts.append("<h3>End-of-Burst: All Layers x All Schedules</h3>")
-            parts.append(_chart(cp["layer_cossim_end_burst_bars"], 1000))
+            parts.append(chart(cp["layer_cossim_end_burst_bars"], 1000))
         if cp.get("layer_cossim_layer_sched"):
             parts.append("<h3>Layer x Schedule Heatmaps</h3>")
-            parts.extend(_chart(p_, 900) for p_ in cp["layer_cossim_layer_sched"] or [])
+            parts.extend(chart(p_, 900) for p_ in cp["layer_cossim_layer_sched"] or [])
         if cp.get("layer_cossim_heatmap"):
             parts.append("<h3>Layer x Step Heatmaps</h3>")
-            parts.extend(_chart(p_, 1000) for p_ in cp["layer_cossim_heatmap"] or [])
+            parts.extend(chart(p_, 1000) for p_ in cp["layer_cossim_heatmap"] or [])
         if cp.get("layer_cossim_change"):
             parts.append("<h3>Rate-of-Change Heatmaps</h3>")
-            parts.extend(_chart(p_, 1000) for p_ in cp["layer_cossim_change"] or [])
+            parts.extend(chart(p_, 1000) for p_ in cp["layer_cossim_change"] or [])
         if cp.get("layer_cossim_overlay"):
             parts.append("<h3>Per-Schedule Layer Overlays</h3>")
-            parts.extend(_chart(p_, 900) for p_ in cp["layer_cossim_overlay"] or [])
+            parts.extend(chart(p_, 900) for p_ in cp["layer_cossim_overlay"] or [])
 
-    _try(_layer_grad_sim, "Per-Layer Gradient Cosine Similarity")
+    try_section(layer_grad_sim, "Per-Layer Gradient Cosine Similarity")
 
-    def _pairwise_evo() -> None:
+    def pairwise_evo() -> None:
         has_pw = (
             cp.get("pairwise_evo_by_metric")
             or cp.get("pairwise_evo_per_schedule")
@@ -766,41 +759,41 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         )
         if not has_pw:
             return
-        parts.append(_section("Pairwise Gradient Similarity", anchor="pairwise-grad"))
+        parts.append(section("Pairwise Gradient Similarity", anchor="pairwise-grad"))
         parts.append(
             "<p>Tasks grouped by which function sits at the burst position. "
             "BURST = all burst-class tasks; O_F{i} = other-class tasks grouped by function at burst position; "  # noqa: E501
             "ALL_OTHER = all other tasks; ALL_DATA = everything.</p>"
         )
         if cp.get("pairwise_evo_by_metric"):
-            parts.extend(_chart(p_) for p_ in cp["pairwise_evo_by_metric"] or [])
+            parts.extend(chart(p_) for p_ in cp["pairwise_evo_by_metric"] or [])
         if cp.get("pairwise_evo_per_schedule"):
-            parts.append(_chart(cp["pairwise_evo_per_schedule"], 1000))
+            parts.append(chart(cp["pairwise_evo_per_schedule"], 1000))
         if cp.get("pairwise_heatmaps"):
             parts.append("<h3>Pairwise Heatmaps at Key Steps</h3>")
-            parts.extend(_chart(p_, 700) for p_ in cp["pairwise_heatmaps"] or [])
+            parts.extend(chart(p_, 700) for p_ in cp["pairwise_heatmaps"] or [])
 
-    _try(_pairwise_evo, "Pairwise Gradient Similarity")
+    try_section(pairwise_evo, "Pairwise Gradient Similarity")
 
-    def _probes() -> None:
+    def probes() -> None:
         has_probes = (
             cp.get("probe_dynamics") or cp.get("probe_heatmaps") or cp.get("probe_layer_schedule")
         )
         if not has_probes:
             return
-        parts.append(_section("Linear Probes: Other vs Special Representations", anchor="probes"))
+        parts.append(section("Linear Probes: Other vs Special Representations", anchor="probes"))
         if cp.get("probe_dynamics"):
             parts.append("<h3>Probe Accuracy Over Training</h3>")
-            parts.append(_chart(cp["probe_dynamics"]))
+            parts.append(chart(cp["probe_dynamics"]))
         if cp.get("probe_layer_schedule"):
-            parts.extend(_chart(p_) for p_ in cp["probe_layer_schedule"])
+            parts.extend(chart(p_) for p_ in cp["probe_layer_schedule"])
         if cp.get("probe_heatmaps"):
             parts.append("<h3>Probe Heatmaps</h3>")
-            parts.extend(_chart(p_) for p_ in cp["probe_heatmaps"])
+            parts.extend(chart(p_) for p_ in cp["probe_heatmaps"])
 
-    _try(_probes, "Probes")
+    try_section(probes, "Probes")
 
-    def _adl() -> None:
+    def adl() -> None:
         has_adl = any(
             cp.get(k)
             for k in [
@@ -813,7 +806,7 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         )
         if not has_adl:
             return
-        parts.append(_section("Activation Difference Lens (ADL)", anchor="adl"))
+        parts.append(section("Activation Difference Lens (ADL)", anchor="adl"))
         parts.append(
             "<p>Measures the global activation bias introduced by the burst phase. "
             "Logit Lens readability tests whether the bias encodes burst-relevant tokens (wrapper hypothesis). "  # noqa: E501
@@ -828,35 +821,35 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
         ]:
             if cp.get(key):
                 parts.append(f"<h3>{title}</h3>")
-                parts.append(_chart(cp[key], 900))
+                parts.append(chart(cp[key], 900))
 
-    _try(_adl, "ADL")
+    try_section(adl, "ADL")
 
     # Unified / Extended / Basin analysis charts
     if analysis_charts:
 
-        def _analysis_section(key: str, title: str, anchor: str) -> None:
+        def analysis_section(key: str, title: str, anchor: str) -> None:
             pairs = analysis_charts.get(key, [])
             if not pairs:
                 return
-            parts.append(_section(title, anchor=anchor))
+            parts.append(section(title, anchor=anchor))
             for chart_title, path in pairs:
                 parts.append(f"<h3>{chart_title}</h3>")
-                parts.append(_chart(path, 1000))
+                parts.append(chart(path, 1000))
 
-        _try(
-            lambda: _analysis_section("unified", "Unified Analysis", "unified"), "Unified Analysis"
+        try_section(
+            lambda: analysis_section("unified", "Unified Analysis", "unified"), "Unified Analysis"
         )
-        _try(
-            lambda: _analysis_section("extended", "Extended Metrics", "extended"),
+        try_section(
+            lambda: analysis_section("extended", "Extended Metrics", "extended"),
             "Extended Metrics",
         )
-        _try(
-            lambda: _analysis_section("basin", "Basin Geometry Metrics", "basin"), "Basin Geometry"
+        try_section(
+            lambda: analysis_section("basin", "Basin Geometry Metrics", "basin"), "Basin Geometry"
         )
 
-    def _conclusions() -> None:
-        parts.append(_section("Conclusions", anchor="conclusions"))
+    def conclusions() -> None:
+        parts.append(section("Conclusions", anchor="conclusions"))
         parts.append("<ul>")
         for b, t in [
             ("Acquisition:", "All schedules acquire special class (peak ~ 1.0)."),
@@ -870,7 +863,7 @@ def build(rd: Path, res: list, cfg: dict, cp: dict, analysis_charts: dict | None
             parts.append(f"<li><b>{b}</b> {t}</li>")
         parts.append("</ul>")
 
-    _try(_conclusions, "Conclusions")
+    try_section(conclusions, "Conclusions")
 
     parts.append("</body></html>")
 
@@ -901,8 +894,6 @@ def main() -> None:
 
     rd = args.run_dir or sorted(Path("data").glob("burst_d*"))[-1]
     rd = Path(rd)
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
-
     cfg_path, logs_dir, _ = resolve_run_paths(rd)
 
     pkl_path = logs_dir / "all_results.pkl"
@@ -937,16 +928,15 @@ def main() -> None:
 
     analysis_charts = None
     if args.full:
-        analysis_charts = _collect_analysis_charts(rd, n_seeds=args.n_seeds)
+        analysis_charts = collect_analysis_charts(rd, n_seeds=args.n_seeds)
 
-    gs_records = load_grad_sim_data(rd)
+    gs_records = load_grad_sim_records(rd)
 
     build(rd, results, cfg, cp, analysis_charts=analysis_charts)
 
-    txt = _build_txt(rd, results, cfg, cp, gs_records, analysis_charts=analysis_charts)
+    txt = build_txt(rd, results, cfg, cp, gs_records, analysis_charts=analysis_charts)
     txt_path = rd / "results" / "burst_report.txt"
     txt_path.write_text(txt)
-
 
 
 if __name__ == "__main__":

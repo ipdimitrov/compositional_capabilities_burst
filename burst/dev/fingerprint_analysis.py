@@ -41,32 +41,30 @@ from typing import TYPE_CHECKING
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import numpy as np
+import plotly.graph_objects as go
 import torch
 import torch.nn.functional as F
+from plotly.subplots import make_subplots
 
 from burst.config import (
     parse_run_config,
 )
 from burst.core.activations import collect_activations_KPTN
-from burst.core.train_utils import load_net
+from burst.core.train_utils import (
+    DEVICE,
+    burst_token_ids,
+    free_gen_acc,
+    load_net,
+    resolve_run_paths,
+    sched_order,
+)
+from burst.core.train_utils import (
+    sched_color as color,
+)
 from burst.dev.plot_utils import save_png
 
 if TYPE_CHECKING:
     from net.nanogpt import nanoGPT
-
-from burst.core.train_utils import DEVICE
-from burst.dev._shared import (
-    burst_token_ids as _burst_token_ids,
-)
-from burst.dev._shared import (
-    free_gen_acc as _free_gen_acc,
-)
-from burst.dev._shared import (
-    sched_color as _color,
-)
-from burst.dev._shared import (
-    sched_order as _sched_order,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -262,9 +260,9 @@ def steering_experiment(  # noqa: PLR0913
             handle = net.transformer.h[steer_layer - 1].register_forward_hook(_steer_hook)
 
         try:
-            burst_on_other = _measure_burst_acc_on_other(net, other_docs, burst_docs, prompt_len)
-            other_on_other = _free_gen_acc(net, other_docs, prompt_len)
-            burst_on_burst = _free_gen_acc(net, burst_docs, prompt_len)
+            burst_on_other = measure_burst_acc_on_other(net, other_docs, burst_docs, prompt_len)
+            other_on_other = free_gen_acc(net, other_docs, prompt_len)
+            burst_on_burst = free_gen_acc(net, burst_docs, prompt_len)
         finally:
             handle.remove()
 
@@ -283,7 +281,7 @@ def steering_experiment(  # noqa: PLR0913
 
 
 @torch.no_grad()
-def _measure_burst_acc_on_other(
+def measure_burst_acc_on_other(
     net: nanoGPT,
     other_docs_BL: np.ndarray,
     burst_docs_BL: np.ndarray,
@@ -368,9 +366,6 @@ def analyse_run(  # noqa: C901, PLR0915
 ) -> dict:
     """Run Logit Lens + Steering analysis on a single run directory."""
     logger.info("Fingerprint analysis: %s", run_dir.name)
-
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
-
     cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
         run_cfg = json.load(f)
@@ -432,7 +427,7 @@ def analyse_run(  # noqa: C901, PLR0915
                 continue
 
             cfg = r["config"]
-            burst_ids = _burst_token_ids(cfg, n_a, depth)
+            burst_ids = burst_token_ids(cfg, n_a, depth)
 
             pre_step = available[0]
             peak_step = min(available, key=lambda x: abs(x - (T - 1)))
@@ -614,9 +609,6 @@ _METRIC_DESCRIPTIONS = {
 
 def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, PLR0912, PLR0915
     """Build an interactive HTML dashboard from fingerprint analyses."""
-    import plotly.graph_objects as go  # noqa: PLC0415
-    from plotly.subplots import make_subplots  # noqa: PLC0415
-
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -635,7 +627,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         ll = analysis.get("logit_lens", {})
-        schedules = sorted(ll.keys(), key=_sched_order)
+        schedules = sorted(ll.keys(), key=sched_order)
         if not schedules:
             continue
 
@@ -689,7 +681,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         ll = analysis.get("logit_lens", {})
-        schedules = sorted(ll.keys(), key=_sched_order)
+        schedules = sorted(ll.keys(), key=sched_order)
         if not schedules:
             continue
 
@@ -700,7 +692,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                     x=schedules,
                     y=[ll[s][method]["overall_readability"] for s in schedules],
                     name=name,
-                    marker_color=[_color(s) for s in schedules],
+                    marker_color=[color(s) for s in schedules],
                     opacity=1.0 if method == "with_ln" else 0.5,
                 )
             )
@@ -724,7 +716,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         ll = analysis.get("logit_lens", {})
-        schedules = sorted(ll.keys(), key=_sched_order)
+        schedules = sorted(ll.keys(), key=sched_order)
         if not schedules:
             continue
 
@@ -771,7 +763,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         ll = analysis.get("logit_lens", {})
-        schedules = sorted(ll.keys(), key=_sched_order)
+        schedules = sorted(ll.keys(), key=sched_order)
         if not schedules:
             continue
 
@@ -818,7 +810,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         st = analysis.get("steering", {})
-        schedules = sorted(st.keys(), key=_sched_order)
+        schedules = sorted(st.keys(), key=sched_order)
         if not schedules:
             continue
 
@@ -834,7 +826,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
 
         for sched in schedules:
             d = st[sched]
-            c = _color(sched)
+            c = color(sched)
             fig.add_trace(
                 go.Scatter(
                     x=d["alphas"],
@@ -893,7 +885,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         sls = analysis.get("steering_layer_sweep", {})
-        schedules = sorted(sls.keys(), key=_sched_order)
+        schedules = sorted(sls.keys(), key=sched_order)
         if not schedules:
             continue
 
@@ -907,7 +899,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         )
         for sched in schedules:
             d = sls[sched]
-            c = _color(sched)
+            c = color(sched)
             layer_labels = [f"L{k}" for k in d["layers"]]
             fig.add_trace(
                 go.Scatter(
@@ -953,12 +945,12 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
         run_name = analysis["run_name"]
         ll = analysis.get("logit_lens", {})
         st = analysis.get("steering", {})
-        schedules = sorted(set(ll.keys()) | set(st.keys()), key=_sched_order)
+        schedules = sorted(set(ll.keys()) | set(st.keys()), key=sched_order)
         if not schedules:
             continue
 
         burst_pcts = [int(s.replace("burst_", "")) for s in schedules]
-        colors = [_color(s) for s in schedules]
+        colors = [color(s) for s in schedules]
 
         fig = make_subplots(
             rows=1,
@@ -1037,7 +1029,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
     for analysis in analyses:
         run_name = analysis["run_name"]
         sls = analysis.get("steering_layer_sweep", {})
-        schedules = sorted(sls.keys(), key=_sched_order)
+        schedules = sorted(sls.keys(), key=sched_order)
         if not schedules:
             continue
 
@@ -1050,7 +1042,7 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
                     x=layer_labels,
                     y=d["mean_delta_norms"],
                     name=sched,
-                    marker_color=_color(sched),
+                    marker_color=color(sched),
                 )
             )
         fig.update_layout(
@@ -1182,16 +1174,18 @@ def make_dashboard(analyses: list[dict], out_dir: Path) -> None:  # noqa: C901, 
 # ---------------------------------------------------------------------------
 
 
-def _is_valid_run_dir(d: Path) -> bool:
+def is_valid_run_dir(d: Path) -> bool:
+    """Check if *d* contains results and checkpoints."""
     has_results = (d / "all_results.pkl").exists() or (d / "logs" / "all_results.pkl").exists()
     ckpt_dir = d / "checkpoints" if (d / "checkpoints").exists() else d / "logs" / "checkpoints"
     has_ckpts = ckpt_dir.exists() and any(ckpt_dir.iterdir())
     return has_results and has_ckpts
 
 
-def _find_all_run_dirs(data_root: Path) -> list[Path]:
+def find_all_run_dirs(data_root: Path) -> list[Path]:
+    """Return all valid burst run directories under *data_root*."""
     candidates = sorted(p for p in data_root.iterdir() if p.is_dir() and ("burst_" in p.name))
-    return [p for p in candidates if _is_valid_run_dir(p)]
+    return [p for p in candidates if is_valid_run_dir(p)]
 
 
 def main() -> None:
@@ -1210,7 +1204,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.all:
-        run_dirs = _find_all_run_dirs(args.data_root)
+        run_dirs = find_all_run_dirs(args.data_root)
         if not run_dirs:
             logger.info("No valid run directories found under %s", args.data_root)
             return

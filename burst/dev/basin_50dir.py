@@ -40,12 +40,17 @@ from burst.config import (
     CLASS_OTHER,
     parse_run_config,
 )
-from burst.core.train_utils import load_net, resolve_run_paths
+from burst.core.train_utils import ckpt_files, load_net, resolve_run_paths
 
 logger = logging.getLogger(__name__)
 
-from burst.core.train_utils import DEVICE  # noqa: E402
-from burst.dev._shared import cross_entropy_loss as _cross_entropy_loss  # noqa: E402
+from burst.core.train_utils import (  # noqa: E402
+    DEVICE,
+    cross_entropy_loss,
+    sched_color,
+    sched_label,
+    sched_order,
+)
 
 _rng = np.random.default_rng()
 
@@ -56,14 +61,10 @@ N_EVAL_DOCS = 128
 _MIN_FILTER_DIM = 2
 
 
-from burst.dev._shared import sched_color as _color  # noqa: E402
-from burst.dev._shared import sched_label as _label  # noqa: E402
-from burst.dev._shared import sched_order as _sched_order  # noqa: E402
-
-
-def _filter_normalise(
+def filter_normalise(
     direction: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]
 ) -> dict[str, torch.Tensor]:
+    """Filter-normalise a direction vector by the reference state dict norms."""
     normed = {}
     for name, d in direction.items():
         ref = reference[name].float()
@@ -102,7 +103,7 @@ def compute_one_seed(  # noqa: PLR0913
     other_all: list[list[float]] = []
 
     for _ in range(n_directions):
-        direction = _filter_normalise(
+        direction = filter_normalise(
             {k: torch.randn_like(v) for k, v in base_sd.items()},
             base_sd,
         )
@@ -115,8 +116,8 @@ def compute_one_seed(  # noqa: PLR0913
                 for k in base_sd
             }
             net.load_state_dict(perturbed)
-            burst_row.append(_cross_entropy_loss(net, burst_eval))
-            other_row.append(_cross_entropy_loss(net, other_eval))
+            burst_row.append(cross_entropy_loss(net, burst_eval))
+            other_row.append(cross_entropy_loss(net, other_eval))
 
         burst_all.append(burst_row)
         other_all.append(other_row)
@@ -127,15 +128,10 @@ def compute_one_seed(  # noqa: PLR0913
     return burst_all, other_all
 
 
-def _ckpt_files(ckpt_dir: Path) -> dict[int, Path]:
-    return {
-        int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")
-    }
-
-
-def _style(
+def style(
     ax: plt.Axes, xl: str = "", yl: str = "", t: str = ""
 ) -> None:
+    """Apply standard axis labels and title styling."""
     ax.set_xlabel(xl, fontsize=11, fontweight="bold")
     ax.set_ylabel(yl, fontsize=11, fontweight="bold")
     if t:
@@ -150,7 +146,7 @@ def plot_mean_and_variance(
     results: dict, out_dir: Path, n_directions: int
 ) -> None:
     """Plot mean and variance loss curves across random directions."""
-    schedules = sorted(results.keys(), key=_sched_order)
+    schedules = sorted(results.keys(), key=sched_order)
 
     for loss_type in [CLASS_BURST, CLASS_OTHER]:
         key = f"{loss_type}_losses"
@@ -166,17 +162,17 @@ def plot_mean_and_variance(
             arr = np.array(d[key])
             ax_mag.plot(
                 epsilons, arr.mean(axis=0),
-                color=_color(sched), lw=2, label=_label(sched),
+                color=sched_color(sched), lw=2, label=sched_label(sched),
             )
             ax_var.plot(
                 epsilons, arr.var(axis=0),
-                color=_color(sched), lw=2, label=_label(sched),
+                color=sched_color(sched), lw=2, label=sched_label(sched),
             )
 
         title_suffix = (
             f"({loss_type}) Across {n_directions} Random Directions"
         )
-        _style(
+        style(
             ax_mag, "e (perturbation)", "Mean Loss",
             f"Loss Basin: Mean Loss {title_suffix}",
         )
@@ -188,7 +184,7 @@ def plot_mean_and_variance(
         )
         plt.close(fig_mag)
 
-        _style(
+        style(
             ax_var, "e (perturbation)", "Variance of Loss",
             f"Loss Basin: Variance {title_suffix}",
         )
@@ -210,7 +206,7 @@ def plot_sharpness(
     minus loss at center. Average over directions per seed, then show
     mean +/- 95% CI across seeds.
     """
-    schedules = sorted(results.keys(), key=_sched_order)
+    schedules = sorted(results.keys(), key=sched_order)
     epsilons = np.array(results[schedules[0]]["epsilons"])
     center_idx = len(epsilons) // 2
 
@@ -268,10 +264,10 @@ def plot_sharpness(
     ax.set_yscale("log")
     ax.set_xticks(xs)
     ax.set_xticklabels(
-        [_label(s) for s in schedules],
+        [sched_label(s) for s in schedules],
         fontsize=9, rotation=30, ha="right",
     )
-    _style(
+    style(
         ax, "",
         "Sharpness (max - center loss, log scale)",
         f"Basin Sharpness: Burst vs Other"
@@ -332,7 +328,9 @@ def main() -> None:  # noqa: C901, PLR0915
         all_results = pickle.load(f)  # noqa: S301
 
     ckpt_root = logs_dir / "checkpoints"
-    assert ckpt_root.exists(), f"No checkpoints at {ckpt_root}"  # noqa: S101
+    if not ckpt_root.exists():
+        msg = f"No checkpoints at {ckpt_root}"
+        raise FileNotFoundError(msg)
 
     epsilons = np.linspace(
         -args.max_epsilon, args.max_epsilon, args.n_points,
@@ -342,7 +340,7 @@ def main() -> None:  # noqa: C901, PLR0915
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
 
     work_items: list[tuple[str, int, str, dict]] = []
     for sched in schedules:
@@ -350,7 +348,7 @@ def main() -> None:  # noqa: C901, PLR0915
             ckpt_dir = ckpt_root / r["label"]
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
             T = r["config"]["total_steps"]

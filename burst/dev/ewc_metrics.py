@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import plotly.graph_objects as go
 import torch
 import torch.nn.functional as F
 
@@ -40,14 +41,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from burst.config import SCHED_COLORS, parse_run_config
 from burst.core.metrics.gradients import _layer_groups
 from burst.core.train_utils import DEVICE, load_net, resolve_run_paths
-from burst.dev.plot_utils import save_png as _save_png
+from burst.dev.plot_utils import save_png
 
 logger = logging.getLogger(__name__)
 _rng = np.random.default_rng()
 
 
-from burst.dev._shared import ckpt_files as _ckpt_files  # noqa: E402
-from burst.dev._shared import sched_order as _sched_order  # noqa: E402
+from burst.core.train_utils import (  # noqa: E402
+    ckpt_files,
+    sched_order,
+)
 
 
 def compute_diagonal_fisher(
@@ -138,7 +141,7 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
         logger.info("Computing Fisher at pretrain checkpoint...")
     else:
         first_label = run_cfg["jobs"][0]["label"]
-        first_files = _ckpt_files(ckpt_root / first_label)
+        first_files = ckpt_files(ckpt_root / first_label)
         if not first_files:
             logger.info("No checkpoints found — skipping EWC.")
             return {}
@@ -164,7 +167,7 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
     layer_names = [n for n, _ in layer_groups]
     per_schedule: dict[str, dict] = {}
 
-    for sched in sorted(jobs_by_schedule, key=_sched_order):
+    for sched in sorted(jobs_by_schedule, key=sched_order):
         total_Ds: list[float] = []
         layer_Ds: dict[str, list[float]] = {}
         seeds_done = 0
@@ -173,7 +176,7 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
             if seeds_done >= n_seeds:
                 break
             label = r["label"]
-            files = _ckpt_files(ckpt_root / label)
+            files = ckpt_files(ckpt_root / label)
             if not files:
                 continue
 
@@ -211,20 +214,18 @@ def run_ewc_analysis(  # noqa: C901, PLR0915
 
 def make_ewc_plots(result: dict, out_dir: Path) -> None:
     """Generate EWC displacement plots."""
-    import plotly.graph_objects as go  # noqa: PLC0415
-
     out_dir.mkdir(parents=True, exist_ok=True)
     per_schedule = result.get("per_schedule", {})
     run_name = result.get("run_name", "")
     if not per_schedule:
         return
 
-    schedules = sorted(per_schedule.keys(), key=_sched_order)
+    schedules = sorted(per_schedule.keys(), key=sched_order)
     colors = [SCHED_COLORS.get(s, "#888888") for s in schedules]
     layer_names = next(iter(per_schedule.values()), {}).get("layer_names", [])
 
     def _save(fig: object, name: str) -> None:
-        _save_png(fig, str(out_dir / name))
+        save_png(fig, str(out_dir / name))
 
     fig = go.Figure(
         go.Bar(

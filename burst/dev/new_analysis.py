@@ -48,12 +48,22 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from burst.config import (  # noqa: E402
+from burst.config import (  # noqa: E402, I001
     parse_run_config,
 )
 from burst.core.metrics.gradients import _layer_groups  # noqa: E402
-from burst.core.train_utils import DEVICE, load_net, resolve_run_paths  # noqa: E402
-from burst.dev._shared import cross_entropy_loss as _cross_entropy_loss_shared  # noqa: E402
+from burst.core.train_utils import (  # noqa: E402
+    DEVICE,
+    ckpt_files,
+    cross_entropy_loss as cross_entropy_loss_shared,
+    load_net,
+    resolve_run_paths,
+    sched_color as color,
+    sched_label as label,
+    sched_order,
+)
+from burst.dev.basin_metrics import analyse_run as bm_analyse  # noqa: E402
+from burst.dev.pres_charts import load_grad_sim_data  # noqa: E402
 
 _rng = np.random.default_rng()
 _DIR_NORM_EPS = 1e-10
@@ -61,13 +71,7 @@ _BASIN_FAST_THRESHOLD = 300
 _MIN_SEEDS_FOR_SCATTER = 2
 
 
-from burst.dev._shared import ckpt_files as _ckpt_files  # noqa: E402
-from burst.dev._shared import sched_color as _color  # noqa: E402
-from burst.dev._shared import sched_label as _label  # noqa: E402
-from burst.dev._shared import sched_order as _sched_order  # noqa: E402
-
-
-def _is_nan(v: float) -> bool:
+def is_nan(v: float) -> bool:
     """Check if a value is NaN via self-comparison."""
     return math.isnan(v)
 
@@ -88,7 +92,7 @@ def compute_layerwise_weight_diff(  # noqa: C901
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -103,7 +107,7 @@ def compute_layerwise_weight_diff(  # noqa: C901
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -140,9 +144,7 @@ def compute_layerwise_weight_diff(  # noqa: C901
                             diff_norm += (sd[pn] - pre_sd[pn]).norm().item() ** 2
                     per_layer[name] = float(diff_norm**0.5)
 
-                total_diff = float(
-                    sum((sd[k] - pre_sd[k]).norm().item() ** 2 for k in sd) ** 0.5
-                )
+                total_diff = float(sum((sd[k] - pre_sd[k]).norm().item() ** 2 for k in sd) ** 0.5)
 
                 steps_data.append(
                     {
@@ -179,7 +181,7 @@ def compute_layerwise_activations(  # noqa: C901, PLR0913, PLR0915
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
 
     n_burst = min(n_eval, burst_docs_BL.shape[0])
     n_other = min(n_eval, other_docs_BL.shape[0])
@@ -202,7 +204,7 @@ def compute_layerwise_activations(  # noqa: C901, PLR0913, PLR0915
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -221,37 +223,28 @@ def compute_layerwise_activations(  # noqa: C901, PLR0913, PLR0915
                     name: str, _acts: dict[str, float] = activations
                 ) -> Callable[..., None]:
                     """Create forward hook capturing activation norm."""
+
                     def hook_fn(
-                        _module: nn.Module, _inp: tuple, output: torch.Tensor | tuple,
+                        _module: nn.Module,
+                        _inp: tuple,
+                        output: torch.Tensor | tuple,
                     ) -> None:
                         out = output[0] if isinstance(output, tuple) else output
-                        _acts[name] = (
-                            out.detach().float().norm(dim=-1).mean().item()
-                        )
+                        _acts[name] = out.detach().float().norm(dim=-1).mean().item()
 
                     return hook_fn
 
                 for i, block in enumerate(net.transformer.h):
-                    hooks.append(
-                        block.register_forward_hook(make_hook(f"L{i}"))
-                    )
+                    hooks.append(block.register_forward_hook(make_hook(f"L{i}")))
 
-                burst_t = torch.as_tensor(
-                    burst_eval, dtype=torch.long, device=DEVICE
-                )
-                with torch.amp.autocast(
-                    "cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"
-                ):
+                burst_t = torch.as_tensor(burst_eval, dtype=torch.long, device=DEVICE)
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
                     net(burst_t[:, :-1])
                 layer_norms_burst = dict(activations)
                 activations.clear()
 
-                other_t = torch.as_tensor(
-                    other_eval, dtype=torch.long, device=DEVICE
-                )
-                with torch.amp.autocast(
-                    "cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"
-                ):
+                other_t = torch.as_tensor(other_eval, dtype=torch.long, device=DEVICE)
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
                     net(other_t[:, :-1])
                 layer_norms_other = dict(activations)
 
@@ -280,7 +273,7 @@ def compute_layerwise_activations(  # noqa: C901, PLR0913, PLR0915
 # ---------------------------------------------------------------------------
 
 
-_cross_entropy_loss = _cross_entropy_loss_shared
+cross_entropy_loss = cross_entropy_loss_shared
 
 
 @torch.no_grad()
@@ -303,7 +296,7 @@ def compute_loss_basin_random_directions(  # noqa: PLR0913
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     epsilons = np.linspace(-max_epsilon, max_epsilon, n_points)
 
     n_burst = min(128, burst_docs_BL.shape[0])
@@ -328,7 +321,7 @@ def compute_loss_basin_random_directions(  # noqa: PLR0913
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -349,34 +342,21 @@ def compute_loss_basin_random_directions(  # noqa: PLR0913
             net = load_net(cfg, str(files[peak_step]))
 
             for _d_idx in range(n_directions):
-                direction = {
-                    k: torch.randn_like(v) for k, v in base_sd.items()
-                }
-                dir_flat = torch.cat(
-                    [v.view(-1) for v in direction.values()]
-                )
+                direction = {k: torch.randn_like(v) for k, v in base_sd.items()}
+                dir_flat = torch.cat([v.view(-1) for v in direction.values()])
                 dir_norm = dir_flat.norm()
                 if dir_norm < _DIR_NORM_EPS:
                     continue
-                direction = {
-                    k: v / dir_norm for k, v in direction.items()
-                }
+                direction = {k: v / dir_norm for k, v in direction.items()}
 
                 burst_losses = []
                 other_losses = []
 
                 for eps in epsilons:
-                    perturbed = {
-                        k: (base_sd[k] + eps * direction[k]).to(DEVICE)
-                        for k in base_sd
-                    }
+                    perturbed = {k: (base_sd[k] + eps * direction[k]).to(DEVICE) for k in base_sd}
                     net.load_state_dict(perturbed)
-                    burst_losses.append(
-                        _cross_entropy_loss(net, burst_eval)
-                    )
-                    other_losses.append(
-                        _cross_entropy_loss(net, other_eval)
-                    )
+                    burst_losses.append(cross_entropy_loss(net, burst_eval))
+                    other_losses.append(cross_entropy_loss(net, other_eval))
 
                 all_direction_losses_burst.append(burst_losses)
                 all_direction_losses_other.append(other_losses)
@@ -410,7 +390,7 @@ def compute_weight_norms(
     for r in all_results:
         jobs_by_schedule.setdefault(r["schedule"], []).append(r)
 
-    schedules = sorted(jobs_by_schedule.keys(), key=_sched_order)
+    schedules = sorted(jobs_by_schedule.keys(), key=sched_order)
     results = {}
 
     for sched in schedules:
@@ -425,7 +405,7 @@ def compute_weight_norms(
             ckpt_dir = ckpt_root / label
             if not ckpt_dir.exists():
                 continue
-            files = _ckpt_files(ckpt_dir)
+            files = ckpt_files(ckpt_dir)
             if not files:
                 continue
 
@@ -438,9 +418,7 @@ def compute_weight_norms(
                 map_location="cpu",
                 weights_only=True,
             )
-            total_norm = float(
-                sum(v.float().norm().item() ** 2 for v in sd.values()) ** 0.5
-            )
+            total_norm = float(sum(v.float().norm().item() ** 2 for v in sd.values()) ** 0.5)
             norms.append(total_norm)
             seeds_done += 1
 
@@ -501,11 +479,10 @@ def investigate_grad_rank(run_dir: Path) -> dict:
             issues.append(f"{rec.get('label', '?')}: no grad_rank data")
             continue
         for layer, vals in rank_data.items():
-            nan_count = sum(1 for v in vals if _is_nan(v))
+            nan_count = sum(1 for v in vals if is_nan(v))
             if nan_count > 0:
                 issues.append(
-                    f"{rec.get('label', '?')} {layer}: "
-                    f"{nan_count}/{len(vals)} NaN values"
+                    f"{rec.get('label', '?')} {layer}: {nan_count}/{len(vals)} NaN values"
                 )
 
     return {"records": records, "issues": issues}
@@ -516,8 +493,11 @@ def investigate_grad_rank(run_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _style(
-    ax: mpl.axes.Axes, xl: str = "", yl: str = "", t: str = "",
+def style(  # noqa: D103
+    ax: mpl.axes.Axes,
+    xl: str = "",
+    yl: str = "",
+    t: str = "",
 ) -> None:
     ax.set_xlabel(xl, fontsize=11, fontweight="bold")
     ax.set_ylabel(yl, fontsize=11, fontweight="bold")
@@ -530,11 +510,13 @@ def _style(
 
 
 def plot_layerwise_weight_diff(
-    data: dict, out_dir: Path, _P: int = 0,
+    data: dict,
+    out_dir: Path,
+    _P: int = 0,
 ) -> None:
     """Plot total and per-layer weight differences over training."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    schedules = sorted(data.keys(), key=_sched_order)
+    schedules = sorted(data.keys(), key=sched_order)
 
     fig, ax = plt.subplots(figsize=(14, 7))
     for sched in schedules:
@@ -542,22 +524,14 @@ def plot_layerwise_weight_diff(
         if not seed_data:
             continue
         steps_ref = [d["step"] for d in seed_data[0]]
-        total_diffs = np.array(
-            [[d["total_diff"] for d in sd] for sd in seed_data]
-        )
+        total_diffs = np.array([[d["total_diff"] for d in sd] for sd in seed_data])
         m = total_diffs.mean(axis=0)
         n_s = len(total_diffs)
-        ci = (
-            1.96 * total_diffs.std(axis=0) / np.sqrt(n_s)
-            if n_s > 1
-            else total_diffs.std(axis=0)
-        )
-        ax.plot(steps_ref, m, color=_color(sched), lw=2, label=_label(sched))
-        ax.fill_between(
-            steps_ref, m - ci, m + ci, color=_color(sched), alpha=0.15
-        )
+        ci = 1.96 * total_diffs.std(axis=0) / np.sqrt(n_s) if n_s > 1 else total_diffs.std(axis=0)
+        ax.plot(steps_ref, m, color=color(sched), lw=2, label=label(sched))
+        ax.fill_between(steps_ref, m - ci, m + ci, color=color(sched), alpha=0.15)
 
-    _style(
+    style(
         ax,
         "Step",
         "||W_step - W_pre||_2",
@@ -565,9 +539,7 @@ def plot_layerwise_weight_diff(
     )
     ax.legend(fontsize=9, loc="best")
     fig.tight_layout()
-    fig.savefig(
-        out_dir / "weight_diff_total.png", dpi=150, bbox_inches="tight"
-    )
+    fig.savefig(out_dir / "weight_diff_total.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     for sched in schedules:
@@ -580,9 +552,7 @@ def plot_layerwise_weight_diff(
         fig, ax = plt.subplots(figsize=(14, 7))
         cmap = plt.get_cmap("tab20")
         for li, layer in enumerate(layers):
-            vals = np.array(
-                [[d["per_layer"][layer] for d in sd] for sd in seed_data]
-            )
+            vals = np.array([[d["per_layer"][layer] for d in sd] for sd in seed_data])
             m = vals.mean(axis=0)
             ax.plot(
                 steps_ref,
@@ -592,11 +562,11 @@ def plot_layerwise_weight_diff(
                 label=layer,
             )
 
-        _style(
+        style(
             ax,
             "Step",
             "||W_layer - W_pre_layer||_2",
-            f"{_label(sched)}: Per-Layer Weight Difference",
+            f"{label(sched)}: Per-Layer Weight Difference",
         )
         ax.legend(fontsize=7, loc="best", ncol=2)
         fig.tight_layout()
@@ -611,7 +581,7 @@ def plot_layerwise_weight_diff(
 def plot_layerwise_activations(data: dict, out_dir: Path) -> None:
     """Plot per-layer activation norms over training."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    schedules = sorted(data.keys(), key=_sched_order)
+    schedules = sorted(data.keys(), key=sched_order)
 
     for data_type, data_key in [
         ("burst", "burst_norms"),
@@ -625,26 +595,16 @@ def plot_layerwise_activations(data: dict, out_dir: Path) -> None:
             steps_ref = [d["step"] for d in seed_data[0]]
             all_means = []
             for sd in seed_data:
-                mean_per_step = [
-                    np.mean(list(d[data_key].values())) for d in sd
-                ]
+                mean_per_step = [np.mean(list(d[data_key].values())) for d in sd]
                 all_means.append(mean_per_step)
             arr = np.array(all_means)
             m = arr.mean(axis=0)
             n_s = len(arr)
-            ci = (
-                1.96 * arr.std(axis=0) / np.sqrt(n_s)
-                if n_s > 1
-                else arr.std(axis=0)
-            )
-            ax.plot(
-                steps_ref, m, color=_color(sched), lw=2, label=_label(sched)
-            )
-            ax.fill_between(
-                steps_ref, m - ci, m + ci, color=_color(sched), alpha=0.15
-            )
+            ci = 1.96 * arr.std(axis=0) / np.sqrt(n_s) if n_s > 1 else arr.std(axis=0)
+            ax.plot(steps_ref, m, color=color(sched), lw=2, label=label(sched))
+            ax.fill_between(steps_ref, m - ci, m + ci, color=color(sched), alpha=0.15)
 
-        _style(
+        style(
             ax,
             "Step",
             "Mean Activation Norm",
@@ -673,12 +633,7 @@ def plot_layerwise_activations(data: dict, out_dir: Path) -> None:
             fig, ax = plt.subplots(figsize=(14, 7))
             cmap = plt.get_cmap("tab20")
             for li, layer in enumerate(layers):
-                vals = np.array(
-                    [
-                        [d[data_key].get(layer, 0) for d in sd]
-                        for sd in seed_data
-                    ]
-                )
+                vals = np.array([[d[data_key].get(layer, 0) for d in sd] for sd in seed_data])
                 m = vals.mean(axis=0)
                 ax.plot(
                     steps_ref,
@@ -688,11 +643,11 @@ def plot_layerwise_activations(data: dict, out_dir: Path) -> None:
                     label=layer,
                 )
 
-            _style(
+            style(
                 ax,
                 "Step",
                 "Activation Norm",
-                f"{_label(sched)}: Per-Layer Activation Norm ({data_type})",
+                f"{label(sched)}: Per-Layer Activation Norm ({data_type})",
             )
             ax.legend(fontsize=7, loc="best", ncol=2)
             fig.tight_layout()
@@ -707,7 +662,7 @@ def plot_layerwise_activations(data: dict, out_dir: Path) -> None:
 def plot_loss_basin(data: dict, out_dir: Path) -> None:
     """Plot loss basin magnitude and variance charts."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    schedules = sorted(data.keys(), key=_sched_order)
+    schedules = sorted(data.keys(), key=sched_order)
 
     for loss_type in ["burst", "other"]:
         key = f"{loss_type}_losses"
@@ -727,19 +682,19 @@ def plot_loss_basin(data: dict, out_dir: Path) -> None:
             ax_mag.plot(
                 epsilons,
                 mean_per_eps,
-                color=_color(sched),
+                color=color(sched),
                 lw=2,
-                label=_label(sched),
+                label=label(sched),
             )
             ax_var.plot(
                 epsilons,
                 var_per_eps,
-                color=_color(sched),
+                color=color(sched),
                 lw=2,
-                label=_label(sched),
+                label=label(sched),
             )
 
-        _style(
+        style(
             ax_mag,
             "eps (perturbation)",
             "Mean Loss",
@@ -758,7 +713,7 @@ def plot_loss_basin(data: dict, out_dir: Path) -> None:
         )
         plt.close(fig_mag)
 
-        _style(
+        style(
             ax_var,
             "eps (perturbation)",
             "Variance of Loss",
@@ -777,17 +732,13 @@ def plot_loss_basin(data: dict, out_dir: Path) -> None:
 def plot_loss_basin_per_schedule(data: dict, out_dir: Path) -> None:
     """Plot per-schedule chart: burst variance vs other variance."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    schedules = sorted(data.keys(), key=_sched_order)
+    schedules = sorted(data.keys(), key=sched_order)
 
     for sched in schedules:
         d = data[sched]
         epsilons = d["epsilons"]
-        burst_arr = (
-            np.array(d["burst_losses"]) if d["burst_losses"] else None
-        )
-        other_arr = (
-            np.array(d["other_losses"]) if d["other_losses"] else None
-        )
+        burst_arr = np.array(d["burst_losses"]) if d["burst_losses"] else None
+        other_arr = np.array(d["other_losses"]) if d["other_losses"] else None
         if burst_arr is None and other_arr is None:
             continue
 
@@ -809,11 +760,11 @@ def plot_loss_basin_per_schedule(data: dict, out_dir: Path) -> None:
                 label="Other data",
             )
 
-        _style(
+        style(
             ax,
             "eps (perturbation)",
             "Variance of Loss",
-            f"{_label(sched)}: Variance Across Directions (burst vs other)",
+            f"{label(sched)}: Variance Across Directions (burst vs other)",
         )
         ax.legend(fontsize=11, loc="best")
         fig.tight_layout()
@@ -828,18 +779,15 @@ def plot_loss_basin_per_schedule(data: dict, out_dir: Path) -> None:
 def plot_weight_norms(data: dict, out_dir: Path) -> None:
     """Plot weight norm bar chart and scatter vs burst percentage."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    schedules = sorted(data.keys(), key=_sched_order)
+    schedules = sorted(data.keys(), key=sched_order)
 
     fig, ax = plt.subplots(figsize=(12, 7))
     xs = np.arange(len(schedules))
     means = [np.mean(data[s]) if data[s] else 0 for s in schedules]
     cis = [
-        1.96 * np.std(data[s]) / np.sqrt(len(data[s]))
-        if len(data[s]) > 1
-        else 0
-        for s in schedules
+        1.96 * np.std(data[s]) / np.sqrt(len(data[s])) if len(data[s]) > 1 else 0 for s in schedules
     ]
-    colors = [_color(s) for s in schedules]
+    colors = [color(s) for s in schedules]
 
     ax.bar(
         xs,
@@ -852,9 +800,7 @@ def plot_weight_norms(data: dict, out_dir: Path) -> None:
         alpha=0.85,
     )
     for i, vals in enumerate(schedules):
-        jit = np.random.default_rng(42).uniform(
-            -0.12, 0.12, len(data[vals])
-        )
+        jit = np.random.default_rng(42).uniform(-0.12, 0.12, len(data[vals]))
         ax.scatter(
             np.full(len(data[vals]), i) + jit,
             data[vals],
@@ -867,20 +813,15 @@ def plot_weight_norms(data: dict, out_dir: Path) -> None:
         )
 
     ax.set_xticks(xs)
-    ax.set_xticklabels(
-        [_label(s) for s in schedules], fontsize=9, rotation=30, ha="right"
-    )
-    _style(
+    ax.set_xticklabels([label(s) for s in schedules], fontsize=9, rotation=30, ha="right")
+    style(
         ax,
         "",
         "||W||_2 (total weight norm at peak burst)",
-        "Weight Norm at Peak Burst by Schedule\n"
-        "(Hypothesis: more burst -> higher norm)",
+        "Weight Norm at Peak Burst by Schedule\n(Hypothesis: more burst -> higher norm)",
     )
     fig.tight_layout()
-    fig.savefig(
-        out_dir / "weight_norm_hypothesis.png", dpi=150, bbox_inches="tight"
-    )
+    fig.savefig(out_dir / "weight_norm_hypothesis.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     burst_pcts = []
@@ -902,9 +843,7 @@ def plot_weight_norms(data: dict, out_dir: Path) -> None:
             except (IndexError, ValueError):
                 continue
             for n in data[s]:
-                ax.scatter(
-                    pct, n, color=_color(s), s=60, edgecolor="black", lw=0.5
-                )
+                ax.scatter(pct, n, color=color(s), s=60, edgecolor="black", lw=0.5)
 
         corr = np.corrcoef(burst_pcts, norm_vals)[0, 1]
         z = np.polyfit(burst_pcts, norm_vals, 1)
@@ -920,7 +859,7 @@ def plot_weight_norms(data: dict, out_dir: Path) -> None:
             va="top",
         )
 
-        _style(
+        style(
             ax,
             "Burst %",
             "||W||_2",
@@ -936,7 +875,9 @@ def plot_weight_norms(data: dict, out_dir: Path) -> None:
 
 
 def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
-    gs_records: list, out_dir: Path, _P: int = 0,
+    gs_records: list,
+    out_dir: Path,
+    _P: int = 0,
 ) -> None:
     """Plot gradient norms (L1, L2, Linf) over time and per layer, correlated with cosim."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -945,7 +886,7 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
     for r in gs_records:
         gs_groups[r["schedule"]].append(r)
 
-    schedules = sorted(gs_groups.keys(), key=_sched_order)
+    schedules = sorted(gs_groups.keys(), key=sched_order)
 
     for norm_type, norm_label in [
         ("burst_norm", "||g_burst||_2"),
@@ -962,9 +903,7 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
             all_vals = []
             for r in runs:
                 gsl = r.get("grad_sim_log", {})
-                proj = gsl.get(
-                    "grad_projection", r.get("grad_projection_log", {})
-                )
+                proj = gsl.get("grad_projection", r.get("grad_projection_log", {}))
                 if not proj or norm_type not in proj:
                     continue
                 steps = gsl.get("step", [])
@@ -977,25 +916,16 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
                 continue
             steps_ref = all_steps[0]
             interp_vals = [
-                np.interp(steps_ref, s, v)
-                for s, v in zip(all_steps, all_vals, strict=True)
+                np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_vals, strict=True)
             ]
             arr = np.array(interp_vals)
             m = arr.mean(axis=0)
             n_s = len(arr)
-            ci = (
-                1.96 * arr.std(axis=0) / np.sqrt(n_s)
-                if n_s > 1
-                else arr.std(axis=0)
-            )
-            ax.plot(
-                steps_ref, m, color=_color(sched), lw=2, label=_label(sched)
-            )
-            ax.fill_between(
-                steps_ref, m - ci, m + ci, color=_color(sched), alpha=0.15
-            )
+            ci = 1.96 * arr.std(axis=0) / np.sqrt(n_s) if n_s > 1 else arr.std(axis=0)
+            ax.plot(steps_ref, m, color=color(sched), lw=2, label=label(sched))
+            ax.fill_between(steps_ref, m - ci, m + ci, color=color(sched), alpha=0.15)
 
-        _style(
+        style(
             ax,
             "Step",
             norm_label,
@@ -1015,9 +945,7 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
         runs = gs_groups[sched]
         for r in runs:
             gsl = r.get("grad_sim_log", {})
-            proj = gsl.get(
-                "grad_projection", r.get("grad_projection_log", {})
-            )
+            proj = gsl.get("grad_projection", r.get("grad_projection_log", {}))
             cosims = gsl.get("burst_vs_other", [])
             burst_norms = proj.get("burst_norm", [])
             if not cosims or not burst_norms:
@@ -1026,13 +954,13 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
             ax.scatter(
                 cosims[:n],
                 burst_norms[:n],
-                color=_color(sched),
+                color=color(sched),
                 s=15,
                 alpha=0.4,
                 edgecolor="none",
             )
 
-    _style(
+    style(
         ax,
         "Cosine Similarity (burst vs other)",
         "||g_burst||_2",
@@ -1044,17 +972,15 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
             [0],
             marker="o",
             color="w",
-            markerfacecolor=_color(s),
+            markerfacecolor=color(s),
             markersize=8,
-            label=_label(s),
+            label=label(s),
         )
         for s in schedules
     ]
     ax.legend(handles=handles, fontsize=9, loc="best")
     fig.tight_layout()
-    fig.savefig(
-        out_dir / "grad_norm_vs_cosim.png", dpi=150, bbox_inches="tight"
-    )
+    fig.savefig(out_dir / "grad_norm_vs_cosim.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(14, 7))
@@ -1074,24 +1000,17 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
             continue
         steps_ref = all_steps[0]
         interp_vals = [
-            np.interp(steps_ref, s, v)
-            for s, v in zip(all_steps, all_cosims, strict=True)
+            np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_cosims, strict=True)
         ]
         arr = np.array(interp_vals)
         m = arr.mean(axis=0)
         n_s = len(arr)
-        ci = (
-            1.96 * arr.std(axis=0) / np.sqrt(n_s)
-            if n_s > 1
-            else arr.std(axis=0)
-        )
-        ax.plot(steps_ref, m, color=_color(sched), lw=2, label=_label(sched))
-        ax.fill_between(
-            steps_ref, m - ci, m + ci, color=_color(sched), alpha=0.15
-        )
+        ci = 1.96 * arr.std(axis=0) / np.sqrt(n_s) if n_s > 1 else arr.std(axis=0)
+        ax.plot(steps_ref, m, color=color(sched), lw=2, label=label(sched))
+        ax.fill_between(steps_ref, m - ci, m + ci, color=color(sched), alpha=0.15)
 
     ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
-    _style(
+    style(
         ax,
         "Step",
         "Cosine Similarity",
@@ -1099,9 +1018,7 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
     )
     ax.legend(fontsize=9, loc="best")
     fig.tight_layout()
-    fig.savefig(
-        out_dir / "cosim_over_time.png", dpi=150, bbox_inches="tight"
-    )
+    fig.savefig(out_dir / "cosim_over_time.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     for sched in schedules:
@@ -1118,9 +1035,7 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
                 steps_ref = np.array(steps)
             for layer, vals in per_layer.items():
                 if len(vals) == len(steps):
-                    layer_data[layer].append(
-                        np.interp(steps_ref, steps, vals)
-                    )
+                    layer_data[layer].append(np.interp(steps_ref, steps, vals))
 
         if not layer_data or steps_ref is None:
             continue
@@ -1140,11 +1055,11 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
             )
 
         ax.axhline(0, color="gray", ls=":", lw=1, alpha=0.5)
-        _style(
+        style(
             ax,
             "Step",
             "Cosine Similarity",
-            f"{_label(sched)}: Per-Layer Cosine Similarity Over Time",
+            f"{label(sched)}: Per-Layer Cosine Similarity Over Time",
         )
         ax.legend(fontsize=7, loc="best", ncol=2)
         fig.tight_layout()
@@ -1157,7 +1072,8 @@ def plot_grad_norms_and_cosim(  # noqa: C901, PLR0912, PLR0915
 
 
 def plot_grad_rank(  # noqa: C901, PLR0912, PLR0915
-    gs_records: list, out_dir: Path,
+    gs_records: list,
+    out_dir: Path,
 ) -> None:
     """Re-plot grad rank from existing data, investigating issues."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1166,7 +1082,7 @@ def plot_grad_rank(  # noqa: C901, PLR0912, PLR0915
     for r in gs_records:
         gs_groups[r["schedule"]].append(r)
 
-    schedules = sorted(gs_groups.keys(), key=_sched_order)
+    schedules = sorted(gs_groups.keys(), key=sched_order)
 
     for sched in schedules:
         runs = gs_groups[sched]
@@ -1182,13 +1098,9 @@ def plot_grad_rank(  # noqa: C901, PLR0912, PLR0915
             if steps_ref is None:
                 steps_ref = np.array(steps)
             for layer, vals in rank_data.items():
-                clean_vals = [
-                    v if not _is_nan(v) else 0.0 for v in vals
-                ]
+                clean_vals = [v if not is_nan(v) else 0.0 for v in vals]
                 if len(clean_vals) == len(steps):
-                    layer_data[layer].append(
-                        np.interp(steps_ref, steps, clean_vals)
-                    )
+                    layer_data[layer].append(np.interp(steps_ref, steps, clean_vals))
 
         if not layer_data or steps_ref is None:
             continue
@@ -1212,18 +1124,15 @@ def plot_grad_rank(  # noqa: C901, PLR0912, PLR0915
                 label=layer,
             )
 
-        _style(
+        style(
             ax,
             "Step",
             "Effective Rank",
-            f"{_label(sched)}: Gradient Effective Rank Per Layer\n"
-            "(NaN values replaced with 0)",
+            f"{label(sched)}: Gradient Effective Rank Per Layer\n(NaN values replaced with 0)",
         )
         ax.legend(fontsize=7, loc="best", ncol=2)
         fig.tight_layout()
-        fig.savefig(
-            out_dir / f"grad_rank_{sched}.png", dpi=150, bbox_inches="tight"
-        )
+        fig.savefig(out_dir / f"grad_rank_{sched}.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(14, 7))
@@ -1242,8 +1151,7 @@ def plot_grad_rank(  # noqa: C901, PLR0912, PLR0915
                 vals = [
                     rank_data[layer][si]
                     for layer in rank_data
-                    if si < len(rank_data[layer])
-                    and not _is_nan(rank_data[layer][si])
+                    if si < len(rank_data[layer]) and not is_nan(rank_data[layer][si])
                 ]
                 per_step_means.append(np.mean(vals) if vals else 0)
             all_steps.append(np.array(steps))
@@ -1253,14 +1161,13 @@ def plot_grad_rank(  # noqa: C901, PLR0912, PLR0915
             continue
         steps_ref = all_steps[0]
         interp_vals = [
-            np.interp(steps_ref, s, v)
-            for s, v in zip(all_steps, all_mean_ranks, strict=True)
+            np.interp(steps_ref, s, v) for s, v in zip(all_steps, all_mean_ranks, strict=True)
         ]
         arr = np.array(interp_vals)
         m = arr.mean(axis=0)
-        ax.plot(steps_ref, m, color=_color(sched), lw=2, label=_label(sched))
+        ax.plot(steps_ref, m, color=color(sched), lw=2, label=label(sched))
 
-    _style(
+    style(
         ax,
         "Step",
         "Mean Effective Rank",
@@ -1268,9 +1175,7 @@ def plot_grad_rank(  # noqa: C901, PLR0912, PLR0915
     )
     ax.legend(fontsize=9, loc="best")
     fig.tight_layout()
-    fig.savefig(
-        out_dir / "grad_rank_mean_all.png", dpi=150, bbox_inches="tight"
-    )
+    fig.savefig(out_dir / "grad_rank_mean_all.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1280,12 +1185,10 @@ def plot_sharpness(loss_surface_data: dict, out_dir: Path) -> None:
     if not loss_surface_data:
         return
 
-    schedules = sorted(loss_surface_data.keys(), key=_sched_order)
+    schedules = sorted(loss_surface_data.keys(), key=sched_order)
     for loss_type in ["burst", "other"]:
         sharpness_key = f"{loss_type}_sharpness"
-        vals = [
-            loss_surface_data[s].get(sharpness_key, 0) for s in schedules
-        ]
+        vals = [loss_surface_data[s].get(sharpness_key, 0) for s in schedules]
         per_seed_key = f"per_seed_{loss_type}_sharpness"
         cis = []
         for s in schedules:
@@ -1297,7 +1200,7 @@ def plot_sharpness(loss_surface_data: dict, out_dir: Path) -> None:
 
         fig, ax = plt.subplots(figsize=(12, 7))
         xs = np.arange(len(schedules))
-        colors = [_color(s) for s in schedules]
+        colors = [color(s) for s in schedules]
         ax.bar(
             xs,
             vals,
@@ -1310,12 +1213,12 @@ def plot_sharpness(loss_surface_data: dict, out_dir: Path) -> None:
         )
         ax.set_xticks(xs)
         ax.set_xticklabels(
-            [_label(s) for s in schedules],
+            [label(s) for s in schedules],
             fontsize=9,
             rotation=30,
             ha="right",
         )
-        _style(
+        style(
             ax,
             "",
             "Sharpness (max - centre loss)",
@@ -1378,9 +1281,7 @@ def main() -> None:  # noqa: PLR0915
     if not args.only_basin_sharpness:
         logger.info("[1/8] Layerwise weight difference...")
         t0 = time.time()
-        wd_data = compute_layerwise_weight_diff(
-            ckpt_root, all_results, n_seeds=args.n_seeds
-        )
+        wd_data = compute_layerwise_weight_diff(ckpt_root, all_results, n_seeds=args.n_seeds)
         plot_layerwise_weight_diff(wd_data, out_dir / "weight_diff", _P=P)
         logger.info("  Done in %.1fs", time.time() - t0)
 
@@ -1420,20 +1321,14 @@ def main() -> None:  # noqa: PLR0915
     if not args.only_basin_sharpness:
         logger.info("[4/8] Weight norm hypothesis...")
         t0 = time.time()
-        wn_data = compute_weight_norms(
-            ckpt_root, all_results, n_seeds=args.n_seeds
-        )
+        wn_data = compute_weight_norms(ckpt_root, all_results, n_seeds=args.n_seeds)
         plot_weight_norms(wn_data, out_dir / "weight_norms")
         logger.info("  Done in %.1fs", time.time() - t0)
 
     logger.info("[5/8] Sharpness (from basin_metrics)...")
     t0 = time.time()
     try:
-        from burst.dev.basin_metrics import analyse_run as bm_analyse  # noqa: PLC0415
-
-        bm_result = bm_analyse(
-            run_dir, n_seeds=args.n_seeds, skip_surface=False
-        )
+        bm_result = bm_analyse(run_dir, n_seeds=args.n_seeds, skip_surface=False)
         ls_data = bm_result.get("loss_surface", {})
         plot_sharpness(ls_data, out_dir / "sharpness")
     except Exception:  # noqa: BLE001
@@ -1443,13 +1338,9 @@ def main() -> None:  # noqa: PLR0915
     if not args.only_basin_sharpness:
         logger.info("[6/8] Gradient norms and cosim...")
         t0 = time.time()
-        from burst.dev.pres_charts import load_grad_sim_data  # noqa: PLC0415
-
         gs_records = load_grad_sim_data(run_dir)
         if gs_records:
-            plot_grad_norms_and_cosim(
-                gs_records, out_dir / "grad_norms", _P=P
-            )
+            plot_grad_norms_and_cosim(gs_records, out_dir / "grad_norms", _P=P)
         logger.info("  Done in %.1fs", time.time() - t0)
 
         logger.info("[7/8] Grad rank investigation...")
@@ -1474,28 +1365,18 @@ def main() -> None:  # noqa: PLR0915
         json.dump(summary, f, indent=2, default=str)
 
     total_time = time.time() - t_total_start
-    logger.info(
-        "All done in %.1fs (%.1f min)", total_time, total_time / 60
-    )
-    logger.info(
-        "Basin took %.1fs for %d directions", basin_time, args.basin_runs
-    )
+    logger.info("All done in %.1fs (%.1f min)", total_time, total_time / 60)
+    logger.info("Basin took %.1fs for %d directions", basin_time, args.basin_runs)
 
     if basin_time < _BASIN_FAST_THRESHOLD:
         suggested = min(
             10000,
             max(
                 1000,
-                int(
-                    args.basin_runs
-                    * _BASIN_FAST_THRESHOLD
-                    / max(basin_time, 1)
-                ),
+                int(args.basin_runs * _BASIN_FAST_THRESHOLD / max(basin_time, 1)),
             ),
         )
-        logger.info(
-            "Basin was fast -- consider scaling to %d directions", suggested
-        )
+        logger.info("Basin was fast -- consider scaling to %d directions", suggested)
 
     logger.info("Results saved to: %s", out_dir)
 

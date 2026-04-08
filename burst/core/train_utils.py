@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import OmegaConf
 
-from burst.config import MIXED_FRACTIONS
+from burst.config import MIXED_FRACTIONS, SCHED_COLORS, SCHED_DISPLAY, SCHEDULE_ORDER
 from burst.rng import get_rng, seed_all
 from net.nanogpt import nanoGPT
 from net.runner import configure_optimizers, phase_lr, reset_optimizer_state, update_phase_lr
@@ -78,7 +78,7 @@ def sample_batch(  # noqa: PLR0913
     parts = []
     sampled_tasks = []
 
-    def _sample_from(pool: dict, ids: list, n: int) -> None:
+    def sample_from(pool: dict, ids: list, n: int) -> None:
         """Sample n documents evenly across task ids from pool."""
         if n == 0:
             return
@@ -91,17 +91,17 @@ def sample_batch(  # noqa: PLR0913
                 parts.append(pool[tid][idx])
                 sampled_tasks.extend([tid] * k)
 
-    _sample_from(target_pool, t_ids, n_target)
-    _sample_from(bg_pool, b_ids, batch_size - n_target)
+    sample_from(target_pool, t_ids, n_target)
+    sample_from(bg_pool, b_ids, batch_size - n_target)
 
     perm = get_rng().permutation(batch_size)
     return np.concatenate(parts)[perm], [sampled_tasks[i] for i in perm]
 
 
-_NET_OMEGACONF_KEYS = ("vocab_size", "context_size", "n_layer", "n_head", "n_embd")
+NET_OMEGACONF_KEYS = ("vocab_size", "context_size", "n_layer", "n_head", "n_embd")
 
 
-def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
+def cross_entropy_logits_BTV_targets_BT(  # noqa: N802
     logits_BTV: torch.Tensor, targets_BT: torch.Tensor
 ) -> torch.Tensor:
     """Compute cross-entropy loss after flattening batch and time dims."""
@@ -110,12 +110,12 @@ def _cross_entropy_logits_BTV_targets_BT(  # noqa: N802
     return F.cross_entropy(logits_bv, targets_b)
 
 
-def _net_cfg(cfg: dict) -> OmegaConf:
+def net_cfg(cfg: dict) -> OmegaConf:
     """Build an OmegaConf for nanoGPT from a flat config dict."""
     return OmegaConf.create(
         {
             "compile": False,
-            **{k: cfg[k] for k in _NET_OMEGACONF_KEYS},
+            **{k: cfg[k] for k in NET_OMEGACONF_KEYS},
             "dropout": 0.0,
             "bias": False,
             "mlp": True,
@@ -125,7 +125,7 @@ def _net_cfg(cfg: dict) -> OmegaConf:
 
 def make_net_bare(cfg: dict) -> nanoGPT:
     """Create an uncompiled nanoGPT on DEVICE."""
-    return nanoGPT(_net_cfg(cfg)).to(DEVICE)
+    return nanoGPT(net_cfg(cfg)).to(DEVICE)
 
 
 def make_net(cfg: dict) -> nanoGPT:
@@ -138,7 +138,7 @@ def make_net(cfg: dict) -> nanoGPT:
 
 def load_net(cfg: dict, ckpt_path: str) -> nanoGPT:
     """Create a nanoGPT and load weights from a checkpoint."""
-    net = nanoGPT(_net_cfg(cfg)).to(DEVICE)
+    net = nanoGPT(net_cfg(cfg)).to(DEVICE)
     net.load_state_dict(torch.load(ckpt_path, map_location=DEVICE, weights_only=True))
     return net
 
@@ -188,7 +188,7 @@ def train_step(  # noqa: PLR0913
     optimizer.zero_grad(set_to_none=True)
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
         logits_BTV = net(inputs_BT)
-        loss = _cross_entropy_logits_BTV_targets_BT(logits_BTV, targets_BT)
+        loss = cross_entropy_logits_BTV_targets_BT(logits_BTV, targets_BT)
     scaler.scale(loss).backward()
     if grad_clip > 0:
         scaler.unscale_(optimizer)
@@ -249,7 +249,7 @@ def retrain_with_callbacks(
     return net
 
 
-def _resolve_split_dir(run_dir: Path, name: str) -> Path:
+def resolve_split_dir(run_dir: Path, name: str) -> Path:
     """Find data/<name>/<run_name>/ (legacy nested) or data/<name>/<run_name>/ (split)."""
     nested = run_dir / name
     split = run_dir.parent / name / run_dir.name
@@ -261,12 +261,12 @@ def _resolve_split_dir(run_dir: Path, name: str) -> Path:
 
 def resolve_results_dir(run_dir: Path) -> Path:
     """Directory for config.json, plots, grad_cosine_sim."""
-    return _resolve_split_dir(run_dir, "results")
+    return resolve_split_dir(run_dir, "results")
 
 
 def resolve_logs_dir(run_dir: Path) -> Path:
     """Directory for all_results.pkl, checkpoints, _data.pkl."""
-    return _resolve_split_dir(run_dir, "logs")
+    return resolve_split_dir(run_dir, "logs")
 
 
 def resolve_run_paths(run_dir: str | Path) -> tuple[Path, Path, Path]:
@@ -317,14 +317,14 @@ def build_probe_docs(
     other_pool = data.gen_pool(data.other_train[: min(16, len(data.other_train))], n_per_task)
     burst_pool = data.gen_pool(data.burst_train, n_per_task)
 
-    def _cat(pool: dict) -> np.ndarray:
+    def cat(pool: dict) -> np.ndarray:
         """Concatenate pool values and pad to doc_len."""
         if not pool:
             return np.zeros((0, doc_len), dtype=np.int64)
         out = np.concatenate(list(pool.values()))
         return pad_to_len(out, doc_len)
 
-    return _cat(other_pool), _cat(burst_pool)
+    return cat(other_pool), cat(burst_pool)
 
 
 def compute_lr_schedule(
@@ -353,3 +353,87 @@ def compute_lr_schedule(
         ]
     )
     return steps, lrs
+
+
+def sched_order(schedule: str) -> int:
+    """Index of *schedule* in ``SCHEDULE_ORDER``."""
+    if schedule not in SCHEDULE_ORDER:
+        msg = f"Unknown schedule: {schedule}"
+        raise ValueError(msg)
+    return SCHEDULE_ORDER.index(schedule)
+
+
+def sched_color(schedule: str) -> str:
+    """Hex color for *schedule* (fallback gray)."""
+    return SCHED_COLORS.get(schedule, "#888888")
+
+
+def sched_label(schedule: str) -> str:
+    """Short display name for *schedule*."""
+    return SCHED_DISPLAY.get(schedule, schedule)
+
+
+def ckpt_files(ckpt_dir: Path) -> dict[int, Path]:
+    """Map training step index to ``step_*.pt`` path under *ckpt_dir*."""
+    return {int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")}
+
+
+def burst_token_ids(cfg: dict, n_a: int, depth: int) -> list[int]:
+    """Token ids for burst function and alphabet values (within vocab)."""
+    n_alphabets = cfg["n_alphabets"]
+    vocab_size = cfg["vocab_size"]
+    special_count = 3
+    alphabet_start = special_count
+    func_start = alphabet_start + n_alphabets
+    burst_func_id = func_start + n_a * depth + 1
+    value_ids = list(range(alphabet_start, alphabet_start + n_alphabets))
+    return [i for i in [burst_func_id, *value_ids] if i < vocab_size]
+
+
+@torch.no_grad()
+def free_gen_acc(net: torch.nn.Module, docs_BL: np.ndarray, prompt_len: int) -> float:
+    """Fraction of sequences where generated last 6 tokens match targets."""
+    if docs_BL.shape[0] == 0:
+        msg = "free_gen_acc called with empty docs"
+        raise ValueError(msg)
+    net.eval()
+    docs_t = torch.as_tensor(docs_BL, dtype=torch.long, device=DEVICE)
+    _b, L = docs_t.shape
+    target_b6 = docs_t[:, -6:]
+    generated = net.generate(docs_t[:, :prompt_len], L - prompt_len)
+    return (generated[:, -6:] == target_b6).all(dim=1).float().mean().item()
+
+
+@torch.no_grad()
+def cross_entropy_loss(net: torch.nn.Module, docs_BL: np.ndarray, max_docs: int = 256) -> float:
+    """Mean CE on up to *max_docs* random docs from *docs_BL*."""
+    if docs_BL.shape[0] == 0:
+        msg = "cross_entropy_loss called with empty docs"
+        raise ValueError(msg)
+    net.eval()
+    n = min(max_docs, docs_BL.shape[0])
+    rng = np.random.default_rng()
+    idx = rng.choice(docs_BL.shape[0], n, replace=False)
+    dat_bl = torch.as_tensor(docs_BL[idx], dtype=torch.long, device=DEVICE)
+    inp_bt, tgt_bt = dat_bl[:, :-1], dat_bl[:, 1:]
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+        logits_btv = net(inp_bt).float()
+    return F.cross_entropy(
+        logits_btv.reshape(-1, logits_btv.size(-1)), tgt_bt.reshape(-1)
+    ).item()
+
+
+def flat_params(net: torch.nn.Module) -> torch.Tensor:
+    """Concatenate all parameters as a single float32 CPU vector."""
+    return torch.cat([p.detach().float().cpu().view(-1) for p in net.parameters()])
+
+
+def mean_ci(values: np.ndarray) -> tuple[float, float]:
+    """Return (mean, 95% CI) for an array of values."""
+    if values.size == 0:
+        return float("nan"), float("nan")
+    mean = float(np.mean(values))
+    if values.size == 1:
+        return mean, 0.0
+    ci = float(1.96 * np.std(values) / np.sqrt(values.size))
+    return mean, ci

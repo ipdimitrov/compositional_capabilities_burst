@@ -5,6 +5,11 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+import matplotlib as mpl
+
+mpl.use("Agg")
+import matplotlib.pyplot as plt
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -25,14 +30,12 @@ def _plotly_to_mpl_color(
 
 
 def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
-    fig_plotly: Figure, path: str, width: int = 1200, height: int = 600,
+    fig_plotly: Figure,
+    path: str,
+    width: int = 1200,
+    height: int = 600,
 ) -> None:
     """Render a Plotly figure to PNG via matplotlib."""
-    import matplotlib as mpl  # noqa: PLC0415
-
-    mpl.use("Agg")
-    import matplotlib.pyplot as plt  # noqa: PLC0415
-
     fig_data = fig_plotly.to_dict()
     traces = fig_data.get("data", [])
     layout = fig_data.get("layout", {})
@@ -69,14 +72,10 @@ def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
             elif "markers" in mode:
                 ax.scatter(x, y, s=30, zorder=5, **kwargs)
         elif trace_type == "bar":
-            bar_colors = (
-                marker_info.get("color") if isinstance(marker_info, dict) else None
-            )
+            bar_colors = marker_info.get("color") if isinstance(marker_info, dict) else None
             if isinstance(bar_colors, list):
                 kwargs.pop("color", None)
-                kwargs["color"] = [
-                    _plotly_to_mpl_color(c) for c in bar_colors[: len(x)]
-                ]
+                kwargs["color"] = [_plotly_to_mpl_color(c) for c in bar_colors[: len(x)]]
             ax.bar(x, y, alpha=0.8, **kwargs)
         elif trace_type == "heatmap":
             pass
@@ -85,15 +84,11 @@ def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
     yaxis = layout.get("yaxis", {})
     if isinstance(xaxis, dict):
         ax.set_xlabel(
-            xaxis.get("title", {}).get("text", "")
-            if isinstance(xaxis.get("title"), dict)
-            else ""
+            xaxis.get("title", {}).get("text", "") if isinstance(xaxis.get("title"), dict) else ""
         )
     if isinstance(yaxis, dict):
         ax.set_ylabel(
-            yaxis.get("title", {}).get("text", "")
-            if isinstance(yaxis.get("title"), dict)
-            else ""
+            yaxis.get("title", {}).get("text", "") if isinstance(yaxis.get("title"), dict) else ""
         )
 
     ax.set_title(title_text[:120], fontsize=10, wrap=True)
@@ -107,7 +102,10 @@ def plotly_to_png_matplotlib(  # noqa: C901, PLR0912, PLR0915
 
 
 def save_png(
-    fig: Figure, path: str, width: int = 1200, height: int = 600,
+    fig: Figure,
+    path: str,
+    width: int = 1200,
+    height: int = 600,
 ) -> None:
     """Save a Plotly figure to PNG, falling back to matplotlib."""
     try:
@@ -144,14 +142,10 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         else:
             lines.append("  [heatmap]")
         if x_labels:
-            lines.append(
-                f"    cols: {', '.join(str(c) for c in x_labels)}"
-            )
+            lines.append(f"    cols: {', '.join(str(c) for c in x_labels)}")
         for row_i, row in enumerate(z):
             row_label = y_labels[row_i] if row_i < len(y_labels) else row_i
-            lines.append(
-                f"    {row_label}: {', '.join(_fmt(v) for v in row)}"
-            )
+            lines.append(f"    {row_label}: {', '.join(_fmt(v) for v in row)}")
         return lines
 
     if ttype == "contour":
@@ -165,18 +159,11 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         y0 = trace.get("y0")
         dy = trace.get("dy")
         if x0 is not None:
-            lines.append(
-                f"    x0={_fmt(x0)} dx={_fmt(dx)}"
-                f" y0={_fmt(y0)} dy={_fmt(dy)}"
-            )
+            lines.append(f"    x0={_fmt(x0)} dx={_fmt(dx)} y0={_fmt(y0)} dy={_fmt(dy)}")
         if z:
-            lines.append(
-                f"    grid: {len(z)}x{len(z[0]) if z else 0}"
-            )
+            lines.append(f"    grid: {len(z)}x{len(z[0]) if z else 0}")
             flat = [v for row in z for v in row]
-            lines.append(
-                f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]"
-            )
+            lines.append(f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]")
         return lines
 
     if ttype == "surface":
@@ -188,12 +175,8 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         if z:
             flat = [v for row in z for v in row if v is not None]
             if flat:
-                lines.append(
-                    f"    grid: {len(z)}x{len(z[0]) if z else 0}"
-                )
-                lines.append(
-                    f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]"
-                )
+                lines.append(f"    grid: {len(z)}x{len(z[0]) if z else 0}")
+                lines.append(f"    range: [{_fmt(min(flat))}, {_fmt(max(flat))}]")
         return lines
 
     header = f"  [{ttype}]"
@@ -205,9 +188,7 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         return lines
 
     error_y = trace.get("error_y", {})
-    err_vals = (
-        error_y.get("array", []) if isinstance(error_y, dict) else []
-    )
+    err_vals = error_y.get("array", []) if isinstance(error_y, dict) else []
 
     if len(x) <= _INLINE_THRESHOLD:
         for i, (xi, yi) in enumerate(zip(x, y, strict=False)):
@@ -219,15 +200,14 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         lines.append(f"    n={len(x)}")
         y_num = [v for v in y if isinstance(v, (int, float))]
         if y_num:
-            lines.append(
-                f"    y range: [{_fmt(min(y_num))},"
-                f" {_fmt(max(y_num))}]"
-            )
-            lines.append(
-                f"    y mean: {_fmt(sum(y_num) / len(y_num))}"
-            )
+            lines.append(f"    y range: [{_fmt(min(y_num))}, {_fmt(max(y_num))}]")
+            lines.append(f"    y mean: {_fmt(sum(y_num) / len(y_num))}")
         sample_indices = [
-            0, len(x) // 4, len(x) // 2, 3 * len(x) // 4, len(x) - 1,
+            0,
+            len(x) // 4,
+            len(x) // 2,
+            3 * len(x) // 4,
+            len(x) - 1,
         ]
         for idx in sample_indices:
             if idx < len(x):
@@ -235,15 +215,15 @@ def _trace_to_text(trace: dict) -> list[str]:  # noqa: C901, PLR0912, PLR0915
                 if idx < len(err_vals):
                     entry += f" +/-{_fmt(err_vals[idx])}"
                 lines.append(entry)
-        lines.append(
-            f"    ... ({len(x)} points total, showing 5 samples)"
-        )
+        lines.append(f"    ... ({len(x)} points total, showing 5 samples)")
 
     return lines
 
 
 def fig_to_text(  # noqa: C901
-    fig: Figure, title: str = "", description: dict | None = None,
+    fig: Figure,
+    title: str = "",
+    description: dict | None = None,
 ) -> str:
     """Convert a Plotly figure to a compact machine-readable text block."""
     d = fig.to_dict()
@@ -273,26 +253,18 @@ def fig_to_text(  # noqa: C901
     yaxis = layout.get("yaxis", {})
     if isinstance(xaxis, dict):
         xt = xaxis.get("title", {})
-        xlabel = (
-            xt.get("text", "") if isinstance(xt, dict)
-            else str(xt) if xt else ""
-        )
+        xlabel = xt.get("text", "") if isinstance(xt, dict) else str(xt) if xt else ""
         if xlabel:
             parts.append(f"  x-axis: {xlabel}")
     if isinstance(yaxis, dict):
         yt = yaxis.get("title", {})
-        ylabel = (
-            yt.get("text", "") if isinstance(yt, dict)
-            else str(yt) if yt else ""
-        )
+        ylabel = yt.get("text", "") if isinstance(yt, dict) else str(yt) if yt else ""
         if ylabel:
             parts.append(f"  y-axis: {ylabel}")
 
     annotations = layout.get("annotations", [])
     subplot_titles = [
-        a.get("text", "")
-        for a in annotations
-        if isinstance(a, dict) and a.get("text")
+        a.get("text", "") for a in annotations if isinstance(a, dict) and a.get("text")
     ]
     if subplot_titles:
         parts.append(f"  subplots: {' | '.join(subplot_titles)}")
