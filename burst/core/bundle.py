@@ -13,6 +13,9 @@ import numpy as np
 from burst.config import (
     ACC_BURST,
     ACC_OTHER,
+    LOSS_BURST,
+    LOSS_OTHER,
+    PHASE_REVERSION,
     TrainConfig,
     burst_steps_for_mode,
     ordered_schedules,
@@ -27,7 +30,7 @@ from burst.core.train_utils import (
     resolve_run_paths,
 )
 
-BUNDLE_SCHEMA_VERSION = 1
+BUNDLE_SCHEMA_VERSION = 2
 BUNDLE_DIRNAME = "chart_bundle"
 BUNDLE_VERSION_DIR = "v1"
 BUNDLE_FILENAME = "core_bundle.json"
@@ -87,6 +90,10 @@ def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
         "training": _build_training_curves(grouped),
         "summary": _build_summary(grouped, thresholds),
         "gradients": _build_gradient_curves(grouped, grad_records, burst_mode),
+        "per_layer_gradients": _build_per_layer_gradient_curves(
+            grouped, grad_records, burst_mode
+        ),
+        "weight_drift": _build_weight_drift(run_dir),
         "representation": build_representation_summary(run_dir, grouped),
     }
 
@@ -245,8 +252,23 @@ def _build_training_curves(grouped: dict[str, list[dict[str, Any]]]) -> dict[str
             ACC_BURST: _aggregate_series(runs, ACC_BURST),
             ACC_OTHER: _aggregate_series(runs, ACC_OTHER),
             "loss": _aggregate_series(runs, "loss"),
+            LOSS_BURST: _aggregate_series(runs, LOSS_BURST),
+            LOSS_OTHER: _aggregate_series(runs, LOSS_OTHER),
         }
     return payload
+
+
+def _reversion_auc_for_key(run: dict[str, Any], key: str) -> float:
+    """Compute AUC of *key* over the reversion phase via trapezoid rule."""
+    log = run["log"]
+    burst_end = run["pre_burst_steps"] + run["config"]["total_steps"]
+    rev_vals = [log[key][i] for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION]
+    rev_steps = [
+        log["step"][i] - burst_end for i, ph in enumerate(log["phase"]) if ph == PHASE_REVERSION
+    ]
+    if len(rev_vals) < 2:  # noqa: PLR2004
+        return 0.0
+    return float(np.trapezoid(rev_vals, rev_steps))
 
 
 def _build_summary(
@@ -264,6 +286,15 @@ def _build_summary(
         auc_mean, auc_ci = _mean_ci(auc_vals)
         other_mean, other_ci = _mean_ci(other_end_vals)
 
+        auc_loss_burst = np.array(
+            [_reversion_auc_for_key(r, LOSS_BURST) for r in runs], dtype=float
+        )
+        auc_acc_other = np.array(
+            [_reversion_auc_for_key(r, ACC_OTHER) for r in runs], dtype=float
+        )
+        auc_lb_mean, auc_lb_ci = _mean_ci(auc_loss_burst)
+        auc_ao_mean, auc_ao_ci = _mean_ci(auc_acc_other)
+
         life_stats: dict[str, Any] = {}
         for threshold in thresholds:
             key = reversion_life_key(threshold)
@@ -277,6 +308,8 @@ def _build_summary(
         by_schedule[schedule] = {
             "peak_burst": {"mean": peak_mean, "ci": peak_ci},
             "reversion_auc": {"mean": auc_mean, "ci": auc_ci},
+            "reversion_auc_loss_burst": {"mean": auc_lb_mean, "ci": auc_lb_ci},
+            "reversion_auc_acc_other": {"mean": auc_ao_mean, "ci": auc_ao_ci},
             "other_end": {"mean": other_mean, "ci": other_ci},
             "life": life_stats,
         }
@@ -377,3 +410,259 @@ def _bundle_metric(series_list: list[np.ndarray]) -> dict[str, Any]:
         "mean": np.nanmean(arr, axis=0).tolist(),
         "ci": _series_ci(arr).tolist(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-layer gradient curves
+# ---------------------------------------------------------------------------
+
+
+def _build_per_layer_gradient_curves(
+    grouped: dict[str, list[dict[str, Any]]],
+    grad_records: list[dict[str, Any]],
+    burst_mode: str,
+) -> dict[str, Any]:
+    """Build per-layer gradient metric curves (cosine, norms) per schedule."""
+    grouped_grad = _group_by_schedule(grad_records)
+    payload: dict[str, Any] = {}
+    for schedule, runs in grouped_grad.items():
+        if schedule not in grouped:
+            continue
+        burst_steps = burst_steps_for_mode(
+            schedule, burst_mode, grouped[schedule][0]["config"]["total_steps"]
+        )
+        series = _per_layer_series_for_schedule(runs)
+        if not series:
+            continue
+        payload[schedule] = {"burst_steps": burst_steps, **series}
+    return payload
+
+
+def _accumulate_per_layer_metric(
+    runs: list[dict[str, Any]],
+    layer_names: list[str],
+    first_steps: np.ndarray,
+    gsl_key: str,
+) -> dict[str, list[np.ndarray]]:
+    """Accumulate one per-layer metric across runs, interpolated to first_steps."""
+    acc: dict[str, list[np.ndarray]] = {ln: [] for ln in layer_names}
+    for run in runs:
+        gsl = run["grad_sim_log"]
+        steps = np.array(gsl["step"], dtype=float)
+        layer_dict = gsl.get(gsl_key, {})
+        for ln in layer_names:
+            vals = np.array(layer_dict.get(ln, []), dtype=float)
+            acc[ln].append(_interpolate_optional_metric(first_steps, steps, vals))
+    return acc
+
+
+def _per_layer_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-layer gradient series across seeds for one schedule."""
+    runs = [r for r in runs if r["grad_sim_log"].get("step")]
+    if not runs:
+        return {}
+
+    gsl0 = runs[0]["grad_sim_log"]
+    layer_names: list[str] = gsl0.get("layer_names", [])
+    if not layer_names or not gsl0.get("per_layer"):
+        return {}
+
+    first_steps = np.array(gsl0["step"], dtype=float)
+
+    cosine_by_layer = _accumulate_per_layer_metric(
+        runs, layer_names, first_steps, "per_layer"
+    )
+    burst_norm_by_layer = _accumulate_per_layer_metric(
+        runs, layer_names, first_steps, "burst_norm_per_layer"
+    )
+    other_norm_by_layer = _accumulate_per_layer_metric(
+        runs, layer_names, first_steps, "other_norm_per_layer"
+    )
+
+    has_any_cosine = any(
+        cosine_by_layer[ln] and not np.all(np.isnan(cosine_by_layer[ln][0]))
+        for ln in layer_names
+    )
+    if not has_any_cosine:
+        return {}
+
+    cosine_out: dict[str, Any] = {}
+    burst_norm_out: dict[str, Any] = {}
+    other_norm_out: dict[str, Any] = {}
+    norm_x_cosine_out: dict[str, Any] = {}
+
+    for ln in layer_names:
+        if cosine_by_layer[ln]:
+            cosine_out[ln] = _bundle_metric(cosine_by_layer[ln])
+        if burst_norm_by_layer[ln]:
+            burst_norm_out[ln] = _bundle_metric(burst_norm_by_layer[ln])
+        if other_norm_by_layer[ln]:
+            other_norm_out[ln] = _bundle_metric(other_norm_by_layer[ln])
+        if cosine_by_layer[ln] and burst_norm_by_layer[ln]:
+            nxc = [
+                bn * cs
+                for bn, cs in zip(burst_norm_by_layer[ln], cosine_by_layer[ln], strict=True)
+            ]
+            norm_x_cosine_out[ln] = _bundle_metric(nxc)
+
+    return {
+        "layer_names": layer_names,
+        "steps": first_steps.tolist(),
+        "cosine": cosine_out,
+        "burst_norm": burst_norm_out,
+        "other_norm": other_norm_out,
+        "norm_x_cosine": norm_x_cosine_out,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Weight drift from checkpoints
+# ---------------------------------------------------------------------------
+
+
+def _build_weight_drift(run_dir: str | Path) -> dict[str, Any]:
+    """Compute per-layer weight drift from saved checkpoints."""
+    run_dir = Path(run_dir)
+    _, logs_dir, results_dir = resolve_run_paths(run_dir)
+
+    ckpt_root = logs_dir / "checkpoints"
+    if not ckpt_root.is_dir():
+        return {}
+
+    cfg_path = results_dir / "config.json"
+    if not cfg_path.exists():
+        cfg_path = run_dir / "config.json"
+    if not cfg_path.exists():
+        return {}
+
+    with cfg_path.open() as f:
+        cfg = json.load(f)
+    n_layer: int = cfg["base_cfg"]["n_layer"]
+
+    label_dirs = sorted(d for d in ckpt_root.iterdir() if d.is_dir())
+    if not label_dirs:
+        return {}
+
+    by_schedule: dict[str, list[Path]] = defaultdict(list)
+    for d in label_dirs:
+        parts = d.name.rsplit("_s", maxsplit=1)
+        if len(parts) == 2:  # noqa: PLR2004
+            by_schedule[parts[0]].append(d)
+
+    payload: dict[str, Any] = {}
+    for schedule in ordered_schedules(by_schedule.keys()):
+        result = _weight_drift_for_schedule(by_schedule[schedule], n_layer)
+        if result:
+            payload[schedule] = result
+    return payload
+
+
+def _weight_drift_for_schedule(
+    seed_dirs: list[Path], n_layer: int
+) -> dict[str, Any] | None:
+    """Compute weight drift arrays for one schedule across seeds."""
+    import torch  # noqa: PLC0415
+
+    seed_cumulative: list[np.ndarray] = []
+    seed_stepwise: list[np.ndarray] = []
+    layer_names: list[str] | None = None
+    steps: list[int] | None = None
+
+    for ckpt_dir in seed_dirs:
+        ckpt_files = {int(p.stem.split("_")[1]): p for p in ckpt_dir.glob("step_*.pt")}
+        if not ckpt_files:
+            continue
+
+        sorted_steps = sorted(ckpt_files)
+        base_sd = _load_sd_cpu(torch, ckpt_files[sorted_steps[0]])
+        groups = _layer_groups_from_state_dict(base_sd, n_layer)
+        if layer_names is None:
+            layer_names = [g[0] for g in groups]
+            steps = sorted_steps
+
+        cum, stepwise = _drift_arrays(torch, ckpt_files, sorted_steps, groups, base_sd)
+        seed_cumulative.append(cum)
+        seed_stepwise.append(stepwise)
+
+    if not seed_cumulative or layer_names is None or steps is None:
+        return None
+
+    cum_stack = np.stack(seed_cumulative)
+    step_stack = np.stack(seed_stepwise)
+    cum_out: dict[str, Any] = {}
+    stepwise_out: dict[str, Any] = {}
+    for li, ln in enumerate(layer_names):
+        cum_out[ln] = {
+            "mean": np.nanmean(cum_stack[:, li, :], axis=0).tolist(),
+            "ci": _series_ci(cum_stack[:, li, :]).tolist(),
+        }
+        stepwise_out[ln] = {
+            "mean": np.nanmean(step_stack[:, li, :], axis=0).tolist(),
+            "ci": _series_ci(step_stack[:, li, :]).tolist(),
+        }
+
+    return {
+        "layer_names": layer_names,
+        "steps": steps,
+        "cumulative": cum_out,
+        "stepwise": stepwise_out,
+    }
+
+
+def _load_sd_cpu(torch_mod: Any, path: Path) -> dict[str, Any]:
+    """Load a state dict to CPU as float32."""
+    return {
+        k: v.float().cpu()
+        for k, v in torch_mod.load(str(path), map_location="cpu", weights_only=True).items()
+    }
+
+
+def _drift_arrays(
+    torch_mod: Any,
+    ckpt_files: dict[int, Path],
+    sorted_steps: list[int],
+    groups: list[tuple[str, list[str]]],
+    base_sd: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute cumulative and stepwise drift arrays for one seed."""
+    n_layers = len(groups)
+    n_ckpts = len(sorted_steps)
+    cum = np.zeros((n_layers, n_ckpts))
+    stepwise = np.zeros((n_layers, n_ckpts))
+    prev_sd = base_sd
+
+    for ci, step in enumerate(sorted_steps):
+        sd = _load_sd_cpu(torch_mod, ckpt_files[step])
+        for li, (_gname, pnames) in enumerate(groups):
+            cum[li, ci] = sum(
+                (sd[p] - base_sd[p]).norm().item() ** 2 for p in pnames
+            ) ** 0.5
+            stepwise[li, ci] = sum(
+                (sd[p] - prev_sd[p]).norm().item() ** 2 for p in pnames
+            ) ** 0.5
+        prev_sd = sd
+
+    return cum, stepwise
+
+
+def _layer_groups_from_state_dict(
+    sd: dict[str, Any], n_layer: int
+) -> list[tuple[str, list[str]]]:
+    """Build ordered layer groups from a state dict."""
+    all_keys = set(sd.keys())
+    groups: list[tuple[str, list[str]]] = []
+    emb = sorted(
+        k for k in all_keys if k in ("transformer.wte.weight", "transformer.wpe.weight")
+    )
+    if emb:
+        groups.append(("emb", emb))
+    for i in range(n_layer):
+        pfx = f"transformer.h.{i}"
+        for tag, sub in [("ln", "ln_"), ("attn", "attn."), ("mlp", "mlp.")]:
+            params = sorted(k for k in all_keys if k.startswith(f"{pfx}.{sub}"))
+            if params:
+                groups.append((f"L{i}_{tag}", params))
+    lnf = sorted(k for k in all_keys if k.startswith("transformer.ln_f"))
+    if lnf:
+        groups.append(("ln_f", lnf))
+    return groups

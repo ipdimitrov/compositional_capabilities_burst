@@ -695,11 +695,17 @@ def _worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
 
         if GRAD_METRICS.get("grad_norm_ratio", True):
             ratio: dict[str, float] = {}
+            burst_norms: dict[str, float] = {}
+            other_norms: dict[str, float] = {}
             for name, _ in layer_groups:
                 norm_b = burst_vecs[name].norm().item()
                 norm_o = other_vecs[name].norm().item()
                 ratio[name] = norm_b / (norm_o + 1e-12)
+                burst_norms[name] = norm_b
+                other_norms[name] = norm_o
             result["grad_norm_ratio"] = ratio
+            result["burst_norm_per_layer"] = burst_norms
+            result["other_norm_per_layer"] = other_norms
 
         if GRAD_METRICS.get("conflict_rate", True):
             result["conflict_rate"] = _conflict_rate_per_layer(burst_vecs, other_vecs)
@@ -943,6 +949,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                     "burst_vs_other": [],
                     "per_layer": {},
                     "grad_norm_ratio": {},
+                    "burst_norm_per_layer": {},
+                    "other_norm_per_layer": {},
                     "grad_rank": {},
                     "grad_snr": {},
                     "conflict_rate": {},
@@ -965,7 +973,14 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             if "layer_names" not in gsl:
                 gsl["layer_names"] = d.get("layer_names", [])
 
-        for key in ("grad_norm_ratio", "grad_rank", "grad_snr", "conflict_rate"):
+        for key in (
+            "grad_norm_ratio",
+            "burst_norm_per_layer",
+            "other_norm_per_layer",
+            "grad_rank",
+            "grad_snr",
+            "conflict_rate",
+        ):
             if key in d:
                 for layer_name, val in d[key].items():
                     gsl[key].setdefault(layer_name, []).append(val)
@@ -1001,7 +1016,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         gsl["phase"] = np.array(gsl["phase"])[order].tolist()
         gsl["burst_vs_other"] = np.array(gsl["burst_vs_other"])[order].tolist()
 
-        for key in ("per_layer", "grad_norm_ratio", "grad_rank", "grad_snr", "conflict_rate"):
+        for key in (
+            "per_layer",
+            "grad_norm_ratio",
+            "burst_norm_per_layer",
+            "other_norm_per_layer",
+            "grad_rank",
+            "grad_snr",
+            "conflict_rate",
+        ):
             for layer_name in gsl[key]:
                 vals = gsl[key][layer_name]
                 if len(vals) == len(order):

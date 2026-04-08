@@ -21,6 +21,8 @@ from burst.config import (
     ACC_OTHER,
     CLASS_BURST,
     CLASS_OTHER,
+    LOSS_BURST,
+    LOSS_OTHER,
     SCHED_COLORS,
     SCHED_DISPLAY,
     reversion_life_label,
@@ -42,7 +44,16 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
         _plot_overlay(bundle, out_dir, ACC_BURST, f"{CLASS_BURST} Accuracy", burst_fname),
         _plot_overlay(bundle, out_dir, ACC_OTHER, f"{CLASS_OTHER} Accuracy", other_fname),
         _plot_overlay(bundle, out_dir, "loss", "Loss", "overlay_LOSS_training_loss.png"),
+        _plot_overlay(
+            bundle, out_dir, LOSS_BURST, f"{CLASS_BURST} Eval Loss",
+            f"overlay_{LOSS_BURST.upper()}_eval_loss.png",
+        ),
+        _plot_overlay(
+            bundle, out_dir, LOSS_OTHER, f"{CLASS_OTHER} Eval Loss",
+            f"overlay_{LOSS_OTHER.upper()}_eval_loss.png",
+        ),
         _plot_auc_bars(bundle, out_dir),
+        _plot_extended_auc_bars(bundle, out_dir),
         _plot_summary_table(bundle, out_dir),
         _plot_reversion_zoom(bundle, out_dir),
         _plot_grad_cosine(bundle, out_dir),
@@ -52,6 +63,10 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
         _plot_representation_drift(bundle, out_dir),
     ]
     paths.extend(_plot_per_schedule(bundle, out_dir))
+    paths.extend(_plot_per_layer_cossim(bundle, out_dir))
+    paths.extend(_plot_per_layer_grad_norm(bundle, out_dir))
+    paths.extend(_plot_per_layer_norm_x_cossim(bundle, out_dir))
+    paths.extend(_plot_weight_drift(bundle, out_dir))
     return [path for path in paths if path is not None]
 
 
@@ -553,3 +568,229 @@ def _annotate_global_phase_boundaries(ax: Axes, burst_end: float, total_steps: f
 def _sched_pct_label(schedule: str) -> str:
     """Extract the percentage suffix from a schedule name."""
     return schedule.rsplit("_", maxsplit=1)[-1]
+
+
+# ---------------------------------------------------------------------------
+# Extended AUC bars
+# ---------------------------------------------------------------------------
+
+
+def _plot_extended_auc_bars(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot reversion AUC bars for burst-acc, loss-burst, and other-acc."""
+    schedules = bundle["config"]["schedules"]
+    summary = bundle["summary"]["by_schedule"]
+    first = summary[schedules[0]]
+    if "reversion_auc_loss_burst" not in first:
+        return None
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5), sharey=False)
+    xs = np.arange(len(schedules))
+    colors = [SCHED_COLORS[s] for s in schedules]
+    labels = [SCHED_DISPLAY.get(s, s) for s in schedules]
+
+    for ax, key, title in zip(
+        axes,
+        ("reversion_auc", "reversion_auc_loss_burst", "reversion_auc_acc_other"),
+        ("Burst Acc AUC", "Burst Loss AUC", "Other Acc AUC"),
+        strict=True,
+    ):
+        means = [summary[s][key]["mean"] for s in schedules]
+        cis = [summary[s][key]["ci"] for s in schedules]
+        ax.bar(xs, means, yerr=cis, color=colors, edgecolor="black", lw=0.7, capsize=4)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=25, ha="right")
+        style_axes(ax, "", title)
+
+    return _save(fig, out_dir / "extended_reversion_auc_bars.png")
+
+
+# ---------------------------------------------------------------------------
+# Per-layer heatmap + line chart helpers
+# ---------------------------------------------------------------------------
+
+_LAYER_CMAP = "RdBu_r"
+_DRIFT_CMAP = "magma"
+
+
+def _heatmap_and_lines(
+    layer_names: list[str],
+    steps: list[float],
+    metric_dict: dict[str, dict],
+    out_dir: Path,
+    fname_heatmap: str,
+    fname_lines: str,
+    ylabel: str,
+    cmap: str = _LAYER_CMAP,
+    center_zero: bool = False,
+) -> list[Path]:
+    """Render a layer x step heatmap and a per-layer line chart."""
+    paths: list[Path] = []
+    n_layers = len(layer_names)
+    n_steps = len(steps)
+    if n_layers == 0 or n_steps == 0:
+        return paths
+
+    grid = np.full((n_layers, n_steps), np.nan)
+    for li, ln in enumerate(layer_names):
+        if ln in metric_dict:
+            vals = metric_dict[ln].get("mean", [])
+            grid[li, : len(vals)] = vals
+
+    if np.all(np.isnan(grid)):
+        return paths
+
+    fig, ax = plt.subplots(figsize=(max(10, n_steps * 0.08), max(4, n_layers * 0.3)))
+    masked = np.ma.masked_invalid(grid)
+    vmin, vmax = None, None
+    if center_zero:
+        abs_max = max(abs(np.nanmin(grid)), abs(np.nanmax(grid)), 1e-12)
+        vmin, vmax = -abs_max, abs_max
+    im = ax.imshow(masked, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
+    ax.set_yticks(range(n_layers))
+    ax.set_yticklabels(layer_names, fontsize=6)
+    n_xticks = min(10, n_steps)
+    tick_idx = np.linspace(0, n_steps - 1, n_xticks, dtype=int)
+    ax.set_xticks(tick_idx)
+    ax.set_xticklabels([f"{steps[i]:.0f}" for i in tick_idx], fontsize=6)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Layer")
+    fig.colorbar(im, ax=ax, label=ylabel, shrink=0.8)
+    paths.append(_save(fig, out_dir / fname_heatmap))
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    cmap_obj = plt.get_cmap("tab20")
+    for li, ln in enumerate(layer_names):
+        if ln not in metric_dict:
+            continue
+        mean = np.array(metric_dict[ln]["mean"], dtype=float)
+        ax.plot(steps[: len(mean)], mean, lw=1.4, label=ln, color=cmap_obj(li / max(n_layers, 1)))
+    style_axes(ax, "Step", ylabel)
+    ax.legend(loc="best", ncol=3, fontsize=5)
+    paths.append(_save(fig, out_dir / fname_lines))
+
+    return paths
+
+
+# ---------------------------------------------------------------------------
+# Per-layer cosine similarity
+# ---------------------------------------------------------------------------
+
+
+def _plot_per_layer_cossim(bundle: dict, out_dir: Path) -> list[Path]:
+    """Plot per-layer gradient cosine similarity heatmaps and line charts."""
+    plg = bundle.get("per_layer_gradients", {})
+    if not plg:
+        return []
+
+    paths: list[Path] = []
+    for schedule in bundle["config"]["schedules"]:
+        if schedule not in plg:
+            continue
+        data = plg[schedule]
+        paths.extend(
+            _heatmap_and_lines(
+                data["layer_names"],
+                data["steps"],
+                data["cosine"],
+                out_dir,
+                f"per_layer_cossim_{schedule}_heatmap.png",
+                f"per_layer_cossim_{schedule}_lines.png",
+                "Cosine Similarity",
+                center_zero=True,
+            )
+        )
+    return paths
+
+
+# ---------------------------------------------------------------------------
+# Per-layer gradient norms
+# ---------------------------------------------------------------------------
+
+
+def _plot_per_layer_grad_norm(bundle: dict, out_dir: Path) -> list[Path]:
+    """Plot per-layer gradient norm heatmaps and line charts."""
+    plg = bundle.get("per_layer_gradients", {})
+    if not plg:
+        return []
+
+    paths: list[Path] = []
+    for schedule in bundle["config"]["schedules"]:
+        if schedule not in plg:
+            continue
+        data = plg[schedule]
+        for prefix, metric_key in (("burst", "burst_norm"), ("other", "other_norm")):
+            paths.extend(
+                _heatmap_and_lines(
+                    data["layer_names"],
+                    data["steps"],
+                    data.get(metric_key, {}),
+                    out_dir,
+                    f"per_layer_grad_norm_{prefix}_{schedule}_heatmap.png",
+                    f"per_layer_grad_norm_{prefix}_{schedule}_lines.png",
+                    f"Grad Norm ({prefix})",
+                    cmap=_DRIFT_CMAP,
+                )
+            )
+    return paths
+
+
+# ---------------------------------------------------------------------------
+# Per-layer norm x cosine
+# ---------------------------------------------------------------------------
+
+
+def _plot_per_layer_norm_x_cossim(bundle: dict, out_dir: Path) -> list[Path]:
+    """Plot per-layer norm*cosine heatmaps and line charts."""
+    plg = bundle.get("per_layer_gradients", {})
+    if not plg:
+        return []
+
+    paths: list[Path] = []
+    for schedule in bundle["config"]["schedules"]:
+        if schedule not in plg:
+            continue
+        data = plg[schedule]
+        paths.extend(
+            _heatmap_and_lines(
+                data["layer_names"],
+                data["steps"],
+                data.get("norm_x_cosine", {}),
+                out_dir,
+                f"per_layer_norm_x_cossim_{schedule}_heatmap.png",
+                f"per_layer_norm_x_cossim_{schedule}_lines.png",
+                "Norm x Cosine",
+                center_zero=True,
+            )
+        )
+    return paths
+
+
+# ---------------------------------------------------------------------------
+# Weight drift
+# ---------------------------------------------------------------------------
+
+
+def _plot_weight_drift(bundle: dict, out_dir: Path) -> list[Path]:
+    """Plot per-layer weight drift heatmaps and line charts."""
+    wd = bundle.get("weight_drift", {})
+    if not wd:
+        return []
+
+    paths: list[Path] = []
+    for schedule in bundle["config"]["schedules"]:
+        if schedule not in wd:
+            continue
+        data = wd[schedule]
+        paths.extend(
+            _heatmap_and_lines(
+                data["layer_names"],
+                data["steps"],
+                data["cumulative"],
+                out_dir,
+                f"weight_drift_{schedule}_heatmap.png",
+                f"weight_drift_{schedule}_lines.png",
+                "Weight Drift (Frobenius)",
+                cmap=_DRIFT_CMAP,
+            )
+        )
+    return paths
