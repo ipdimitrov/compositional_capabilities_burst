@@ -21,13 +21,17 @@ from burst.config import (
     ACC_OTHER,
     CLASS_BURST,
     CLASS_OTHER,
+    COLOR_OTHER,
+    COLOR_PROJECTION,
+    COLOR_SHIFT,
+    COLOR_SPECIAL,
     LOSS_BURST,
     LOSS_OTHER,
     SCHED_COLORS,
     SCHED_DISPLAY,
     reversion_life_label,
 )
-from burst.core.charts.style import apply_paper_style, save_figure, style_axes
+from burst.core.charts.style import apply_paper_style, figsize, save_figure, style_axes
 
 MIN_SCHEMA = 2
 
@@ -45,27 +49,27 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    burst_fname = f"overlay_{ACC_BURST.upper()}_{CLASS_BURST}_class_accuracy.png"
-    other_fname = f"overlay_{ACC_OTHER.upper()}_{CLASS_OTHER}_class_accuracy.png"
+    burst_fname = f"overlay_{ACC_BURST.upper()}_{CLASS_BURST}_class_accuracy.pdf"
+    other_fname = f"overlay_{ACC_OTHER.upper()}_{CLASS_OTHER}_class_accuracy.pdf"
     paths = [
         plot_schedule_bars(bundle, out_dir),
         plot_lr_curves(bundle, out_dir),
         plot_overlay(bundle, out_dir, ACC_BURST, f"{CLASS_BURST} Accuracy", burst_fname),
         plot_overlay(bundle, out_dir, ACC_OTHER, f"{CLASS_OTHER} Accuracy", other_fname),
-        plot_overlay(bundle, out_dir, "loss", "Loss", "overlay_LOSS_training_loss.png"),
+        plot_overlay(bundle, out_dir, "loss", "Loss", "overlay_LOSS_training_loss.pdf"),
         plot_overlay(
             bundle,
             out_dir,
             LOSS_BURST,
             f"{CLASS_BURST} Eval Loss",
-            f"overlay_{LOSS_BURST.upper()}_eval_loss.png",
+            f"overlay_{LOSS_BURST.upper()}_eval_loss.pdf",
         ),
         plot_overlay(
             bundle,
             out_dir,
             LOSS_OTHER,
             f"{CLASS_OTHER} Eval Loss",
-            f"overlay_{LOSS_OTHER.upper()}_eval_loss.png",
+            f"overlay_{LOSS_OTHER.upper()}_eval_loss.pdf",
         ),
         plot_auc_bars(bundle, out_dir),
         plot_extended_auc_bars(bundle, out_dir),
@@ -90,7 +94,7 @@ def plot_schedule_bars(bundle: dict, out_dir: Path) -> Path:
     schedules = bundle["config"]["schedules"]
     bars = bundle["schedule_bars"]
     fig, axes = plt.subplots(
-        len(schedules), 1, figsize=(12, max(3.0, 1.6 * len(schedules))), sharex=True
+        len(schedules), 1, figsize=figsize("full", len(schedules)), sharex=True
     )
     if len(schedules) == 1:
         axes = [axes]
@@ -107,29 +111,28 @@ def plot_schedule_bars(bundle: dict, out_dir: Path) -> Path:
         )
         ax.set_yticks([0.0, 0.5, 1.0])
     style_axes(axes[-1], "Step", "Burst Fraction")
-    return save_chart(fig, out_dir / "schedule_bars.png")
+    return save_chart(fig, out_dir / "schedule_bars.pdf")
 
 
 def plot_lr_curves(bundle: dict, out_dir: Path) -> Path:
     """Plot learning rate schedules for all schedules."""
-    fig, ax = plt.subplots(figsize=(11, 5))
+    fig, ax = plt.subplots(figsize=figsize("half"))
     for schedule in bundle["config"]["schedules"]:
         curve = bundle["lr_curves"][schedule]
         ax.plot(
             curve["steps"],
             curve["lr"],
             color=SCHED_COLORS[schedule],
-            lw=2.0,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
     style_axes(ax, "Step", "Learning Rate")
     ax.legend(loc="upper right", ncol=2)
-    return save_chart(fig, out_dir / "lr_schedule.png")
+    return save_chart(fig, out_dir / "lr_schedule.pdf")
 
 
 def plot_overlay(bundle: dict, out_dir: Path, metric: str, ylabel: str, filename: str) -> Path:
     """Plot a training metric overlay across schedules."""
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=figsize("half"))
     max_burst_end = 0
     for schedule in bundle["config"]["schedules"]:
         training_data = bundle["training"][schedule]
@@ -143,7 +146,6 @@ def plot_overlay(bundle: dict, out_dir: Path, metric: str, ylabel: str, filename
             steps,
             mean,
             color=SCHED_COLORS[schedule],
-            lw=2.2,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.12)
@@ -165,7 +167,7 @@ def plot_auc_bars(bundle: dict, out_dir: Path) -> Path:
     means = [summary[schedule]["reversion_auc"]["mean"] for schedule in schedules]
     cis = [summary[schedule]["reversion_auc"]["ci"] for schedule in schedules]
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=figsize("half"))
     xs = np.arange(len(schedules))
     colors = [SCHED_COLORS[schedule] for schedule in schedules]
     ax.bar(xs, means, yerr=cis, color=colors, edgecolor="black", lw=0.7, capsize=4)
@@ -174,7 +176,7 @@ def plot_auc_bars(bundle: dict, out_dir: Path) -> Path:
         [SCHED_DISPLAY.get(schedule, schedule) for schedule in schedules], rotation=25, ha="right"
     )
     style_axes(ax, "", "AUC")
-    return save_chart(fig, out_dir / "reversion_auc_bars.png")
+    return save_chart(fig, out_dir / "reversion_auc_bars.pdf")
 
 
 def plot_summary_table(bundle: dict, out_dir: Path) -> Path:
@@ -201,12 +203,11 @@ def plot_summary_table(bundle: dict, out_dir: Path) -> Path:
         )
         rows.append(row)
 
-    fig_w = max(10, 3 + 1.45 * len(headers))
-    fig, ax = plt.subplots(figsize=(fig_w, 3.8))
+    fig, ax = plt.subplots(figsize=figsize("full"))
     ax.axis("off")
     table = ax.table(cellText=rows, colLabels=headers, loc="center", cellLoc="center")
     table.auto_set_font_size(False)  # noqa: FBT003
-    table.set_fontsize(10)
+    table.set_fontsize(8)
     table.scale(1.0, 1.55)
     for (row, col), cell in table.get_celld().items():
         if row == 0:
@@ -217,12 +218,12 @@ def plot_summary_table(bundle: dict, out_dir: Path) -> Path:
             cell.set_facecolor(SCHED_COLORS[schedule] + "22")
             cell.set_text_props(fontweight="bold")
         cell.set_edgecolor("#CCCCCC")
-    return save_chart(fig, out_dir / "summary_table.png")
+    return save_chart(fig, out_dir / "summary_table.pdf")
 
 
 def plot_reversion_zoom(bundle: dict, out_dir: Path) -> Path:
     """Plot burst accuracy during the reversion phase only."""
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=figsize("half"))
     for schedule in bundle["config"]["schedules"]:
         schedule_data = bundle["training"][schedule]
         steps = np.array(schedule_data[ACC_BURST]["steps"], dtype=float)
@@ -235,7 +236,6 @@ def plot_reversion_zoom(bundle: dict, out_dir: Path) -> Path:
             local_steps,
             mean[mask],
             color=SCHED_COLORS[schedule],
-            lw=2.2,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
         ax.fill_between(
@@ -248,7 +248,7 @@ def plot_reversion_zoom(bundle: dict, out_dir: Path) -> Path:
     ax.set_ylim(-0.05, 1.05)
     style_axes(ax, "Reversion Step", "Special Accuracy")
     ax.legend(loc="upper right", ncol=2)
-    return save_chart(fig, out_dir / "reversion_zoom_forgetting_speed.png")
+    return save_chart(fig, out_dir / "reversion_zoom_forgetting_speed.pdf")
 
 
 def plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
@@ -256,7 +256,7 @@ def plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
     gradients = bundle["gradients"]
     if not gradients:
         return None
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=figsize("half"))
     for schedule in bundle["config"]["schedules"]:
         if schedule not in gradients:
             continue
@@ -268,7 +268,6 @@ def plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
             steps,
             mean,
             color=SCHED_COLORS[schedule],
-            lw=2.2,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.12)
@@ -276,8 +275,8 @@ def plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
     annotate_global_phase_boundaries(ax, max_burst_steps(bundle), max_total_steps(bundle))
     style_axes(ax, "Step", "Cosine")
     ax.legend(loc="best", ncol=2)
-    path = save_chart(fig, out_dir / "grad_cosine_burst_vs_other.png")
-    write_aliases(path, [out_dir / "grad_cosine.png"])
+    path = save_chart(fig, out_dir / "grad_cosine_burst_vs_other.pdf")
+    write_aliases(path, [out_dir / "grad_cosine.pdf"])
     return path
 
 
@@ -299,14 +298,14 @@ def plot_grad_cosine_per_schedule(bundle: dict, out_dir: Path) -> Path | None:
             bundle["training"][schedule]["pre_steps"] + bundle["training"][schedule]["burst_steps"]
         )
 
-        fig, ax = plt.subplots(figsize=(11, 5.5))
-        ax.plot(steps, mean, color=SCHED_COLORS[schedule], lw=2.4)
+        fig, ax = plt.subplots(figsize=figsize("half"))
+        ax.plot(steps, mean, color=SCHED_COLORS[schedule])
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.14)
         ax.axhline(0.0, color="#666666", ls=":", lw=1.0)
         annotate_global_phase_boundaries(ax, burst_end, steps[-1])
         style_axes(ax, "Step", "Cosine")
-        path = save_chart(fig, out_dir / f"grad_cosine_{schedule.upper()}_per_schedule.png")
-        write_aliases(path, [out_dir / f"grad_cosine_{schedule}.png"])
+        path = save_chart(fig, out_dir / f"grad_cosine_{schedule.upper()}_per_schedule.pdf")
+        write_aliases(path, [out_dir / f"grad_cosine_{schedule}.pdf"])
         if first_path is None:
             first_path = path
     return first_path
@@ -318,7 +317,7 @@ def plot_grad_norms(bundle: dict, out_dir: Path) -> Path | None:
     if not gradients:
         return None
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=figsize("full"), sharey=False)
     for schedule in bundle["config"]["schedules"]:
         if schedule not in gradients:
             continue
@@ -331,7 +330,6 @@ def plot_grad_norms(bundle: dict, out_dir: Path) -> Path | None:
             steps,
             burst_mean,
             color=SCHED_COLORS[schedule],
-            lw=2.0,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
         axes[0].fill_between(
@@ -348,7 +346,6 @@ def plot_grad_norms(bundle: dict, out_dir: Path) -> Path | None:
             steps,
             other_mean,
             color=SCHED_COLORS[schedule],
-            lw=2.0,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
         axes[1].fill_between(
@@ -364,8 +361,8 @@ def plot_grad_norms(bundle: dict, out_dir: Path) -> Path | None:
     style_axes(axes[0], "Step", "L2 Norm")
     style_axes(axes[1], "Step", "L2 Norm")
     axes[1].legend(loc="best", ncol=1)
-    path = save_chart(fig, out_dir / "grad_norm_l2_burst_and_other.png")
-    write_aliases(path, [out_dir / "grad_norms.png"])
+    path = save_chart(fig, out_dir / "grad_norm_l2_burst_and_other.pdf")
+    write_aliases(path, [out_dir / "grad_norms.pdf"])
     return path
 
 
@@ -375,7 +372,7 @@ def plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
     if not gradients:
         return None
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=figsize("full"), sharey=False)
     for schedule in bundle["config"]["schedules"]:
         if schedule not in gradients:
             continue
@@ -388,7 +385,6 @@ def plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
             steps,
             signed_dot_mean,
             color=SCHED_COLORS[schedule],
-            lw=2.0,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
         axes[0].fill_between(
@@ -405,7 +401,6 @@ def plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
             steps,
             power_mean,
             color=SCHED_COLORS[schedule],
-            lw=2.0,
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
         axes[1].fill_between(
@@ -422,7 +417,7 @@ def plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
     style_axes(axes[0], "Step", "Signed Dot")
     style_axes(axes[1], "Step", "Power")
     axes[1].legend(loc="best", ncol=1)
-    return save_chart(fig, out_dir / "grad_norm_x_cosine_and_interference_power.png")
+    return save_chart(fig, out_dir / "grad_norm_x_cosine_and_interference_power.pdf")
 
 
 def plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
@@ -439,7 +434,7 @@ def plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
     xs = np.arange(len(schedules))
     labels = [sched_pct_label(schedule) for schedule in schedules]
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharex=True)
+    fig, axes = plt.subplots(1, 2, figsize=figsize("full"), sharex=True)
     proj_mean = np.array(
         [by_schedule[schedule]["late_centroid_projection"]["mean"] for schedule in schedules],
         dtype=float,
@@ -457,23 +452,25 @@ def plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
         dtype=float,
     )
 
-    axes[0].plot(xs, proj_mean, color="#5E3C99", lw=2.4, marker="o", ms=6)
-    axes[0].fill_between(xs, proj_mean - proj_ci, proj_mean + proj_ci, color="#5E3C99", alpha=0.12)
+    axes[0].plot(xs, proj_mean, color=COLOR_PROJECTION, marker="o", ms=3)
+    axes[0].fill_between(
+        xs, proj_mean - proj_ci, proj_mean + proj_ci, color=COLOR_PROJECTION, alpha=0.12
+    )
     axes[0].axhline(0.0, color="#666666", ls=":", lw=1.0)
     axes[0].set_xticks(xs)
     axes[0].set_xticklabels(labels)
     style_axes(axes[0], "Concentration %", "Projection")
 
-    axes[1].plot(xs, shift_mean, color="#1B9E77", lw=2.4, marker="o", ms=6)
+    axes[1].plot(xs, shift_mean, color=COLOR_SHIFT, marker="o", ms=3)
     axes[1].fill_between(
-        xs, shift_mean - shift_ci, shift_mean + shift_ci, color="#1B9E77", alpha=0.12
+        xs, shift_mean - shift_ci, shift_mean + shift_ci, color=COLOR_SHIFT, alpha=0.12
     )
     axes[1].set_xticks(xs)
     axes[1].set_xticklabels(labels)
     style_axes(axes[1], "Concentration %", "Normalized Shift")
 
-    path = save_chart(fig, out_dir / "representation_drift_centroid_and_shift.png")
-    write_aliases(path, [out_dir / "rep_drift_summary.png"])
+    path = save_chart(fig, out_dir / "representation_drift_centroid_and_shift.pdf")
+    write_aliases(path, [out_dir / "rep_drift_summary.pdf"])
     return path
 
 
@@ -486,14 +483,14 @@ def plot_per_schedule(bundle: dict, out_dir: Path) -> list[Path]:
         pre_steps = schedule_data["pre_steps"]
         burst_end = pre_steps + schedule_data["burst_steps"]
 
-        fig, ax = plt.subplots(figsize=(11, 5.5))
+        fig, ax = plt.subplots(figsize=figsize("half"))
         for metric, color, label in (
-            (ACC_OTHER, "#1565C0", "Other"),
-            (ACC_BURST, "#D32F2F", "Special"),
+            (ACC_OTHER, COLOR_OTHER, "Other"),
+            (ACC_BURST, COLOR_SPECIAL, "Special"),
         ):
             mean = np.array(schedule_data[metric]["mean"], dtype=float)
             ci = np.array(schedule_data[metric]["ci"], dtype=float)
-            ax.plot(steps, mean, color=color, lw=2.3, label=label)
+            ax.plot(steps, mean, color=color, label=label)
             ax.fill_between(steps, mean - ci, mean + ci, color=color, alpha=0.14)
 
         if pre_steps > 0:
@@ -502,8 +499,8 @@ def plot_per_schedule(bundle: dict, out_dir: Path) -> list[Path]:
         ax.set_ylim(-0.05, 1.05)
         style_axes(ax, "Step", "Accuracy")
         ax.legend(loc="best")
-        path = save_chart(fig, out_dir / f"per_sched_{schedule.upper()}_accuracy.png")
-        write_aliases(path, [out_dir / f"per_schedule_{schedule}.png"])
+        path = save_chart(fig, out_dir / f"per_sched_{schedule.upper()}_accuracy.pdf")
+        write_aliases(path, [out_dir / f"per_schedule_{schedule}.pdf"])
         paths.append(path)
     return paths
 
@@ -519,6 +516,7 @@ def fmt_ci(metric: dict, digits: int = 3) -> str:
 
 def save_chart(fig: Figure, path: Path) -> Path:
     """Save a figure and return its path."""
+    path = path.with_suffix(".pdf")
     save_figure(fig, path)
     return path
 
@@ -526,11 +524,11 @@ def save_chart(fig: Figure, path: Path) -> Path:
 def overlay_aliases(filename: str) -> list[Path]:
     """Return shorthand alias paths for a given overlay filename."""
     if f"_{ACC_BURST.upper()}_" in filename:
-        return [Path("overlay_burst.png")]
+        return [Path("overlay_burst.pdf")]
     if f"_{ACC_OTHER.upper()}_" in filename:
-        return [Path("overlay_other.png")]
+        return [Path("overlay_other.pdf")]
     if "_LOSS_" in filename:
-        return [Path("overlay_loss.png")]
+        return [Path("overlay_loss.pdf")]
     return []
 
 
@@ -597,7 +595,7 @@ def plot_extended_auc_bars(bundle: dict, out_dir: Path) -> Path:
     schedules = bundle["config"]["schedules"]
     summary = bundle["summary"]["by_schedule"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5), sharey=False)
+    fig, axes = plt.subplots(1, 3, figsize=figsize("full"), sharey=False)
     xs = np.arange(len(schedules))
     colors = [SCHED_COLORS[s] for s in schedules]
     labels = [SCHED_DISPLAY.get(s, s) for s in schedules]
@@ -615,7 +613,7 @@ def plot_extended_auc_bars(bundle: dict, out_dir: Path) -> Path:
         ax.set_xticklabels(labels, rotation=25, ha="right")
         style_axes(ax, "", title)
 
-    return save_chart(fig, out_dir / "extended_reversion_auc_bars.png")
+    return save_chart(fig, out_dir / "extended_reversion_auc_bars.pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +650,7 @@ def plot_layer_heatmap(  # noqa: PLR0913
     """Render a layer x step heatmap."""
     grid = build_layer_grid(layer_names, steps, metric_dict)
     n_layers, n_steps = grid.shape
-    fig, ax = plt.subplots(figsize=(max(10, n_steps * 0.08), max(4, n_layers * 0.3)))
+    fig, ax = plt.subplots(figsize=figsize("full"))
     masked = np.ma.masked_invalid(grid)
     vmin, vmax = None, None
     if center_zero:
@@ -680,7 +678,7 @@ def plot_layer_lines(
 ) -> Path:
     """Render a per-layer line chart."""
     n_layers = len(layer_names)
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=figsize("half"))
     cmap_obj = plt.get_cmap("tab20")
     for li, ln in enumerate(layer_names):
         mean = np.array(metric_dict[ln]["mean"], dtype=float)
@@ -707,7 +705,7 @@ def plot_per_layer_cossim(bundle: dict, out_dir: Path) -> list[Path]:
                 ln,
                 st,
                 cos,
-                out_dir / f"per_layer_cossim_{schedule}_heatmap.png",
+                out_dir / f"per_layer_cossim_{schedule}_heatmap.pdf",
                 "Cosine Similarity",
                 center_zero=True,
             )
@@ -717,7 +715,7 @@ def plot_per_layer_cossim(bundle: dict, out_dir: Path) -> list[Path]:
                 ln,
                 st,
                 cos,
-                out_dir / f"per_layer_cossim_{schedule}_lines.png",
+                out_dir / f"per_layer_cossim_{schedule}_lines.pdf",
                 "Cosine Similarity",
             )
         )
@@ -743,7 +741,7 @@ def plot_per_layer_grad_norm(bundle: dict, out_dir: Path) -> list[Path]:
                     ln,
                     st,
                     md,
-                    out_dir / f"per_layer_grad_norm_{prefix}_{schedule}_heatmap.png",
+                    out_dir / f"per_layer_grad_norm_{prefix}_{schedule}_heatmap.pdf",
                     f"Grad Norm ({prefix})",
                     cmap=DRIFT_CMAP,
                 )
@@ -753,7 +751,7 @@ def plot_per_layer_grad_norm(bundle: dict, out_dir: Path) -> list[Path]:
                     ln,
                     st,
                     md,
-                    out_dir / f"per_layer_grad_norm_{prefix}_{schedule}_lines.png",
+                    out_dir / f"per_layer_grad_norm_{prefix}_{schedule}_lines.pdf",
                     f"Grad Norm ({prefix})",
                 )
             )
@@ -778,7 +776,7 @@ def plot_per_layer_norm_x_cossim(bundle: dict, out_dir: Path) -> list[Path]:
                 ln,
                 st,
                 md,
-                out_dir / f"per_layer_norm_x_cossim_{schedule}_heatmap.png",
+                out_dir / f"per_layer_norm_x_cossim_{schedule}_heatmap.pdf",
                 "Norm x Cosine",
                 center_zero=True,
             )
@@ -788,7 +786,7 @@ def plot_per_layer_norm_x_cossim(bundle: dict, out_dir: Path) -> list[Path]:
                 ln,
                 st,
                 md,
-                out_dir / f"per_layer_norm_x_cossim_{schedule}_lines.png",
+                out_dir / f"per_layer_norm_x_cossim_{schedule}_lines.pdf",
                 "Norm x Cosine",
             )
         )
@@ -812,7 +810,7 @@ def plot_weight_drift(bundle: dict, out_dir: Path) -> list[Path]:
                 ln,
                 st,
                 data["cumulative"],
-                out_dir / f"weight_drift_{schedule}_heatmap.png",
+                out_dir / f"weight_drift_{schedule}_heatmap.pdf",
                 "Weight Drift (Frobenius)",
                 cmap=DRIFT_CMAP,
             )
@@ -822,7 +820,7 @@ def plot_weight_drift(bundle: dict, out_dir: Path) -> list[Path]:
                 ln,
                 st,
                 data["cumulative"],
-                out_dir / f"weight_drift_{schedule}_lines.png",
+                out_dir / f"weight_drift_{schedule}_lines.pdf",
                 "Weight Drift (Frobenius)",
             )
         )

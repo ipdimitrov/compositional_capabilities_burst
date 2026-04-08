@@ -105,6 +105,11 @@ CURVE_STYLE = {
     ACC_BURST: {"color": "#E91E63", "ls": "-", "label": "Special Class"},
 }
 
+COLOR_OTHER = "#1565C0"
+COLOR_SPECIAL = "#D32F2F"
+COLOR_PROJECTION = "#5E3C99"
+COLOR_SHIFT = "#1B9E77"
+
 # ---------------------------------------------------------------------------
 # Data parameters
 # ---------------------------------------------------------------------------

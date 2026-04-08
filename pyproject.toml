@@ -40,6 +40,8 @@ dev = [
     "ruff==0.15.8",
 ]
 
+# System dependencies (apt): fonts-liberation
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

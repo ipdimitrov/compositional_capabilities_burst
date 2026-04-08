@@ -19,11 +19,11 @@ FULL_COL_WIDTH = 6.75
 
 
 def apply_paper_style() -> None:
-    """Set rcParams for paper-ready plots."""
+    """Set rcParams for ICML paper-ready plots."""
     plt.rcParams.update(
         {
             "font.family": "serif",
-            "font.serif": ["Times"],
+            "font.serif": ["Times", "Times New Roman", "Liberation Serif", "DejaVu Serif"],
             "mathtext.fontset": "stix",
             "mathtext.rm": "Times",
             "mathtext.it": "Times:italic",
@@ -42,6 +42,8 @@ def apply_paper_style() -> None:
             "grid.alpha": 0.16,
             "grid.linewidth": 0.5,
             "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+            "savefig.pad_inches": 0.015,
             "figure.figsize": (HALF_COL_WIDTH, HALF_COL_WIDTH / 1.618),
             "figure.constrained_layout.use": True,
         }
@@ -62,9 +64,8 @@ def figsize(cols: str = "half", nrows: int = 1) -> tuple[float, float]:
 
 
 def save_figure(fig: Figure, path: str | Path) -> None:
-    """Save fig as both PNG and PDF, then close it."""
-    path = Path(path)
+    """Save fig as PDF, then close it."""
+    path = Path(path).with_suffix(".pdf")
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, bbox_inches="tight")
-    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
