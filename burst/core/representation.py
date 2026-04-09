@@ -59,15 +59,21 @@ def build_representation_summary(
         if not per_seed:
             continue
 
-        proj_vals = np.array([seed["late_centroid_projection"] for seed in per_seed], dtype=float)
-        shift_vals = np.array([seed["late_other_shift_norm"] for seed in per_seed], dtype=float)
-        cos_vals = np.array([seed["late_drift_cosine"] for seed in per_seed], dtype=float)
-        by_schedule[schedule] = {
-            "late_centroid_projection": mean_ci_payload(proj_vals),
-            "late_other_shift_norm": mean_ci_payload(shift_vals),
-            "late_drift_cosine": mean_ci_payload(cos_vals),
-            "per_seed": per_seed,
+        agg = {
+            key: mean_ci_payload(np.array([seed[key] for seed in per_seed], dtype=float))
+            for key in (
+                "late_centroid_projection",
+                "late_other_shift_norm",
+                "late_drift_cosine",
+                "late_burst_self_projection",
+                "late_burst_shift_norm",
+                "late_burst_post_norm",
+                "late_burst_pre_norm",
+                "late_other_post_norm",
+                "late_other_pre_norm",
+            )
         }
+        by_schedule[schedule] = {**agg, "per_seed": per_seed}
 
     return {"by_schedule": by_schedule}
 
@@ -101,12 +107,20 @@ def representation_for_run(
     centroid_projection_vals = []
     shift_norm_vals = []
     drift_cos_vals = []
+    burst_self_projection_vals = []
+    burst_shift_norm_vals = []
+    burst_post_norm_vals = []
+    burst_pre_norm_vals = []
+    other_post_norm_vals = []
+    other_pre_norm_vals = []
+
     for layer_idx in late_indices:
         other_drift = other_peak[layer_idx] - other_pre[layer_idx]
         burst_drift = burst_peak[layer_idx] - burst_pre[layer_idx]
         burst_norm = float(np.linalg.norm(burst_drift))
         other_norm = float(np.linalg.norm(other_drift))
         pre_other_norm = float(np.linalg.norm(other_pre[layer_idx]))
+        pre_burst_norm = float(np.linalg.norm(burst_pre[layer_idx]))
 
         centroid_projection_vals.append(
             float(np.dot(other_drift, burst_drift) / (burst_norm + 1e-12))
@@ -116,6 +130,13 @@ def representation_for_run(
             float(np.dot(other_drift, burst_drift) / ((other_norm * burst_norm) + 1e-12))
         )
 
+        burst_self_projection_vals.append(burst_norm)
+        burst_shift_norm_vals.append(burst_norm / (pre_burst_norm + 1e-12))
+        burst_post_norm_vals.append(float(np.linalg.norm(burst_peak[layer_idx])))
+        burst_pre_norm_vals.append(pre_burst_norm)
+        other_post_norm_vals.append(float(np.linalg.norm(other_peak[layer_idx])))
+        other_pre_norm_vals.append(pre_other_norm)
+
     del net_pre, net_peak
 
     return {
@@ -123,6 +144,12 @@ def representation_for_run(
         "late_centroid_projection": float(np.mean(centroid_projection_vals)),
         "late_other_shift_norm": float(np.mean(shift_norm_vals)),
         "late_drift_cosine": float(np.mean(drift_cos_vals)),
+        "late_burst_self_projection": float(np.mean(burst_self_projection_vals)),
+        "late_burst_shift_norm": float(np.mean(burst_shift_norm_vals)),
+        "late_burst_post_norm": float(np.mean(burst_post_norm_vals)),
+        "late_burst_pre_norm": float(np.mean(burst_pre_norm_vals)),
+        "late_other_post_norm": float(np.mean(other_post_norm_vals)),
+        "late_other_pre_norm": float(np.mean(other_pre_norm_vals)),
     }
 
 

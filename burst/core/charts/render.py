@@ -38,6 +38,8 @@ from burst.config import (
     reversion_life_label,
 )
 from burst.core.charts.style import apply_paper_style, figsize, save_figure, style_axes
+from burst.core.train_utils import mean_ci
+
 
 def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
     """Render all core analysis charts to out_dir."""
@@ -76,6 +78,9 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
         plot_grad_norms(bundle, out_dir),
         plot_grad_norm_x_cosine(bundle, out_dir),
         plot_representation_drift(bundle, out_dir),
+        plot_burst_representation_drift(bundle, out_dir),
+        plot_centroid_norms(bundle, out_dir),
+        plot_grad_rank(bundle, out_dir),
     ]
     paths.extend(plot_per_schedule(bundle, out_dir))
     paths.extend(plot_per_layer_cossim(bundle, out_dir))
@@ -268,7 +273,7 @@ def plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
         )
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.12)
     ax.axhline(0.0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
-    annotate_global_phase_boundaries(ax, max_burst_steps(bundle), max_total_steps(bundle))
+    annotate_global_phase_boundaries(ax, max_grad_burst_end(bundle), max_grad_total_steps(bundle))
     style_axes(ax, "Step", "Cosine")
     ax.legend(loc="best", ncol=2)
     path = save_chart(fig, out_dir / "grad_cosine_burst_vs_other.pdf")
@@ -290,9 +295,7 @@ def plot_grad_cosine_per_schedule(bundle: dict, out_dir: Path) -> Path | None:
         steps = np.array(schedule_data["steps"], dtype=float)
         mean = np.array(schedule_data["cosine"]["mean"], dtype=float)
         ci = np.array(schedule_data["cosine"]["ci"], dtype=float)
-        burst_end = (
-            bundle["training"][schedule]["pre_steps"] + bundle["training"][schedule]["burst_steps"]
-        )
+        burst_end = schedule_data["burst_steps"]
 
         fig, ax = plt.subplots(figsize=figsize("half"))
         ax.plot(steps, mean, color=SCHED_COLORS[schedule])
@@ -352,8 +355,10 @@ def plot_grad_norms(bundle: dict, out_dir: Path) -> Path | None:
             alpha=0.12,
         )
 
-    annotate_global_phase_boundaries(axes[0], max_burst_steps(bundle), max_total_steps(bundle))
-    annotate_global_phase_boundaries(axes[1], max_burst_steps(bundle), max_total_steps(bundle))
+    grad_burst = max_grad_burst_end(bundle)
+    grad_total = max_grad_total_steps(bundle)
+    annotate_global_phase_boundaries(axes[0], grad_burst, grad_total)
+    annotate_global_phase_boundaries(axes[1], grad_burst, grad_total)
     style_axes(axes[0], "Step", "L2 Norm")
     style_axes(axes[1], "Step", "L2 Norm")
     axes[1].legend(loc="best", ncol=1)
@@ -408,8 +413,10 @@ def plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
         )
 
     axes[0].axhline(0.0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
-    annotate_global_phase_boundaries(axes[0], max_burst_steps(bundle), max_total_steps(bundle))
-    annotate_global_phase_boundaries(axes[1], max_burst_steps(bundle), max_total_steps(bundle))
+    grad_burst = max_grad_burst_end(bundle)
+    grad_total = max_grad_total_steps(bundle)
+    annotate_global_phase_boundaries(axes[0], grad_burst, grad_total)
+    annotate_global_phase_boundaries(axes[1], grad_burst, grad_total)
     style_axes(axes[0], "Step", "Signed Dot")
     style_axes(axes[1], "Step", "Power")
     axes[1].legend(loc="best", ncol=1)
@@ -468,6 +475,152 @@ def plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
     path = save_chart(fig, out_dir / "representation_drift_centroid_and_shift.pdf")
     write_aliases(path, [out_dir / "rep_drift_summary.pdf"])
     return path
+
+
+def plot_burst_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot burst self-projection and burst normalized shift across schedules."""
+    representation = bundle.get("representation", {})
+    by_schedule = representation.get("by_schedule", {})
+    if not by_schedule:
+        return None
+
+    schedules = [s for s in bundle["config"]["schedules"] if s in by_schedule]
+    if not schedules:
+        return None
+    first_sched = by_schedule[schedules[0]]
+    if "late_burst_self_projection" not in first_sched:
+        return None
+
+    xs = np.arange(len(schedules))
+    labels = [sched_pct_label(s) for s in schedules]
+
+    proj_mean = np.array(
+        [by_schedule[s]["late_burst_self_projection"]["mean"] for s in schedules], dtype=float
+    )
+    proj_ci = np.array(
+        [by_schedule[s]["late_burst_self_projection"]["ci"] for s in schedules], dtype=float
+    )
+    shift_mean = np.array(
+        [by_schedule[s]["late_burst_shift_norm"]["mean"] for s in schedules], dtype=float
+    )
+    shift_ci = np.array(
+        [by_schedule[s]["late_burst_shift_norm"]["ci"] for s in schedules], dtype=float
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize("full"), sharex=True)
+    axes[0].plot(xs, proj_mean, color=COLOR_SPECIAL, marker="o", ms=3)
+    axes[0].fill_between(
+        xs, proj_mean - proj_ci, proj_mean + proj_ci, color=COLOR_SPECIAL, alpha=0.12
+    )
+    axes[0].set_xticks(xs)
+    axes[0].set_xticklabels(labels)
+    style_axes(axes[0], "Concentration %", "||burst drift||")
+
+    axes[1].plot(xs, shift_mean, color=COLOR_SPECIAL, marker="o", ms=3)
+    axes[1].fill_between(
+        xs, shift_mean - shift_ci, shift_mean + shift_ci, color=COLOR_SPECIAL, alpha=0.12
+    )
+    axes[1].set_xticks(xs)
+    axes[1].set_xticklabels(labels)
+    style_axes(axes[1], "Concentration %", "Normalized Shift (burst)")
+
+    return save_chart(fig, out_dir / "representation_drift_burst_self.pdf")
+
+
+def plot_centroid_norms(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot post/pre centroid norm ratios for burst and other data."""
+    representation = bundle.get("representation", {})
+    by_schedule = representation.get("by_schedule", {})
+    if not by_schedule:
+        return None
+
+    schedules = [s for s in bundle["config"]["schedules"] if s in by_schedule]
+    if not schedules:
+        return None
+    first_sched = by_schedule[schedules[0]]
+    if "late_burst_post_norm" not in first_sched:
+        return None
+
+    xs = np.arange(len(schedules))
+    labels = [sched_pct_label(s) for s in schedules]
+
+    burst_ratio_seeds: list[list[float]] = []
+    other_ratio_seeds: list[list[float]] = []
+    for s in schedules:
+        per_seed = by_schedule[s]["per_seed"]
+        burst_ratio_seeds.append(
+            [
+                seed["late_burst_post_norm"] / (seed["late_burst_pre_norm"] + 1e-12)
+                for seed in per_seed
+            ]
+        )
+        other_ratio_seeds.append(
+            [
+                seed["late_other_post_norm"] / (seed["late_burst_pre_norm"] + 1e-12)
+                for seed in per_seed
+            ]
+        )
+
+    burst_mean = np.array([np.mean(r) for r in burst_ratio_seeds], dtype=float)
+    burst_ci = np.array([mean_ci(np.array(r))[1] for r in burst_ratio_seeds], dtype=float)
+    other_mean = np.array([np.mean(r) for r in other_ratio_seeds], dtype=float)
+    other_ci = np.array([mean_ci(np.array(r))[1] for r in other_ratio_seeds], dtype=float)
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize("full"), sharex=True)
+    axes[0].plot(xs, burst_mean, color=COLOR_SPECIAL, marker="o", ms=3)
+    axes[0].fill_between(
+        xs, burst_mean - burst_ci, burst_mean + burst_ci, color=COLOR_SPECIAL, alpha=0.12
+    )
+    axes[0].axhline(1.0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
+    axes[0].set_xticks(xs)
+    axes[0].set_xticklabels(labels)
+    style_axes(axes[0], "Concentration %", "burst_post / burst_pre")
+
+    axes[1].plot(xs, other_mean, color=COLOR_OTHER, marker="o", ms=3)
+    axes[1].fill_between(
+        xs, other_mean - other_ci, other_mean + other_ci, color=COLOR_OTHER, alpha=0.12
+    )
+    axes[1].axhline(1.0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
+    axes[1].set_xticks(xs)
+    axes[1].set_xticklabels(labels)
+    style_axes(axes[1], "Concentration %", "other_post / burst_pre")
+
+    return save_chart(fig, out_dir / "representation_centroid_norms.pdf")
+
+
+def plot_grad_rank(bundle: dict, out_dir: Path) -> Path | None:
+    """Plot effective gradient rank overlay across schedules."""
+    gradients = bundle.get("gradients", {})
+    if not gradients:
+        return None
+
+    has_rank = any("grad_rank" in g for g in gradients.values())
+    if not has_rank:
+        return None
+
+    fig, ax = plt.subplots(figsize=figsize("half"))
+    for schedule in bundle["config"]["schedules"]:
+        if schedule not in gradients:
+            continue
+        schedule_data = gradients[schedule]
+        rank_data = schedule_data.get("grad_rank")
+        if not rank_data:
+            continue
+        steps = np.array(schedule_data["steps"], dtype=float)
+        mean = np.array(rank_data["mean"], dtype=float)
+        ci = np.array(rank_data["ci"], dtype=float)
+        ax.plot(
+            steps,
+            mean,
+            color=SCHED_COLORS[schedule],
+            label=SCHED_DISPLAY.get(schedule, schedule),
+        )
+        ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.12)
+
+    annotate_global_phase_boundaries(ax, max_grad_burst_end(bundle), max_grad_total_steps(bundle))
+    style_axes(ax, "Step", "Effective Rank")
+    ax.legend(loc="best", ncol=2)
+    return save_chart(fig, out_dir / "grad_rank_effective.pdf")
 
 
 def plot_per_schedule(bundle: dict, out_dir: Path) -> list[Path]:
@@ -558,6 +711,18 @@ def max_burst_steps(bundle: dict) -> int:
     return max_burst
 
 
+def max_grad_burst_end(bundle: dict) -> int:
+    """Return the maximum gradient-local burst end step across schedules."""
+    gradients = bundle.get("gradients", {})
+    return max((g["burst_steps"] for g in gradients.values()), default=0)
+
+
+def max_grad_total_steps(bundle: dict) -> int:
+    """Return the maximum gradient step across schedules."""
+    gradients = bundle.get("gradients", {})
+    return max((int(g["steps"][-1]) for g in gradients.values() if g["steps"]), default=0)
+
+
 def annotate_global_phase_boundaries(ax: Axes, burst_end: float, total_steps: float) -> None:
     """Draw vertical phase boundary lines and labels on an axes."""
     ax.axvline(burst_end, color="black", ls="--", lw=1.15, alpha=0.6)
@@ -615,6 +780,7 @@ def plot_extended_auc_bars(bundle: dict, out_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Per-layer heatmap + line chart helpers
 # ---------------------------------------------------------------------------
+
 
 def build_layer_grid(
     layer_names: list[str], steps: list[float], metric_dict: dict[str, dict]

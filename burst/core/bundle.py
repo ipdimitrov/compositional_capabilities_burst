@@ -374,7 +374,7 @@ def gradient_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
     if not cosine_arr:
         return {}
 
-    return {
+    result: dict[str, Any] = {
         "steps": first_steps.tolist(),
         "cosine": bundle_metric(cosine_arr),
         "burst_norm": bundle_metric(burst_norm_arr),
@@ -384,6 +384,32 @@ def gradient_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "signed_dot": bundle_metric(signed_dot_arr),
         "interference_power": bundle_metric(interference_power_arr),
     }
+
+    grad_rank = aggregate_grad_rank(runs, first_steps)
+    if grad_rank is not None:
+        result["grad_rank"] = grad_rank
+
+    return result
+
+
+def aggregate_grad_rank(
+    runs: list[dict[str, Any]], first_steps: np.ndarray
+) -> dict[str, Any] | None:
+    """Average effective rank across layers per step, then aggregate across seeds."""
+    rank_arr: list[np.ndarray] = []
+    for run in runs:
+        rank_dict = run["grad_sim_log"].get("grad_rank", {})
+        if not rank_dict:
+            continue
+        steps = np.array(run["grad_sim_log"]["step"], dtype=float)
+        layer_series = [np.array(vals, dtype=float) for vals in rank_dict.values()]
+        if not layer_series or any(len(s) != len(steps) for s in layer_series):
+            continue
+        mean_across_layers = np.mean(np.stack(layer_series), axis=0)
+        rank_arr.append(interpolate_to_reference(first_steps, steps, mean_across_layers))
+    if not rank_arr:
+        return None
+    return bundle_metric(rank_arr)
 
 
 def bundle_metric(series_list: list[np.ndarray]) -> dict[str, Any]:
