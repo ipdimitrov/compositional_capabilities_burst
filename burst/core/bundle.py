@@ -32,7 +32,6 @@ from burst.core.train_utils import (
     resolve_run_paths,
 )
 
-BUNDLE_SCHEMA_VERSION = 2
 BUNDLE_DIRNAME = "chart_bundle"
 BUNDLE_VERSION_DIR = "v1"
 BUNDLE_FILENAME = "core_bundle.json"
@@ -78,7 +77,6 @@ def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
     grad_records = load_grad_sim_records(run_dir)
 
     return {
-        "schema_version": BUNDLE_SCHEMA_VERSION,
         "run_name": Path(run_dir).name,
         "config": {
             "burst_mode": burst_mode,

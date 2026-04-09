@@ -187,7 +187,7 @@ class nanoGPT(nn.Module):  # noqa: N801
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         """Compute logits for the input token indices."""
         device = idx.device
-        _b, t = idx.size()
+        t = idx.size(1)
 
         tok_emb = self.transformer.wte(idx)
         pos = torch.arange(0, t, dtype=torch.long, device=device)

@@ -52,7 +52,7 @@ LOSS_BURST = f"loss_{CLASS_BURST}"
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 90, 70]  # [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0] #
+BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0] #[100, 90, 70]  # 
 
 UNIFORM_PCT = 25
 
@@ -109,6 +109,13 @@ COLOR_OTHER = "#1565C0"
 COLOR_SPECIAL = "#D32F2F"
 COLOR_PROJECTION = "#5E3C99"
 COLOR_SHIFT = "#1B9E77"
+COLOR_ZERO_LINE = "#666666"
+COLOR_TABLE_HEADER = "#EFEFEF"
+COLOR_TABLE_EDGE = "#CCCCCC"
+
+LAYER_CMAP = "RdBu_r"
+DRIFT_CMAP = "magma"
+LAYER_LINE_CMAP = "tab20"
 
 # ---------------------------------------------------------------------------
 # Data parameters

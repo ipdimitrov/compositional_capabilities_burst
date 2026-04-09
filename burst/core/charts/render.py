@@ -25,6 +25,12 @@ from burst.config import (
     COLOR_PROJECTION,
     COLOR_SHIFT,
     COLOR_SPECIAL,
+    COLOR_TABLE_EDGE,
+    COLOR_TABLE_HEADER,
+    COLOR_ZERO_LINE,
+    DRIFT_CMAP,
+    LAYER_CMAP,
+    LAYER_LINE_CMAP,
     LOSS_BURST,
     LOSS_OTHER,
     SCHED_COLORS,
@@ -33,18 +39,8 @@ from burst.config import (
 )
 from burst.core.charts.style import apply_paper_style, figsize, save_figure, style_axes
 
-MIN_SCHEMA = 2
-
-
 def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
     """Render all core analysis charts to out_dir."""
-    v = bundle.get("schema_version", 0)
-    if v < MIN_SCHEMA:
-        msg = (
-            f"Bundle schema_version={v} is too old (need >={MIN_SCHEMA}). "
-            "Rebuild with: python -m burst.core bundle <run_dir>"
-        )
-        raise ValueError(msg)
     apply_paper_style()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -212,12 +208,12 @@ def plot_summary_table(bundle: dict, out_dir: Path) -> Path:
     for (row, col), cell in table.get_celld().items():
         if row == 0:
             cell.set_text_props(fontweight="bold")
-            cell.set_facecolor("#EFEFEF")
+            cell.set_facecolor(COLOR_TABLE_HEADER)
         elif col == 0:
             schedule = schedules[row - 1]
             cell.set_facecolor(SCHED_COLORS[schedule] + "22")
             cell.set_text_props(fontweight="bold")
-        cell.set_edgecolor("#CCCCCC")
+        cell.set_edgecolor(COLOR_TABLE_EDGE)
     return save_chart(fig, out_dir / "summary_table.pdf")
 
 
@@ -271,7 +267,7 @@ def plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
             label=SCHED_DISPLAY.get(schedule, schedule),
         )
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.12)
-    ax.axhline(0.0, color="#666666", ls=":", lw=1.0)
+    ax.axhline(0.0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
     annotate_global_phase_boundaries(ax, max_burst_steps(bundle), max_total_steps(bundle))
     style_axes(ax, "Step", "Cosine")
     ax.legend(loc="best", ncol=2)
@@ -301,7 +297,7 @@ def plot_grad_cosine_per_schedule(bundle: dict, out_dir: Path) -> Path | None:
         fig, ax = plt.subplots(figsize=figsize("half"))
         ax.plot(steps, mean, color=SCHED_COLORS[schedule])
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.14)
-        ax.axhline(0.0, color="#666666", ls=":", lw=1.0)
+        ax.axhline(0.0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
         annotate_global_phase_boundaries(ax, burst_end, steps[-1])
         style_axes(ax, "Step", "Cosine")
         path = save_chart(fig, out_dir / f"grad_cosine_{schedule.upper()}_per_schedule.pdf")
@@ -411,7 +407,7 @@ def plot_grad_norm_x_cosine(bundle: dict, out_dir: Path) -> Path | None:
             alpha=0.12,
         )
 
-    axes[0].axhline(0.0, color="#666666", ls=":", lw=1.0)
+    axes[0].axhline(0.0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
     annotate_global_phase_boundaries(axes[0], max_burst_steps(bundle), max_total_steps(bundle))
     annotate_global_phase_boundaries(axes[1], max_burst_steps(bundle), max_total_steps(bundle))
     style_axes(axes[0], "Step", "Signed Dot")
@@ -456,7 +452,7 @@ def plot_representation_drift(bundle: dict, out_dir: Path) -> Path | None:
     axes[0].fill_between(
         xs, proj_mean - proj_ci, proj_mean + proj_ci, color=COLOR_PROJECTION, alpha=0.12
     )
-    axes[0].axhline(0.0, color="#666666", ls=":", lw=1.0)
+    axes[0].axhline(0.0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
     axes[0].set_xticks(xs)
     axes[0].set_xticklabels(labels)
     style_axes(axes[0], "Concentration %", "Projection")
@@ -620,10 +616,6 @@ def plot_extended_auc_bars(bundle: dict, out_dir: Path) -> Path:
 # Per-layer heatmap + line chart helpers
 # ---------------------------------------------------------------------------
 
-LAYER_CMAP = "RdBu_r"
-DRIFT_CMAP = "magma"
-
-
 def build_layer_grid(
     layer_names: list[str], steps: list[float], metric_dict: dict[str, dict]
 ) -> np.ndarray:
@@ -679,7 +671,7 @@ def plot_layer_lines(
     """Render a per-layer line chart."""
     n_layers = len(layer_names)
     fig, ax = plt.subplots(figsize=figsize("half"))
-    cmap_obj = plt.get_cmap("tab20")
+    cmap_obj = plt.get_cmap(LAYER_LINE_CMAP)
     for li, ln in enumerate(layer_names):
         mean = np.array(metric_dict[ln]["mean"], dtype=float)
         ax.plot(steps[: len(mean)], mean, lw=1.4, label=ln, color=cmap_obj(li / max(n_layers, 1)))
