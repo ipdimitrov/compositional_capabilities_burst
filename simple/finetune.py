@@ -66,6 +66,7 @@ def finetune(
     tag: str | None = None,
     seed: int = 42,
     quiet: bool = False,
+    lite: bool = False,
 ) -> dict:
     """Run burst-phase finetuning.
 
@@ -103,10 +104,13 @@ def finetune(
                                weight_decay=weight_decay, beta1=beta1, beta2=beta2)
 
     # reference state dict for weight drift tracking
-    sd_ref = state_dict_cpu(net)
+    if not lite:
+        sd_ref = state_dict_cpu(net)
 
     log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
-           "loss_other": [], "loss_burst": [], "lr": [],
+           "loss_other": [], "loss_burst": [], "lr": []}
+    if not lite:
+        log.update({
            "weight_drift": [],
            "grad_norm_burst": [], "grad_norm_bg": [], "grad_norm_train": [],
            "grad_cosine_burst_bg": [], "grad_cosine_per_layer": [],
@@ -114,7 +118,7 @@ def finetune(
            "grad_align_frac": [], "grad_proj_magnitude": [],
            "grad_autocorr_bg": [], "grad_autocorr_burst": [],
            "grad_bg_vs_ref": [], "grad_burst_vs_ref": [],
-           "grad_rank_burst": [], "grad_rank_bg": []}
+           "grad_rank_burst": [], "grad_rank_bg": []})
 
     lr_start = lr * lr_start_frac
     lr_end = lr * lr_end_frac
@@ -147,6 +151,12 @@ def finetune(
             log["loss_burst"].append(lb)
             log["lr"].append(cur_lr)
 
+            if lite:
+                pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
+                                 acc_o=f"{ao:.3f}")
+                net.train()
+                continue
+
             # interp metrics
             sd_now = state_dict_cpu(net)
             drift = weight_drift_l2(sd_ref, sd_now)["total"]
@@ -164,8 +174,8 @@ def finetune(
                 g_burst.unsqueeze(0), g_bg.unsqueeze(0)).item()
             # projection of bg gradient onto burst direction
             dot = torch.dot(g_bg, g_burst).item()
-            align_frac = (dot ** 2) / (gn_bg ** 2 + 1e-10)  # (g_bg · ĝ_burst)² / ‖g_bg‖²
-            proj_mag = abs(dot) / (gn_burst + 1e-10)          # |g_bg · ĝ_burst|
+            align_frac = (dot ** 2) / (gn_bg ** 2 + 1e-10)
+            proj_mag = abs(dot) / (gn_burst + 1e-10)
 
             net.zero_grad()
             log["grad_norm_burst"].append(gn_burst)

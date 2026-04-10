@@ -100,6 +100,7 @@ def make_data(
     depth: int = DEPTH,
     burst_pos: int = BURST_POS,
     identity_burst_slot: bool = False,
+    burst_correlation: float = 0.0,
     seed: int = DATA_SEED,
     n_docs: int = N_DOCS,
     n_eval: int = N_EVAL,
@@ -118,9 +119,26 @@ def make_data(
 
     # -- bijections --
     bijections = [np.arange(n_alph)]  # identity
-    for _ in range(n_a * depth + n_burst):
+    for _ in range(n_a * depth):
         bijections.append(rng.permutation(n_alph))
-    burst_fns = list(range(n_a * depth + 1, n_a * depth + n_burst + 1))
+
+    # Burst functions: some copied from pretrain slot, rest are new.
+    # burst_correlation=0.0 → all new, 1.0 → all copied from pretrain slot.
+    pretrain_slot_fns = list(range((burst_pos - 1) * n_a + 1, burst_pos * n_a + 1))
+    n_copied = int(round(burst_correlation * n_burst))
+    n_novel = n_burst - n_copied
+    # Generate novel bijections
+    for _ in range(n_novel):
+        bijections.append(rng.permutation(n_alph))
+    novel_fns = list(range(n_a * depth + 1, n_a * depth + n_novel + 1))
+    # Copy from pretrain slot (reuse their bijection indices with new token ids)
+    copied_fns = []
+    for i in range(n_copied):
+        src = pretrain_slot_fns[i % len(pretrain_slot_fns)]
+        new_idx = len(bijections)
+        bijections.append(bijections[src].copy())
+        copied_fns.append(new_idx)
+    burst_fns = novel_fns + copied_fns
 
     pos_fns = {p: list(range((p - 1) * n_a + 1, p * n_a + 1))
                for p in range(1, depth + 1)}
@@ -179,6 +197,7 @@ def make_data(
         "task_info": {
             "n_alph": n_alph, "seq_len": seq_len, "n_a": n_a,
             "depth": depth, "burst_pos": burst_pos,
+            "burst_correlation": burst_correlation,
             "n_other_tasks": len(other_tasks),
             "n_burst_tasks": len(burst_tasks),
             "doc_len": int(ref.shape[1]),

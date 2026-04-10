@@ -43,6 +43,7 @@ def forget(
     tag: str | None = None,
     seed: int = 42,
     quiet: bool = False,
+    lite: bool = False,
 ) -> dict:
     """Run reversion phase: background-only training, measure forgetting.
 
@@ -82,11 +83,12 @@ def forget(
     reset_optimizer(optimizer)  # fresh momentum for reversion phase
 
     # reference state dicts for weight drift tracking
-    sd_ft = state_dict_cpu(net)
-    sd_pt = None
-    if pretrain_ckpt is not None:
-        from simple.interp import load_sd
-        sd_pt = load_sd(pretrain_ckpt)
+    if not lite:
+        sd_ft = state_dict_cpu(net)
+        sd_pt = None
+        if pretrain_ckpt is not None:
+            from simple.interp import load_sd
+            sd_pt = load_sd(pretrain_ckpt)
 
     # measure peak burst accuracy at start of reversion
     peak_burst = eval_accuracy(net, eval_burst, prompt_len)
@@ -96,7 +98,9 @@ def forget(
     lr_end = lr * lr_end_frac
 
     log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
-           "loss_other": [], "loss_burst": [], "lr": [],
+           "loss_other": [], "loss_burst": [], "lr": []}
+    if not lite:
+        log.update({
            "weight_drift_from_ft": [], "weight_drift_from_pt": [],
            "grad_norm": [], "grad_norm_burst": [], "grad_cosine_burst_bg": [],
            "grad_cosine_per_layer": [],
@@ -104,7 +108,7 @@ def forget(
            "grad_align_frac": [], "grad_proj_magnitude": [],
            "grad_autocorr_bg": [], "grad_autocorr_burst": [],
            "grad_bg_vs_ref": [], "grad_burst_vs_ref": [],
-           "grad_rank_burst": [], "grad_rank_bg": []}
+           "grad_rank_burst": [], "grad_rank_bg": []})
 
     _prev_g_bg = None
     _prev_g_burst = None
@@ -141,6 +145,12 @@ def forget(
             log["loss_burst"].append(lb)
             log["lr"].append(cur_lr)
 
+            if lite:
+                pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
+                                 acc_o=f"{ao:.3f}")
+                net.train()
+                continue
+
             # interp metrics
             sd_now = state_dict_cpu(net)
             drift_ft = weight_drift_l2(sd_ft, sd_now)["total"]
@@ -153,17 +163,14 @@ def forget(
             net.train()
             g_bg = _get_grad_vector(net, batch)
             log["grad_norm"].append(g_bg.norm().item())
-            # sample a burst batch from eval data for cosine
             idx = np.random.randint(len(eval_burst), size=min(batch_size, len(eval_burst)))
             burst_batch = eval_burst[idx]
             g_burst = _get_grad_vector(net, burst_batch)
             log["grad_norm_burst"].append(g_burst.norm().item())
-            import torch.nn.functional as _F
-            gc = _F.cosine_similarity(
+            gc = F.cosine_similarity(
                 g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
             log["grad_cosine_burst_bg"].append(gc)
 
-            # projection of bg gradient onto burst direction
             gn_bg = g_bg.norm().item()
             gn_burst = g_burst.norm().item()
             dot = torch.dot(g_bg, g_burst).item()
@@ -172,12 +179,10 @@ def forget(
             log["grad_align_frac"].append(align_frac)
             log["grad_proj_magnitude"].append(proj_mag)
 
-            # gradient directional stability (consecutive-step cosine)
-            import torch.nn.functional as _F2
             if _prev_g_bg is not None:
-                ac_bg = _F2.cosine_similarity(
+                ac_bg = F.cosine_similarity(
                     g_bg.unsqueeze(0), _prev_g_bg.unsqueeze(0)).item()
-                ac_burst = _F2.cosine_similarity(
+                ac_burst = F.cosine_similarity(
                     g_burst.unsqueeze(0), _prev_g_burst.unsqueeze(0)).item()
             else:
                 ac_bg = ac_burst = float("nan")
@@ -186,17 +191,14 @@ def forget(
             _prev_g_bg = g_bg.detach().clone()
             _prev_g_burst = g_burst.detach().clone()
 
-            # gradient direction vs step-0 reference
             if _ref_g_bg is None:
                 _ref_g_bg = g_bg.detach().clone()
                 _ref_g_burst = g_burst.detach().clone()
-            import torch.nn.functional as _F3
             log["grad_bg_vs_ref"].append(
-                _F3.cosine_similarity(g_bg.unsqueeze(0), _ref_g_bg.unsqueeze(0)).item())
+                F.cosine_similarity(g_bg.unsqueeze(0), _ref_g_bg.unsqueeze(0)).item())
             log["grad_burst_vs_ref"].append(
-                _F3.cosine_similarity(g_burst.unsqueeze(0), _ref_g_burst.unsqueeze(0)).item())
+                F.cosine_similarity(g_burst.unsqueeze(0), _ref_g_burst.unsqueeze(0)).item())
 
-            # per-layer gradient cosine
             gc_layers = gradient_cosine_per_layer(net, burst_batch, batch)
             log["grad_cosine_per_layer"].append(gc_layers)
 
@@ -205,7 +207,6 @@ def forget(
             log["grad_norm_entropy"].append(ent)
             log["grad_norm_entropy_burst"].append(ent_burst)
 
-            # gradient effective rank
             rank_bg = grad_effective_rank(net, batch)
             rank_burst = grad_effective_rank(net, burst_batch)
             log["grad_rank_bg"].append(rank_bg)
