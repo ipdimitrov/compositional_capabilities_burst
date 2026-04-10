@@ -159,13 +159,20 @@ def make_data(
     non_bp = [p for p in range(1, depth + 1) if p != burst_pos]
     remaining = list(itertools.product(*[pos_fns[p] for p in non_bp]))
     burst_tasks = []
+    burst_tasks_novel = []
+    burst_tasks_copied = []
     for combo in remaining:
         for bf in burst_fns:
             fns = list(combo)
             fns.insert(burst_pos - 1, bf)
-            burst_tasks.append(("burst",) + tuple(fns))
+            task = ("burst",) + tuple(fns)
+            burst_tasks.append(task)
+            if bf in novel_fns:
+                burst_tasks_novel.append(task)
+            else:
+                burst_tasks_copied.append(task)
 
-    # -- pools --
+    # -- pools (main RNG stream — unchanged from original) --
     np.random.seed(seed)
     bg_pool = _gen_pool(other_tasks, n_docs, bijections, seq_len,
                         token_idx, fn_tok)
@@ -182,6 +189,25 @@ def make_data(
     eval_other = _cat(eval_other_pool)
     eval_burst = _cat(eval_burst_pool)
 
+    # -- novel/copied split eval (separate RNG to avoid contaminating main stream) --
+    np.random.seed(seed + 99999)
+    eval_burst_novel_pool = _gen_pool(burst_tasks_novel, n_eval, bijections,
+                                      seq_len, token_idx, fn_tok) if burst_tasks_novel else {}
+    eval_burst_copied_pool = _gen_pool(burst_tasks_copied, n_eval, bijections,
+                                       seq_len, token_idx, fn_tok) if burst_tasks_copied else {}
+    if eval_burst_novel_pool or eval_burst_copied_pool:
+        pad_pools = [p for p in [eval_burst_novel_pool, eval_burst_copied_pool] if p]
+        # pad to same length as main eval
+        target_len = eval_burst.shape[1]
+        for pool in pad_pools:
+            for key in pool:
+                docs = pool[key]
+                if docs.shape[1] < target_len:
+                    pad = np.zeros((docs.shape[0], target_len - docs.shape[1]), dtype=docs.dtype)
+                    pool[key] = np.concatenate([docs, pad], axis=1)
+    eval_burst_novel = _cat(eval_burst_novel_pool) if eval_burst_novel_pool else np.zeros((0, eval_burst.shape[1]), dtype=np.int64)
+    eval_burst_copied = _cat(eval_burst_copied_pool) if eval_burst_copied_pool else np.zeros((0, eval_burst.shape[1]), dtype=np.int64)
+
     ref = eval_other if eval_other.shape[0] > 1 else eval_burst
     sp_positions = np.where(ref[0] == token_idx[" "])[0]
     prompt_len = int(sp_positions[0]) + 1 + seq_len + 1
@@ -191,6 +217,8 @@ def make_data(
         "target_pool": target_pool,
         "eval_other": eval_other,
         "eval_burst": eval_burst,
+        "eval_burst_novel": eval_burst_novel,
+        "eval_burst_copied": eval_burst_copied,
         "prompt_len": prompt_len,
         "vocab_size": vocab_size + 10,
         "context_size": ref.shape[1] + 5,

@@ -94,6 +94,10 @@ def finetune(
     bg_pool = data["bg_pool"]
     eval_other = data["eval_other"]
     eval_burst = data["eval_burst"]
+    eval_burst_novel = data.get("eval_burst_novel")
+    eval_burst_copied = data.get("eval_burst_copied")
+    _has_split = (eval_burst_novel is not None and len(eval_burst_novel) > 0
+                  and eval_burst_copied is not None and len(eval_burst_copied) > 0)
 
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -108,7 +112,9 @@ def finetune(
         sd_ref = state_dict_cpu(net)
 
     log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
-           "loss_other": [], "loss_burst": [], "lr": []}
+           "loss_other": [], "loss_burst": [], "lr": [],
+           "acc_burst_novel": [], "acc_burst_copied": [],
+           "loss_burst_novel": [], "loss_burst_copied": []}
     if not lite:
         log.update({
            "weight_drift": [],
@@ -150,6 +156,12 @@ def finetune(
             log["loss_other"].append(lo)
             log["loss_burst"].append(lb)
             log["lr"].append(cur_lr)
+
+            if _has_split:
+                log["acc_burst_novel"].append(eval_accuracy(net, eval_burst_novel, prompt_len))
+                log["acc_burst_copied"].append(eval_accuracy(net, eval_burst_copied, prompt_len))
+                log["loss_burst_novel"].append(eval_loss(net, eval_burst_novel))
+                log["loss_burst_copied"].append(eval_loss(net, eval_burst_copied))
 
             if lite:
                 pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
