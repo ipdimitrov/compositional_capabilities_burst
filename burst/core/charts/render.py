@@ -40,6 +40,34 @@ from burst.config import (
 from burst.core.charts.style import apply_paper_style, figsize, save_figure, style_axes
 from burst.core.train_utils import mean_ci
 
+ACC_YLIM: tuple[float, float] = (-0.05, 1.05)
+
+
+def loss_ylim(bundle: dict, metrics: list[str]) -> tuple[float, float]:
+    """Compute a shared y-axis range across metrics and schedules."""
+    lo, hi = float("inf"), float("-inf")
+    for schedule in bundle["config"]["schedules"]:
+        for metric in metrics:
+            data = bundle["training"][schedule][metric]
+            mean = np.array(data["mean"], dtype=float)
+            ci = np.array(data["ci"], dtype=float)
+            lo = min(lo, float(np.nanmin(mean - ci)))
+            hi = max(hi, float(np.nanmax(mean + ci)))
+    pad = (hi - lo) * 0.05
+    return (lo - pad, hi + pad)
+
+
+def save_with_log_variant(fig: Figure, ax: Axes, path: Path) -> list[Path]:
+    """Save a chart in linear scale, then save a log-scale variant with '_log' suffix."""
+    linear_path = save_chart(fig, path)
+    orig_ylim = ax.get_ylim()
+    ax.set_yscale("log")
+    ax.set_ylim(bottom=max(orig_ylim[0], 1e-6), top=orig_ylim[1])
+    log_path = save_chart(fig, path.with_stem(path.stem + "_log"))
+    ax.set_yscale("linear")
+    ax.set_ylim(orig_ylim)
+    return [linear_path, log_path]
+
 
 def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
     """Render all core analysis charts to out_dir."""
@@ -47,20 +75,26 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    eval_loss_yl = loss_ylim(bundle, [LOSS_BURST, LOSS_OTHER])
+    train_loss_yl = loss_ylim(bundle, ["loss"])
+
     burst_fname = f"overlay_{ACC_BURST.upper()}_{CLASS_BURST}_class_accuracy.pdf"
     other_fname = f"overlay_{ACC_OTHER.upper()}_{CLASS_OTHER}_class_accuracy.pdf"
     paths = [
         plot_schedule_bars(bundle, out_dir),
         plot_lr_curves(bundle, out_dir),
-        plot_overlay(bundle, out_dir, ACC_BURST, f"{CLASS_BURST} Accuracy", burst_fname),
-        plot_overlay(bundle, out_dir, ACC_OTHER, f"{CLASS_OTHER} Accuracy", other_fname),
-        plot_overlay(bundle, out_dir, "loss", "Loss", "overlay_LOSS_training_loss.pdf"),
+        plot_overlay(bundle, out_dir, ACC_BURST, f"{CLASS_BURST} Accuracy", burst_fname, ACC_YLIM),
+        plot_overlay(bundle, out_dir, ACC_OTHER, f"{CLASS_OTHER} Accuracy", other_fname, ACC_YLIM),
+        plot_overlay(
+            bundle, out_dir, "loss", "Loss", "overlay_LOSS_training_loss.pdf", train_loss_yl
+        ),
         plot_overlay(
             bundle,
             out_dir,
             LOSS_BURST,
             f"{CLASS_BURST} Eval Loss",
             f"overlay_{LOSS_BURST.upper()}_eval_loss.pdf",
+            eval_loss_yl,
         ),
         plot_overlay(
             bundle,
@@ -68,11 +102,13 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
             LOSS_OTHER,
             f"{CLASS_OTHER} Eval Loss",
             f"overlay_{LOSS_OTHER.upper()}_eval_loss.pdf",
+            eval_loss_yl,
         ),
         plot_auc_bars(bundle, out_dir),
         plot_extended_auc_bars(bundle, out_dir),
         plot_summary_table(bundle, out_dir),
         plot_reversion_zoom(bundle, out_dir),
+        plot_reversion_zoom_loss(bundle, out_dir),
         plot_grad_cosine(bundle, out_dir),
         plot_grad_cosine_per_schedule(bundle, out_dir),
         plot_grad_norms(bundle, out_dir),
@@ -83,6 +119,7 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
         plot_grad_rank(bundle, out_dir),
     ]
     paths.extend(plot_per_schedule(bundle, out_dir))
+    paths.extend(plot_per_schedule_loss(bundle, out_dir, eval_loss_yl))
     paths.extend(plot_per_layer_cossim(bundle, out_dir))
     paths.extend(plot_per_layer_grad_norm(bundle, out_dir))
     paths.extend(plot_per_layer_norm_x_cossim(bundle, out_dir))
@@ -131,7 +168,14 @@ def plot_lr_curves(bundle: dict, out_dir: Path) -> Path:
     return save_chart(fig, out_dir / "lr_schedule.pdf")
 
 
-def plot_overlay(bundle: dict, out_dir: Path, metric: str, ylabel: str, filename: str) -> Path:
+def plot_overlay(  # noqa: PLR0913
+    bundle: dict,
+    out_dir: Path,
+    metric: str,
+    ylabel: str,
+    filename: str,
+    ylim: tuple[float, float],
+) -> Path:
     """Plot a training metric overlay across schedules."""
     fig, ax = plt.subplots(figsize=figsize("half"))
     max_burst_end = 0
@@ -151,11 +195,17 @@ def plot_overlay(bundle: dict, out_dir: Path, metric: str, ylabel: str, filename
         )
         ax.fill_between(steps, mean - ci, mean + ci, color=SCHED_COLORS[schedule], alpha=0.12)
 
-    if metric != "loss":
-        ax.set_ylim(-0.05, 1.05)
+    ax.set_ylim(ylim)
     annotate_global_phase_boundaries(ax, max_burst_end, max_total_steps(bundle))
     style_axes(ax, "Step", ylabel)
     ax.legend(loc="best", ncol=2)
+
+    if metric.startswith("loss"):
+        paths = save_with_log_variant(fig, ax, out_dir / filename)
+        for p in paths:
+            write_aliases(p, overlay_aliases(p.name))
+        return paths[0]
+
     path = save_chart(fig, out_dir / filename)
     write_aliases(path, overlay_aliases(filename))
     return path
@@ -246,10 +296,39 @@ def plot_reversion_zoom(bundle: dict, out_dir: Path) -> Path:
             color=SCHED_COLORS[schedule],
             alpha=0.12,
         )
-    ax.set_ylim(-0.05, 1.05)
+    ax.set_ylim(ACC_YLIM)
     style_axes(ax, "Reversion Step", "Special Accuracy")
     ax.legend(loc="upper right", ncol=2)
     return save_chart(fig, out_dir / "reversion_zoom_forgetting_speed.pdf")
+
+
+def plot_reversion_zoom_loss(bundle: dict, out_dir: Path) -> list[Path]:
+    """Plot burst eval loss during the reversion phase only (linear + log)."""
+    fig, ax = plt.subplots(figsize=figsize("half"))
+    for schedule in bundle["config"]["schedules"]:
+        schedule_data = bundle["training"][schedule]
+        steps = np.array(schedule_data[LOSS_BURST]["steps"], dtype=float)
+        mean = np.array(schedule_data[LOSS_BURST]["mean"], dtype=float)
+        ci = np.array(schedule_data[LOSS_BURST]["ci"], dtype=float)
+        burst_end = schedule_data["pre_steps"] + schedule_data["burst_steps"]
+        mask = steps >= burst_end
+        local_steps = steps[mask] - burst_end
+        ax.plot(
+            local_steps,
+            mean[mask],
+            color=SCHED_COLORS[schedule],
+            label=SCHED_DISPLAY.get(schedule, schedule),
+        )
+        ax.fill_between(
+            local_steps,
+            mean[mask] - ci[mask],
+            mean[mask] + ci[mask],
+            color=SCHED_COLORS[schedule],
+            alpha=0.12,
+        )
+    style_axes(ax, "Reversion Step", "Special Eval Loss")
+    ax.legend(loc="best", ncol=2)
+    return save_with_log_variant(fig, ax, out_dir / "reversion_zoom_loss.pdf")
 
 
 def plot_grad_cosine(bundle: dict, out_dir: Path) -> Path | None:
@@ -645,12 +724,43 @@ def plot_per_schedule(bundle: dict, out_dir: Path) -> list[Path]:
         if pre_steps > 0:
             ax.axvline(pre_steps, color="black", ls="--", lw=1.2, alpha=0.65)
         ax.axvline(burst_end, color="black", ls="--", lw=1.2, alpha=0.65)
-        ax.set_ylim(-0.05, 1.05)
+        ax.set_ylim(ACC_YLIM)
         style_axes(ax, "Step", "Accuracy")
         ax.legend(loc="best")
         path = save_chart(fig, out_dir / f"per_sched_{schedule.upper()}_accuracy.pdf")
         write_aliases(path, [out_dir / f"per_schedule_{schedule}.pdf"])
         paths.append(path)
+    return paths
+
+
+def plot_per_schedule_loss(bundle: dict, out_dir: Path, ylim: tuple[float, float]) -> list[Path]:
+    """Plot per-schedule burst vs other eval loss charts (linear + log)."""
+    paths: list[Path] = []
+    for schedule in bundle["config"]["schedules"]:
+        schedule_data = bundle["training"][schedule]
+        steps = np.array(schedule_data[LOSS_BURST]["steps"], dtype=float)
+        pre_steps = schedule_data["pre_steps"]
+        burst_end = pre_steps + schedule_data["burst_steps"]
+
+        fig, ax = plt.subplots(figsize=figsize("half"))
+        for metric, color, label in (
+            (LOSS_OTHER, COLOR_OTHER, "Other"),
+            (LOSS_BURST, COLOR_SPECIAL, "Special"),
+        ):
+            mean = np.array(schedule_data[metric]["mean"], dtype=float)
+            ci = np.array(schedule_data[metric]["ci"], dtype=float)
+            ax.plot(steps, mean, color=color, label=label)
+            ax.fill_between(steps, mean - ci, mean + ci, color=color, alpha=0.14)
+
+        if pre_steps > 0:
+            ax.axvline(pre_steps, color="black", ls="--", lw=1.2, alpha=0.65)
+        ax.axvline(burst_end, color="black", ls="--", lw=1.2, alpha=0.65)
+        ax.set_ylim(ylim)
+        style_axes(ax, "Step", "Eval Loss")
+        ax.legend(loc="best")
+        paths.extend(
+            save_with_log_variant(fig, ax, out_dir / f"per_sched_{schedule.upper()}_loss.pdf")
+        )
     return paths
 
 
@@ -752,21 +862,24 @@ def sched_pct_label(schedule: str) -> str:
 
 
 def plot_extended_auc_bars(bundle: dict, out_dir: Path) -> Path:
-    """Plot reversion AUC bars for burst-acc, loss-burst, and other-acc."""
+    """Plot reversion AUC bars for burst-acc, burst-loss, other-acc, other-loss."""
     schedules = bundle["config"]["schedules"]
     summary = bundle["summary"]["by_schedule"]
 
-    fig, axes = plt.subplots(1, 3, figsize=figsize("full"), sharey=False)
+    keys = (
+        "reversion_auc",
+        "reversion_auc_loss_burst",
+        "reversion_auc_acc_other",
+        "reversion_auc_loss_other",
+    )
+    titles = ("Burst Acc AUC", "Burst Loss AUC", "Other Acc AUC", "Other Loss AUC")
+
+    fig, axes = plt.subplots(1, len(keys), figsize=figsize("full"), sharey=False)
     xs = np.arange(len(schedules))
     colors = [SCHED_COLORS[s] for s in schedules]
     labels = [SCHED_DISPLAY.get(s, s) for s in schedules]
 
-    for ax, key, title in zip(
-        axes,
-        ("reversion_auc", "reversion_auc_loss_burst", "reversion_auc_acc_other"),
-        ("Burst Acc AUC", "Burst Loss AUC", "Other Acc AUC"),
-        strict=True,
-    ):
+    for ax, key, title in zip(axes, keys, titles, strict=True):
         means = [summary[s][key]["mean"] for s in schedules]
         cis = [summary[s][key]["ci"] for s in schedules]
         ax.bar(xs, means, yerr=cis, color=colors, edgecolor="black", lw=0.7, capsize=4)

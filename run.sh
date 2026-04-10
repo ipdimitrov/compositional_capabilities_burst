@@ -51,6 +51,7 @@ run_experiment() {
 # run_experiment 3 3 current
 
 # ── uncomment for full sweep ───────────────────────────────────────────
+run_experiment 3 3 constant_steps
 run_experiment 3 2 constant_steps
 run_experiment 3 1 constant_steps
 run_experiment 4 1 constant_steps

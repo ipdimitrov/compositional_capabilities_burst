@@ -128,7 +128,7 @@ DATA_SEED = 999
 # Model & training defaults
 # ---------------------------------------------------------------------------
 
-BURST_BASE_STEPS = 50
+BURST_BASE_STEPS = 100
 
 MODE_CURRENT = "current"
 MODE_CONSTANT_STEPS = "constant_steps"

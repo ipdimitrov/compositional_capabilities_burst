@@ -274,8 +274,10 @@ def build_summary(
         other_mean, other_ci = mean_ci(other_end_vals)
 
         auc_loss_burst = np.array([reversion_auc_for_key(r, LOSS_BURST) for r in runs], dtype=float)
+        auc_loss_other = np.array([reversion_auc_for_key(r, LOSS_OTHER) for r in runs], dtype=float)
         auc_acc_other = np.array([reversion_auc_for_key(r, ACC_OTHER) for r in runs], dtype=float)
         auc_lb_mean, auc_lb_ci = mean_ci(auc_loss_burst)
+        auc_lo_mean, auc_lo_ci = mean_ci(auc_loss_other)
         auc_ao_mean, auc_ao_ci = mean_ci(auc_acc_other)
 
         life_stats: dict[str, Any] = {}
@@ -292,6 +294,7 @@ def build_summary(
             "peak_burst": {"mean": peak_mean, "ci": peak_ci},
             "reversion_auc": {"mean": auc_mean, "ci": auc_ci},
             "reversion_auc_loss_burst": {"mean": auc_lb_mean, "ci": auc_lb_ci},
+            "reversion_auc_loss_other": {"mean": auc_lo_mean, "ci": auc_lo_ci},
             "reversion_auc_acc_other": {"mean": auc_ao_mean, "ci": auc_ao_ci},
             "other_end": {"mean": other_mean, "ci": other_ci},
             "life": life_stats,
@@ -405,7 +408,7 @@ def aggregate_grad_rank(
         layer_series = [np.array(vals, dtype=float) for vals in rank_dict.values()]
         if not layer_series or any(len(s) != len(steps) for s in layer_series):
             continue
-        mean_across_layers = np.mean(np.stack(layer_series), axis=0)
+        mean_across_layers = np.nanmean(np.stack(layer_series), axis=0)
         rank_arr.append(interpolate_to_reference(first_steps, steps, mean_across_layers))
     if not rank_arr:
         return None
