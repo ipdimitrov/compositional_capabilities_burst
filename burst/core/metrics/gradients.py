@@ -25,28 +25,26 @@ import argparse
 import json
 import logging
 import pickle
+import shutil
 import sys
 import warnings
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+import numpy as np
+import torch
+import torch.nn.functional as F
+from einops import rearrange
+from torch.func import functional_call, grad, vmap
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
-import shutil  # noqa: E402
-
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-import torch.nn.functional as F  # noqa: E402
-from einops import rearrange  # noqa: E402
-from torch.func import functional_call, grad, vmap  # noqa: E402
 
 from burst.config import (  # noqa: E402
     CLASS_BURST,
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
     MIN_VECTORS_FOR_SIMILARITY,
+    N_SNR_EXAMPLES,
     PHASE_BURST,
     PHASE_PRE_BURST,
     PHASE_REVERSION,
@@ -65,13 +63,10 @@ from burst.core.train_utils import (  # noqa: E402
 from burst.rng import get_rng, seed_all  # noqa: E402
 from net.nanogpt import nanoGPT  # noqa: E402
 
+logger = logging.getLogger(__name__)
+
 warnings.filterwarnings("ignore", message=".*Full backward hook.*no inputs require gradients.*")
 NEAR_ZERO = 1e-12
-
-# ---------------------------------------------------------------------------
-# Feature flags — comment out any key to skip that metric entirely.
-# This controls what is computed in each worker_main() subprocess.
-# ---------------------------------------------------------------------------
 GRAD_METRICS: dict[str, bool] = {
     "cosine_global": True,
     "cosine_per_layer": True,
@@ -85,14 +80,6 @@ GRAD_METRICS: dict[str, bool] = {
     "grad_projection": True,  # OGD-style: interference vs useful component of g_burst
 }
 
-# Number of per-example gradients to sample for SNR estimation.
-# Higher = more accurate but slower (each adds one backward pass).
-N_SNR_EXAMPLES: int = 16
-
-
-# ---------------------------------------------------------------------------
-# Layer group helpers
-# ---------------------------------------------------------------------------
 
 
 def flat_grad(net: nanoGPT) -> torch.Tensor:
@@ -141,11 +128,6 @@ def layer_groups_for_net(net: nanoGPT) -> list[tuple[str, list[str]]]:
     return groups
 
 
-# ---------------------------------------------------------------------------
-# Core gradient extraction helpers
-# ---------------------------------------------------------------------------
-
-
 def grad_vecs_per_layer(
     net: nanoGPT, docs_np: np.ndarray, n_samples: int, layer_groups: list[tuple[str, list[str]]]
 ) -> dict[str, torch.Tensor]:
@@ -182,11 +164,6 @@ def grad_vec_for_docs(net: nanoGPT, docs_np: np.ndarray, n_samples: int) -> torc
     loss = cross_entropy_logits_BTV_targets_BT(logits_BTV.float(), tgt_BT)
     loss.backward()
     return flat_grad(net).float()
-
-
-# ---------------------------------------------------------------------------
-# New metric helpers
-# ---------------------------------------------------------------------------
 
 
 def effective_rank(g_vec: torch.Tensor, param_shape: tuple[int, int]) -> float:
@@ -467,11 +444,6 @@ def grad_attribution(
     }
 
 
-# ---------------------------------------------------------------------------
-# Public metric computation functions
-# ---------------------------------------------------------------------------
-
-
 def compute_grad_cosine_sim(
     net: nanoGPT, docs_burst_BL: np.ndarray, docs_other_BL: np.ndarray, n_samples: int
 ) -> dict[str, float]:
@@ -595,11 +567,6 @@ def compute_pairwise_grad_sim(  # noqa: C901, PLR0912
         "n_other": 1,
         "n_all": 1,
     }
-
-
-# ---------------------------------------------------------------------------
-# Worker subprocess
-# ---------------------------------------------------------------------------
 
 
 def worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
@@ -748,11 +715,6 @@ def worker_main() -> None:  # noqa: C901, PLR0912, PLR0915
         pickle.dump(result, f)
 
 
-# ---------------------------------------------------------------------------
-# Path resolution
-# ---------------------------------------------------------------------------
-
-
 def resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
     """Return (config_path, data_path, ckpt_root, gs_out_dir) for a run directory."""
     results_dir = resolve_results_dir(run_dir)
@@ -774,11 +736,6 @@ def resolve_run_paths(run_dir: Path) -> tuple[Path, Path, Path, Path]:
     gs_out_dir = results_dir / "grad_cosine_sim"
     gs_out_dir.mkdir(parents=True, exist_ok=True)
     return config_path, data_path, ckpt_root, gs_out_dir
-
-
-# ---------------------------------------------------------------------------
-# Main orchestrator
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:  # noqa: C901, PLR0912, PLR0915

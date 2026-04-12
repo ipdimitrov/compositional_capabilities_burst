@@ -856,11 +856,6 @@ def sched_pct_label(schedule: str) -> str:
     return schedule.rsplit("_", maxsplit=1)[-1]
 
 
-# ---------------------------------------------------------------------------
-# Extended AUC bars
-# ---------------------------------------------------------------------------
-
-
 def plot_extended_auc_bars(bundle: dict, out_dir: Path) -> Path:
     """Plot reversion AUC bars for burst-acc, burst-loss, other-acc, other-loss."""
     schedules = bundle["config"]["schedules"]
@@ -888,11 +883,6 @@ def plot_extended_auc_bars(bundle: dict, out_dir: Path) -> Path:
         style_axes(ax, "", title)
 
     return save_chart(fig, out_dir / "extended_reversion_auc_bars.pdf")
-
-
-# ---------------------------------------------------------------------------
-# Per-layer heatmap + line chart helpers
-# ---------------------------------------------------------------------------
 
 
 def build_layer_grid(
@@ -959,11 +949,6 @@ def plot_layer_lines(
     return save_chart(fig, out_path)
 
 
-# ---------------------------------------------------------------------------
-# Per-layer cosine similarity
-# ---------------------------------------------------------------------------
-
-
 def plot_per_layer_cossim(bundle: dict, out_dir: Path) -> list[Path]:
     """Plot per-layer gradient cosine similarity heatmaps and line charts."""
     plg = bundle["per_layer_gradients"]
@@ -991,11 +976,6 @@ def plot_per_layer_cossim(bundle: dict, out_dir: Path) -> list[Path]:
             )
         )
     return paths
-
-
-# ---------------------------------------------------------------------------
-# Per-layer gradient norms
-# ---------------------------------------------------------------------------
 
 
 def plot_per_layer_grad_norm(bundle: dict, out_dir: Path) -> list[Path]:
@@ -1029,11 +1009,6 @@ def plot_per_layer_grad_norm(bundle: dict, out_dir: Path) -> list[Path]:
     return paths
 
 
-# ---------------------------------------------------------------------------
-# Per-layer norm x cosine
-# ---------------------------------------------------------------------------
-
-
 def plot_per_layer_norm_x_cossim(bundle: dict, out_dir: Path) -> list[Path]:
     """Plot per-layer norm*cosine heatmaps and line charts."""
     plg = bundle["per_layer_gradients"]
@@ -1062,11 +1037,6 @@ def plot_per_layer_norm_x_cossim(bundle: dict, out_dir: Path) -> list[Path]:
             )
         )
     return paths
-
-
-# ---------------------------------------------------------------------------
-# Weight drift
-# ---------------------------------------------------------------------------
 
 
 def plot_weight_drift(bundle: dict, out_dir: Path) -> list[Path]:

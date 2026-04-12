@@ -424,11 +424,6 @@ def bundle_metric(series_list: list[np.ndarray]) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Per-layer gradient curves
-# ---------------------------------------------------------------------------
-
-
 def build_per_layer_gradient_curves(
     grouped: dict[str, list[dict[str, Any]]],
     grad_records: list[dict[str, Any]],
@@ -521,11 +516,6 @@ def per_layer_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "other_norm": other_norm_out,
         "norm_x_cosine": norm_x_cosine_out,
     }
-
-
-# ---------------------------------------------------------------------------
-# Weight drift from checkpoints
-# ---------------------------------------------------------------------------
 
 
 def build_weight_drift(run_dir: str | Path) -> dict[str, Any]:
