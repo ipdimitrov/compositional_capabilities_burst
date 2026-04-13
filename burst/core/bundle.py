@@ -23,6 +23,7 @@ from burst.config import (
     reversion_life_key,
     reversion_life_label,
 )
+from burst.core.metrics.probes import load_probe_records
 from burst.core.representation import build_representation_summary
 from burst.core.train_utils import (
     compute_lr_schedule,
@@ -92,6 +93,7 @@ def build_core_bundle(run_dir: str | Path) -> dict[str, Any]:
         "per_layer_gradients": build_per_layer_gradient_curves(grouped, grad_records, burst_mode),
         "weight_drift": build_weight_drift(run_dir),
         "representation": build_representation_summary(run_dir, grouped),
+        "next_token_probes": build_probe_curves(run_dir),
     }
 
 
@@ -516,6 +518,63 @@ def per_layer_series_for_schedule(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "other_norm": other_norm_out,
         "norm_x_cosine": norm_x_cosine_out,
     }
+
+
+def aggregate_probe_method(
+    runs: list[dict[str, Any]],
+    step_key: str,
+    method: str,
+) -> dict[str, Any] | None:
+    """Aggregate one probe method across seeds for a single step, or return None."""
+    other_arrs = []
+    burst_arrs = []
+    for r in runs:
+        sr = r["step_results"].get(step_key, {})
+        if method not in sr:
+            continue
+        other_arrs.append(np.array(sr[method]["Other"], dtype=float))
+        burst_arrs.append(np.array(sr[method]["Burst"], dtype=float))
+    if not other_arrs:
+        return None
+    other_stack = np.stack(other_arrs)
+    burst_stack = np.stack(burst_arrs)
+    diff_stack = other_stack - burst_stack
+    return {
+        "Other": bundle_metric(list(other_stack)),
+        "Burst": bundle_metric(list(burst_stack)),
+        "diff": bundle_metric(list(diff_stack)),
+    }
+
+
+def build_probe_curves(run_dir: str | Path) -> dict[str, Any]:
+    """Build per-schedule next-token probe curves from saved JSON records."""
+    records = load_probe_records(run_dir)
+    if not records:
+        return {}
+
+    by_schedule: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for rec in records:
+        by_schedule[rec["schedule"]].append(rec)
+
+    payload: dict[str, Any] = {}
+    for schedule in ordered_schedules(by_schedule.keys()):
+        runs = by_schedule[schedule]
+        all_steps = {s for r in runs for s in r["step_results"]}
+        if not all_steps:
+            continue
+
+        per_step: dict[str, Any] = {}
+        for step_key in sorted(all_steps):
+            per_method: dict[str, Any] = {}
+            for method in ("logit_lens", "learned_probe"):
+                agg = aggregate_probe_method(runs, step_key, method)
+                if agg is not None:
+                    per_method[method] = agg
+            if per_method:
+                per_step[step_key] = per_method
+        if per_step:
+            payload[schedule] = per_step
+    return payload
 
 
 def build_weight_drift(run_dir: str | Path) -> dict[str, Any]:

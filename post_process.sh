@@ -16,6 +16,13 @@ post_process() {
     "${PYTHON}" -m burst.core gradients "${run_dir}" \
         || { echo "FAIL: gradients"; fail=1; }
 
+    if [ "${RUN_NTP:-0}" = "1" ]; then
+        echo "  Running next-token probes..."
+        "${PYTHON}" scripts/probe_next_token_regimes.py "${run_dir}" \
+            --probe-max-samples "${NTP_MAX_SAMPLES:-500}" \
+            || { echo "FAIL: next-token probes"; fail=1; }
+    fi
+
     echo "  Building bundle + charts..."
     "${PYTHON}" -m burst.core pipeline "${run_dir}" \
         || { echo "FAIL: pipeline"; fail=1; }

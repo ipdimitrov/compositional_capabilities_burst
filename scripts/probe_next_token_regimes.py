@@ -1,4 +1,12 @@
-"""Next-token logit-lens and learned probes per layer for Other- vs Burst-class regimes."""
+"""Next-token logit-lens and learned probes per layer for Other- vs Burst-class regimes.
+
+Runs probes and saves per-label JSON results for the core bundle/chart pipeline.
+Charts are rendered as PDFs via ``burst.core.charts.render``.
+
+Usage:
+    python scripts/probe_next_token_regimes.py <run_dir> --probe-max-samples 500
+    RUN_NTP=1 bash run.sh   # integrated via post_process.sh
+"""
 
 import argparse
 import json
@@ -9,629 +17,34 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import matplotlib as mpl
-import numpy as np
-import torch
-import torch.nn.functional as F
-from torch import nn
-
-mpl.use("Agg")
-from itertools import combinations
-
-import matplotlib.pyplot as plt
-
-from burst.config import DATA_SEED, SCHED_COLORS, SCHEDULE_ORDER, parse_run_config
+from burst.config import (
+    DATA_SEED,
+    PROBE_METHODS,
+    parse_run_config,
+)
 from burst.core.gpu import gpu_cfg
+from burst.core.metrics.probes import (
+    NTP_RESULTS_DIRNAME,
+    probe_from_checkpoints_at_steps,
+    retrain_and_probe_at_steps,
+    save_probe_record,
+)
 from burst.core.parallel import JobResult, run_job_pool
 from burst.core.train.experiment import DepthNData, build_data
 from burst.core.train_utils import (
     DEVICE,
     N_PROBE_DOCS_PER_TASK,
     build_probe_docs,
-    load_net,
-    retrain_with_callbacks,
+    resolve_run_paths,
 )
-from net.nanogpt import nanoGPT
 from synthetic.init import set_seed
 
 logger = logging.getLogger(__name__)
 
-"""
-Dimension key:
-    B: batch_size
-    L: doc_len
-    T: model input length (= L - 1)
-    N: n_embd
-    P: n_probe_samples
-    K: n_layers + 1 (embedding + transformer blocks)
-    M: 6 (f3 output positions)
-    C: 10 (digit classes, tokens X0..X9)
-    V: vocab_size
-"""
 
-PROBE_SEED = 1337
-N_DIGITS = 10
-PROBE_METHODS = ["logit_lens", "learned_probe"]
-
-
-def ordered_schedules(scheds: set[str]) -> list[str]:
-    """Return schedules in canonical order, falling back to sorted."""
-    return [s for s in SCHEDULE_ORDER if s in scheds] or sorted(scheds)
-
-
-def get_final_output_positions(seq_len: int, depth: int) -> list[int]:
-    """Model-input positions whose targets are the final-output digits.
-
-    Position p in model-input predicts token p+1 in the original sequence.
-    The final output block starts at: 1 + depth + (depth * (1 + seq_len)) + 1
-    Model-input position is one less than the original position.
-    """
-    final_out_original = 1 + depth + 1 + seq_len + (depth - 1) * (1 + seq_len) + 1
-    final_out_model_input = final_out_original - 1
-    return list(range(final_out_model_input, final_out_model_input + seq_len))
-
-
-COLLECT_BATCH_SIZE = 256
-
-
-@torch.no_grad()
-def collect_all_layer_acts_KBM_N(  # noqa: N802
-    net: nanoGPT,
-    docs_BL: np.ndarray,
-    f3_positions: list[int],
-    max_samples: int,
-) -> tuple[list[torch.Tensor], torch.Tensor]:
-    """Collect residual-stream activations at f3 positions for every layer."""
-    net.eval()
-    n = min(len(docs_BL), max_samples)
-    rng = np.random.default_rng(PROBE_SEED)
-    idx = rng.choice(len(docs_BL), size=n, replace=False)
-
-    n_layers = len(net.transformer.h)
-    K = n_layers + 1
-
-    all_layer_acts = [[] for _ in range(K)]
-    all_targets = []
-
-    for start in range(0, n, COLLECT_BATCH_SIZE):
-        end = min(start + COLLECT_BATCH_SIZE, n)
-        tokens_BL = torch.as_tensor(docs_BL[idx[start:end]], dtype=torch.long, device=DEVICE)
-        inp_BT = tokens_BL[:, :-1]
-        tgt_BT = tokens_BL[:, 1:]
-
-        tok_emb = net.transformer.wte(inp_BT)
-        pos = torch.arange(inp_BT.size(1), device=DEVICE)
-        pos_emb = net.transformer.wpe(pos)
-        x_BTN = net.transformer.drop(tok_emb + pos_emb)
-
-        all_layer_acts[0].append(x_BTN[:, f3_positions, :].float().cpu())
-
-        for block_i, block in enumerate(net.transformer.h):
-            x_BTN = block(x_BTN)
-            all_layer_acts[block_i + 1].append(x_BTN[:, f3_positions, :].float().cpu())
-
-        all_targets.append(tgt_BT[:, f3_positions].cpu())
-
-    layer_acts = [torch.cat(chunks, dim=0) for chunks in all_layer_acts]
-    targets_PM = torch.cat(all_targets, dim=0)
-    return layer_acts, targets_PM
-
-
-@torch.no_grad()
-def logit_lens_accuracy_K(  # noqa: N802
-    net: nanoGPT,
-    layer_acts: list[torch.Tensor],
-    targets_PM: torch.Tensor,
-) -> np.ndarray:
-    """Apply model's own ln_f + LM_head to each layer's activations."""
-    K = len(layer_acts)
-    acc_K = np.zeros(K)
-
-    ln_f = net.transformer.ln_f
-    lm_head = net.LM_head
-    targets_dev = targets_PM.to(DEVICE)
-
-    for k in range(K):
-        acts_PMN = layer_acts[k].to(DEVICE)
-        normed_PMN = ln_f(acts_PMN)
-        logits_PMV = lm_head(normed_PMN)
-        preds_PM = logits_PMV.argmax(dim=-1)
-        acc_K[k] = (preds_PM == targets_dev).float().mean().item()
-
-    return acc_K
-
-
-class LinearProbe(nn.Module):
-    """Single linear layer probe from embedding dim to class logits."""
-
-    def __init__(self, n_embd: int, n_classes: int) -> None:
-        """Initialise linear probe with given dimensions."""
-        super().__init__()
-        self.linear = nn.Linear(n_embd, n_classes)
-
-    def forward(self, x_BN: torch.Tensor) -> torch.Tensor:
-        """Project input embeddings to class logits."""
-        return self.linear(x_BN)
-
-
-LEARNED_PROBE_LR = 1e-2
-LEARNED_PROBE_EPOCHS = 200
-LEARNED_PROBE_VAL_FRAC = 0.2
-LEARNED_PROBE_VAL_EVERY = 10
-LEARNED_PROBE_PATIENCE = 30
-
-
-def train_learned_probe(
-    acts_PMN: torch.Tensor,
-    targets_PM: torch.Tensor,
-    n_embd: int,
-) -> float:
-    """Train a linear probe (N -> 10) on flattened (P*M) samples, return val accuracy."""
-    P, M, N = acts_PMN.shape
-    feats_SN = acts_PMN.reshape(P * M, N)
-    labels_S = targets_PM.reshape(P * M)
-
-    n_total = feats_SN.shape[0]
-    n_val = max(int(n_total * LEARNED_PROBE_VAL_FRAC), 1)
-    n_train = n_total - n_val
-
-    torch.manual_seed(PROBE_SEED)
-    perm = torch.randperm(n_total)
-    train_idx, val_idx = perm[:n_train], perm[n_train:]
-
-    train_feats = feats_SN[train_idx].to(DEVICE)
-    train_labels = labels_S[train_idx].to(DEVICE)
-    val_feats = feats_SN[val_idx].to(DEVICE)
-    val_labels = labels_S[val_idx].to(DEVICE)
-
-    probe = LinearProbe(n_embd, N_DIGITS).to(DEVICE)
-    optimizer = torch.optim.Adam(probe.parameters(), lr=LEARNED_PROBE_LR)
-
-    best_val_acc = 0.0
-    epochs_without_improvement = 0
-    for epoch in range(LEARNED_PROBE_EPOCHS):
-        probe.train()
-        logits_SC = probe(train_feats)
-        loss = F.cross_entropy(logits_SC, train_labels)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        if (epoch + 1) % LEARNED_PROBE_VAL_EVERY == 0 or epoch == LEARNED_PROBE_EPOCHS - 1:
-            probe.eval()
-            with torch.no_grad():
-                val_preds = probe(val_feats).argmax(dim=-1)
-                val_acc = (val_preds == val_labels).float().mean().item()
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += LEARNED_PROBE_VAL_EVERY
-            if epochs_without_improvement >= LEARNED_PROBE_PATIENCE:
-                break
-
-    return best_val_acc
-
-
-def learned_probe_accuracy_K(  # noqa: N802
-    layer_acts: list[torch.Tensor],
-    targets_PM: torch.Tensor,
-    n_embd: int,
-) -> np.ndarray:
-    """Train a learned linear probe at each layer, return (K,) accuracy array."""
-    K = len(layer_acts)
-    acc_K = np.zeros(K)
-    for k in range(K):
-        acc_K[k] = train_learned_probe(layer_acts[k], targets_PM, n_embd)
-    return acc_K
-
-
-def probe_from_checkpoints_at_steps(  # noqa: PLR0913
-    job: dict,
-    ckpt_dir: Path,
-    probe_steps: list[int],
-    other_docs_BL: np.ndarray,
-    burst_docs_BL: np.ndarray,
-    n_layers: int,
-    seq_len: int,
-    max_samples: int,
-    depth: int,
-) -> dict[int, dict]:
-    """Load saved checkpoints and probe at each requested step."""
-    cfg = job["cfg"]
-    results_by_step: dict[int, dict] = {}
-
-    available_ckpts = {}
-    if ckpt_dir.exists():
-        for pt_file in ckpt_dir.glob("step_*.pt"):
-            step = int(pt_file.stem.split("_")[1])
-            available_ckpts[step] = str(pt_file)
-
-    for step in probe_steps:
-        if step not in available_ckpts:
-            logger.info("    WARNING: no checkpoint for step %s, skipping", step)
-            continue
-        logger.info("    Loading ckpt step %s...", step)
-        net = load_net(cfg, available_ckpts[step])
-        net.eval()
-        results_by_step[step] = probe_all_layers(
-            net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth
-        )
-        del net
-        torch.cuda.empty_cache()
-
-    return results_by_step
-
-
-def retrain_and_probe_at_steps(  # noqa: PLR0913
-    job: dict,
-    target_pool: dict,
-    bg_pool: dict,
-    probe_steps: list[int],
-    other_docs_BL: np.ndarray,
-    burst_docs_BL: np.ndarray,
-    n_layers: int,
-    seq_len: int,
-    max_samples: int,
-    depth: int,
-) -> dict[int, dict]:
-    """Retrain once and probe at each requested step along the way."""
-    checkpoint_set = set(probe_steps)
-    results_by_step: dict[int, dict] = {}
-
-    def on_step(net: nanoGPT, global_step: int, phase: str) -> None:
-        """Probe the model if global_step is in the requested set."""
-        if global_step in checkpoint_set:
-            net.eval()
-            logger.info("    Probing step %s (%s)...", global_step, phase)
-            results_by_step[global_step] = probe_all_layers(
-                net, other_docs_BL, burst_docs_BL, n_layers, seq_len, max_samples, depth
-            )
-            net.train()
-
-    net = retrain_with_callbacks(
-        job, target_pool, bg_pool, on_step=on_step, max_step=max(probe_steps)
-    )
-    del net
-    torch.cuda.empty_cache()
-    return results_by_step
-
-
-build_regime_docs = build_probe_docs
-
-
-def probe_all_layers(  # noqa: PLR0913
-    net: nanoGPT,
-    other_docs_BL: np.ndarray,
-    burst_docs_BL: np.ndarray,
-    n_layers: int,
-    seq_len: int,
-    max_samples: int,
-    depth: int,
-) -> dict:
-    """Run both probe methods on both regimes at every layer."""
-    f3_pos = get_final_output_positions(seq_len, depth)
-    n_embd = net.config.n_embd
-    K = n_layers + 1
-
-    results = {m: {"Other": np.zeros(K), "Burst": np.zeros(K)} for m in PROBE_METHODS}
-
-    for regime, docs in [("Other", other_docs_BL), ("Burst", burst_docs_BL)]:
-        layer_acts, targets_PM = collect_all_layer_acts_KBM_N(net, docs, f3_pos, max_samples)
-
-        ll_acc = logit_lens_accuracy_K(net, layer_acts, targets_PM)
-        results["logit_lens"][regime] = ll_acc
-
-        lp_acc = learned_probe_accuracy_K(layer_acts, targets_PM, n_embd)
-        results["learned_probe"][regime] = lp_acc
-
-        for k in range(K):
-            layer_name = "emb" if k == 0 else f"L{k - 1}"
-            logger.info(
-                "      %-4s  %s  logit_lens=%.3f  learned_probe=%.3f",
-                layer_name,
-                regime,
-                float(ll_acc[k]),
-                float(lp_acc[k]),
-            )
-
-    return results
-
-
-def compute_diffs(
-    all_results: dict[str, dict],
-    schedules: list[str],
-    methods: list[str],
-) -> tuple[dict[str, dict[str, np.ndarray]], dict[str, dict[str, np.ndarray]]]:
-    """Return per-schedule mean diffs and per-seed diffs for each method."""
-    diffs = {}
-    diffs_per_seed = {}
-    for method in methods:
-        diffs[method] = {}
-        diffs_per_seed[method] = {}
-        for sched in schedules:
-            other_curves, burst_curves = [], []
-            for key, val in all_results.items():
-                if key.startswith(sched + "_s") and method in val:
-                    other_curves.append(val[method]["Other"])
-                    burst_curves.append(val[method]["Burst"])
-            if other_curves and burst_curves:
-                per_seed = np.array(other_curves) - np.array(burst_curves)
-                diffs_per_seed[method][sched] = per_seed
-                diffs[method][sched] = per_seed.mean(axis=0)
-    return diffs, diffs_per_seed
-
-
-def compute_diff_in_diffs(
-    diffs: dict[str, dict[str, np.ndarray]],
-    methods: list[str],
-) -> dict[str, dict[str, np.ndarray]]:
-    """Compute pairwise diff-in-diffs between schedules for each method."""
-    did = {}
-    for method in methods:
-        did[method] = {}
-        scheds = list(diffs[method].keys())
-        for s1, s2 in combinations(scheds, 2):
-            did[method][f"{s1}_vs_{s2}"] = diffs[method][s1] - diffs[method][s2]
-    return did
-
-
-def plot_raw_curves(
-    all_results: dict[str, dict],
-    method: str,
-    n_layers: int,
-    output_dir: Path,
-) -> None:
-    """Plot per-schedule, per-regime accuracy curves across layers."""
-    raw_scheds = set()
-    for k in all_results:
-        raw_scheds.add(k.rsplit("_s", 1)[0])
-    schedules_seen = ordered_schedules(raw_scheds)
-
-    K = n_layers + 1
-    layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
-    x = np.arange(K)
-
-    n_scheds = len(schedules_seen)
-    fig, axes = plt.subplots(n_scheds, 2, figsize=(14, 3.5 * n_scheds), squeeze=False)
-    fig.suptitle(f"Next-Token Probe Accuracy — {method}", fontsize=14, fontweight="bold")
-
-    for si, sched in enumerate(schedules_seen):
-        for ri, regime in enumerate(["Other", "Burst"]):
-            ax = axes[si, ri]
-            curves = []
-            for key, val in all_results.items():
-                if key.startswith(sched + "_s") and method in val:
-                    curves.append(val[method][regime])
-
-            if curves:
-                arr = np.array(curves)
-                mean_c = np.mean(arr, axis=0)
-                n_s = len(arr)
-                ci = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s) if n_s > 1 else np.std(arr, axis=0)
-                ax.plot(x, mean_c, "o-", color=SCHED_COLORS.get(sched, "gray"), lw=2)
-                ax.fill_between(
-                    x, mean_c - ci, mean_c + ci, color=SCHED_COLORS.get(sched, "gray"), alpha=0.2
-                )
-
-            ax.set_xticks(x)
-            ax.set_xticklabels(layer_labels, fontsize=8)
-            ax.set_ylim(0, 1.05)
-            n_s = len(curves) if curves else 0
-            ax.set_title(f"{sched} — {regime} (n={n_s})", fontsize=10)
-            ax.set_ylabel("Accuracy")
-            ax.grid(visible=True, alpha=0.2)
-
-    axes[-1, 0].set_xlabel("Layer")
-    axes[-1, 1].set_xlabel("Layer")
-    fig.tight_layout()
-    fig.savefig(output_dir / f"curves_{method}.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_ab_diffs(
-    diffs: dict[str, dict[str, np.ndarray]],
-    method: str,
-    n_layers: int,
-    output_dir: Path,
-    diffs_per_seed: dict[str, dict[str, np.ndarray]] | None = None,
-) -> None:
-    """Plot Other-minus-Burst accuracy diffs per schedule."""
-    K = n_layers + 1
-    layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
-    x = np.arange(K)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for sched in SCHEDULE_ORDER:
-        if sched not in diffs[method]:
-            continue
-        c = SCHED_COLORS.get(sched, "gray")
-        ax.plot(x, diffs[method][sched], "o-", color=c, lw=2, label=sched)
-        if diffs_per_seed and sched in diffs_per_seed[method]:
-            arr = diffs_per_seed[method][sched]
-            n_s = len(arr)
-            if n_s > 1:
-                ci = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s)
-                ax.fill_between(
-                    x, diffs[method][sched] - ci, diffs[method][sched] + ci, color=c, alpha=0.15
-                )
-
-    ax.axhline(0, color="gray", ls="--", alpha=0.5)
-    ax.set_xticks(x)
-    ax.set_xticklabels(layer_labels, fontsize=9)
-    ax.set_xlabel("Layer", fontsize=11)
-    ax.set_ylabel("Δ accuracy (Other - Burst)", fontsize=11)
-    ax.set_title(
-        f"Other-Burst Next-Token Diff — {method}\n(mean +/- 95% CI)", fontsize=13, fontweight="bold"
-    )
-    ax.legend(fontsize=9)
-    ax.grid(visible=True, alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(output_dir / f"diff_{method}.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_diff_in_diffs(
-    did: dict[str, dict[str, np.ndarray]],
-    method: str,
-    n_layers: int,
-    output_dir: Path,
-) -> None:
-    """Plot pairwise diff-in-diff curves across layers."""
-    K = n_layers + 1
-    layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
-    x = np.arange(K)
-
-    pairs = list(did[method].keys())
-    if not pairs:
-        return
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    cmap = plt.cm.tab10(np.linspace(0, 1, max(len(pairs), 1)))
-    for pi, pair in enumerate(pairs):
-        ax.plot(x, did[method][pair], "o-", color=cmap[pi], lw=2, label=pair)
-
-    ax.axhline(0, color="gray", ls="--", alpha=0.5)
-    ax.set_xticks(x)
-    ax.set_xticklabels(layer_labels, fontsize=9)
-    ax.set_xlabel("Layer", fontsize=11)
-    ax.set_ylabel("Diff-in-Diff", fontsize=11)
-    ax.set_title(f"Diff-in-Diff — {method}", fontsize=13, fontweight="bold")
-    ax.legend(fontsize=7, ncol=2)
-    ax.grid(visible=True, alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(output_dir / f"diff_in_diff_{method}.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_combined_curves(
-    step_results: dict[int, dict[str, dict]],
-    method: str,
-    n_layers: int,
-    output_dir: Path,
-) -> None:
-    """Plot accuracy curves for all probe steps on a single figure."""
-    K = n_layers + 1
-    layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
-    x = np.arange(K)
-
-    raw_scheds = set()
-    for step_data in step_results.values():
-        for k in step_data:
-            raw_scheds.add(k.rsplit("_s", 1)[0])
-    schedules_seen = ordered_schedules(raw_scheds)
-
-    sorted_steps = sorted(step_results.keys())
-    step_colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(sorted_steps)))
-
-    n_scheds = len(schedules_seen)
-    fig, axes = plt.subplots(n_scheds, 2, figsize=(14, 3.5 * n_scheds), squeeze=False)
-    fig.suptitle(f"Next-Token Probe — {method} (all steps)", fontsize=14, fontweight="bold")
-
-    for si, sched in enumerate(schedules_seen):
-        for ri, regime in enumerate(["Other", "Burst"]):
-            ax = axes[si, ri]
-            for ci, step in enumerate(sorted_steps):
-                curves = [
-                    v[method][regime]
-                    for k, v in step_results[step].items()
-                    if k.startswith(sched + "_s") and method in v
-                ]
-                if curves:
-                    arr = np.array(curves)
-                    mean_c = np.mean(arr, axis=0)
-                    n_s = len(arr)
-                    ci_band = (
-                        1.96 * np.std(arr, axis=0) / np.sqrt(n_s)
-                        if n_s > 1
-                        else np.std(arr, axis=0)
-                    )
-                    ax.plot(x, mean_c, "o-", color=step_colors[ci], lw=2, label=f"step {step}")
-                    ax.fill_between(
-                        x, mean_c - ci_band, mean_c + ci_band, color=step_colors[ci], alpha=0.15
-                    )
-            ax.set_xticks(x)
-            ax.set_xticklabels(layer_labels, fontsize=8)
-            ax.set_ylim(0, 1.05)
-            ax.set_title(f"{sched} — regime {regime}", fontsize=10)
-            ax.set_ylabel("Accuracy")
-            ax.grid(visible=True, alpha=0.2)
-            if si == 0 and ri == 0:
-                ax.legend(fontsize=7, loc="upper left")
-
-    axes[-1, 0].set_xlabel("Layer")
-    axes[-1, 1].set_xlabel("Layer")
-    fig.tight_layout()
-    fig.savefig(output_dir / f"combined_curves_{method}.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_combined_diffs(
-    step_diffs: dict[int, dict[str, dict[str, np.ndarray]]],
-    method: str,
-    n_layers: int,
-    output_dir: Path,
-    step_diffs_per_seed: dict[int, dict[str, dict[str, np.ndarray]]] | None = None,
-) -> None:
-    """Plot Other-Burst diffs for all probe steps on a single figure."""
-    K = n_layers + 1
-    layer_labels = ["emb"] + [f"L{i}" for i in range(n_layers)]
-    x = np.arange(K)
-
-    sorted_steps = sorted(step_diffs.keys())
-    all_scheds = set()
-    for d in step_diffs.values():
-        all_scheds.update(d[method].keys())
-    scheds = [s for s in SCHEDULE_ORDER if s in all_scheds] or sorted(all_scheds)
-
-    n_scheds = len(scheds)
-    fig, axes = plt.subplots(1, n_scheds, figsize=(5 * n_scheds, 5), squeeze=False)
-    fig.suptitle(
-        f"Other-Burst Diff — {method} (all steps, mean +/- 95% CI)", fontsize=14, fontweight="bold"
-    )
-
-    step_colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(sorted_steps)))
-
-    global_ymin, global_ymax = 0, 0
-    for step in sorted_steps:
-        for sched in scheds:
-            if sched in step_diffs[step][method]:
-                vals = step_diffs[step][method][sched]
-                global_ymin = min(global_ymin, vals.min())
-                global_ymax = max(global_ymax, vals.max())
-    margin = max(abs(global_ymin), abs(global_ymax)) * 0.1
-    ylim = (global_ymin - margin, global_ymax + margin)
-
-    for si, sched in enumerate(scheds):
-        ax = axes[0, si]
-        for ci, step in enumerate(sorted_steps):
-            if sched in step_diffs[step][method]:
-                mean_d = step_diffs[step][method][sched]
-                c = step_colors[ci]
-                ax.plot(x, mean_d, "o-", color=c, lw=2, label=f"step {step}")
-                if (
-                    step_diffs_per_seed
-                    and step in step_diffs_per_seed
-                    and sched in step_diffs_per_seed[step][method]
-                ):
-                    arr = step_diffs_per_seed[step][method][sched]
-                    n_s = len(arr)
-                    if n_s > 1:
-                        ci_band = 1.96 * np.std(arr, axis=0) / np.sqrt(n_s)
-                        ax.fill_between(x, mean_d - ci_band, mean_d + ci_band, color=c, alpha=0.12)
-        ax.axhline(0, color="gray", ls="--", alpha=0.5)
-        ax.set_xticks(x)
-        ax.set_xticklabels(layer_labels, fontsize=8)
-        ax.set_xlabel("Layer")
-        ax.set_ylabel("Δ accuracy (Other - Burst)")
-        ax.set_title(sched, fontsize=10, fontweight="bold")
-        ax.set_ylim(ylim)
-        ax.legend(fontsize=7)
-        ax.grid(visible=True, alpha=0.2)
-
-    fig.tight_layout()
-    fig.savefig(output_dir / f"combined_diff_{method}.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
+# ---------------------------------------------------------------------------
+# Worker subprocess entry
+# ---------------------------------------------------------------------------
 
 
 def worker_main() -> None:
@@ -687,8 +100,13 @@ def worker_main() -> None:
         pickle.dump({"label": job["label"], "step_results": step_results}, f)
 
 
+# ---------------------------------------------------------------------------
+# Main CLI
+# ---------------------------------------------------------------------------
+
+
 def main() -> None:  # noqa: C901, PLR0915
-    """Run next-token regime probes for a given training run."""
+    """Run next-token regime probes and save per-label JSON results."""
     parser = argparse.ArgumentParser(
         description="Next-token probes (logit lens + learned) for Other vs Burst regimes"
     )
@@ -708,14 +126,11 @@ def main() -> None:  # noqa: C901, PLR0915
     )
     parser.add_argument("--probe-max-samples", type=int, required=True)
     parser.add_argument("--seed-override", type=int, default=None)
-    parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--n-workers", type=int, default=None)
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    from burst.core.train_utils import resolve_run_paths  # noqa: PLC0415
-
-    cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
+    cfg_path, logs_dir, results_dir = resolve_run_paths(run_dir)
     with cfg_path.open() as f:
         cfg = json.load(f)
 
@@ -733,18 +148,13 @@ def main() -> None:  # noqa: C901, PLR0915
     else:
         probe_steps = [total_steps + reversion_steps]
 
-    base_output_dir = (
-        Path(args.output_dir) if args.output_dir else run_dir / "next_token_regime_probes"
-    )
-    base_output_dir.mkdir(parents=True, exist_ok=True)
+    json_out_dir = results_dir / NTP_RESULTS_DIRNAME
 
-    f3_pos = get_final_output_positions(seq_len, depth)
     logger.info("Run dir: %s", run_dir)
     logger.info("Probe steps: %s", probe_steps)
-    logger.info("Output: %s", base_output_dir)
+    logger.info("Output: %s", json_out_dir)
     logger.info("Device: %s", DEVICE)
     logger.info("Methods: %s", PROBE_METHODS)
-    logger.info("Final-output model-input positions: %s", f3_pos)
 
     logger.info("\nRebuilding data (seed=%s)...", DATA_SEED)
     tp, bp, _, _, _, _, cfg_out, ti = build_data(bcfg, depth, burst_pos, n_a)
@@ -753,7 +163,7 @@ def main() -> None:  # noqa: C901, PLR0915
 
     set_seed(DATA_SEED)
     d = DepthNData(bcfg["n_alphabets"], seq_len, n_a, depth, burst_pos, DATA_SEED)
-    other_docs, burst_docs = build_regime_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
+    other_docs, burst_docs = build_probe_docs(d, doc_len, N_PROBE_DOCS_PER_TASK)
     logger.info("  Other docs: %s  Burst docs: %s", other_docs.shape, burst_docs.shape)
 
     jobs_cfg = cfg["jobs"]
@@ -768,9 +178,6 @@ def main() -> None:  # noqa: C901, PLR0915
     logger.info("\n%s", gpu_cfg.summary())
     logger.info("Schedules: %s", schedules_to_run)
     logger.info("Jobs: %s, workers: %s", len(jobs_cfg), n_workers)
-    logger.info("Layers: %s (emb + %s blocks)", n_layers + 1, n_layers)
-    n_probes = len(PROBE_METHODS) * len(jobs_cfg) * (n_layers + 1) * 2 * len(probe_steps)
-    logger.info("Total probe evaluations: %s", n_probes)
     mode = "checkpoint-loading" if use_checkpoints else "retrain"
     logger.info("Mode: %s (%s jobs, probing at %s steps)\n", mode, len(jobs_cfg), len(probe_steps))
 
@@ -796,20 +203,27 @@ def main() -> None:  # noqa: C901, PLR0915
 
     def build_cmd(script: str, job_path: str, data_path: str, output_path: str) -> list[str]:
         """Build the subprocess command for a single probe worker."""
-        return (
-            [
-                sys.executable, script,
-                "--worker",
-                "--job-path", job_path,
-                "--data-path", data_path,
-                "--output-path", output_path,
-                "--probe-steps", *step_args,
-                "--n-layers", str(n_layers),
-                "--seq-len", str(seq_len),
-                "--max-samples", str(args.probe_max_samples),
-                "--depth", str(depth),
-            ]
-        )
+        return [
+            sys.executable,
+            script,
+            "--worker",
+            "--job-path",
+            job_path,
+            "--data-path",
+            data_path,
+            "--output-path",
+            output_path,
+            "--probe-steps",
+            *step_args,
+            "--n-layers",
+            str(n_layers),
+            "--seq-len",
+            str(seq_len),
+            "--max-samples",
+            str(args.probe_max_samples),
+            "--depth",
+            str(depth),
+        ]
 
     all_step_results: dict[int, dict] = {step: {} for step in probe_steps}
 
@@ -818,6 +232,15 @@ def main() -> None:  # noqa: C901, PLR0915
         if jr.success:
             for step, res in jr.data["step_results"].items():
                 all_step_results[step][jr.data["label"]] = res
+            job_info = next(j for j in jobs if j["label"] == jr.data["label"])
+            save_probe_record(
+                json_out_dir,
+                jr.data["label"],
+                job_info["schedule"],
+                job_info["seed"],
+                probe_steps,
+                jr.data["step_results"],
+            )
             logger.info("  [%s/%s] %-30s done (%.0fs)", n_done, n_total, jr.label, jr.elapsed)
         else:
             logger.info("  FAIL [%s/%s]: %s", n_done, n_total, jr.label)
@@ -835,59 +258,9 @@ def main() -> None:  # noqa: C901, PLR0915
         tmp_prefix="probe_ntp_",
     )
 
-    all_step_diffs = {}
-    all_step_diffs_per_seed = {}
-    for probe_step in probe_steps:
-        step_dir = base_output_dir / f"step_{probe_step}"
-        step_dir.mkdir(parents=True, exist_ok=True)
-
-        all_results = all_step_results[probe_step]
-
-        logger.info("\nComputing diffs for step %s...", probe_step)
-        diffs, diffs_ps = compute_diffs(all_results, schedules_to_run, PROBE_METHODS)
-        did = compute_diff_in_diffs(diffs, PROBE_METHODS)
-
-        save_data = {
-            "all_results": all_results,
-            "diffs": {m: dict(diffs[m].items()) for m in PROBE_METHODS},
-            "diff_in_diffs": {m: dict(did[m].items()) for m in PROBE_METHODS},
-            "probe_step": probe_step,
-            "methods": PROBE_METHODS,
-            "n_layers": n_layers,
-            "seq_len": seq_len,
-            "final_output_positions": f3_pos,
-            "depth": depth,
-        }
-        torch.save(save_data, step_dir / "results.pt")
-        logger.info("Saved results to %s", step_dir / "results.pt")
-
-        logger.info("\nPlotting step %s...", probe_step)
-        for method in PROBE_METHODS:
-            logger.info("  %s...", method)
-            plot_raw_curves(all_results, method, n_layers, step_dir)
-            plot_ab_diffs(diffs, method, n_layers, step_dir, diffs_per_seed=diffs_ps)
-            plot_diff_in_diffs(did, method, n_layers, step_dir)
-
-        all_step_diffs[probe_step] = diffs
-        all_step_diffs_per_seed[probe_step] = diffs_ps
-
-    if len(probe_steps) > 1:
-        logger.info("\nPlotting combined charts across all steps...")
-        combined_dir = base_output_dir / "combined"
-        combined_dir.mkdir(parents=True, exist_ok=True)
-
-        for method in PROBE_METHODS:
-            logger.info("  %s...", method)
-            plot_combined_curves(all_step_results, method, n_layers, combined_dir)
-            plot_combined_diffs(
-                all_step_diffs,
-                method,
-                n_layers,
-                combined_dir,
-                step_diffs_per_seed=all_step_diffs_per_seed,
-            )
-
-    logger.info("\nAll done. Results in %s", base_output_dir)
+    n_saved = sum(1 for _ in json_out_dir.glob("*.json")) if json_out_dir.exists() else 0
+    logger.info("\nDone. %s JSON records saved to %s", n_saved, json_out_dir)
+    logger.info("Run `python -m burst.core pipeline %s` to build bundle + PDF charts.", run_dir)
 
 
 if __name__ == "__main__":

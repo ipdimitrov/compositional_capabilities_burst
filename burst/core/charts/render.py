@@ -124,6 +124,7 @@ def render_core_charts(bundle: dict, out_dir: str | Path) -> list[Path]:
     paths.extend(plot_per_layer_grad_norm(bundle, out_dir))
     paths.extend(plot_per_layer_norm_x_cossim(bundle, out_dir))
     paths.extend(plot_weight_drift(bundle, out_dir))
+    paths.extend(plot_probe_charts(bundle, out_dir))
     return [path for path in paths if path is not None]
 
 
@@ -1066,3 +1067,165 @@ def plot_weight_drift(bundle: dict, out_dir: Path) -> list[Path]:
             )
         )
     return paths
+
+
+# ---------------------------------------------------------------------------
+# Next-token probe charts
+# ---------------------------------------------------------------------------
+
+
+def probe_layer_labels(n_layers: int) -> tuple[np.ndarray, list[str]]:
+    """Return x-positions and tick labels for probe layer plots."""
+    K = n_layers + 1
+    return np.arange(K), ["emb", *[f"L{i}" for i in range(n_layers)]]
+
+
+def probe_n_layers(bundle: dict) -> int | None:
+    """Infer n_layers from the first probe data entry, or None if unavailable."""
+    ntp = bundle.get("next_token_probes", {})
+    if not ntp:
+        return None
+    first_sched = next(iter(ntp.values()))
+    first_step = next(iter(first_sched.values()))
+    first_method = next(iter(first_step.values()))
+    return len(first_method["Other"]["mean"]) - 1
+
+
+def plot_probe_charts(bundle: dict, out_dir: Path) -> list[Path]:
+    """Render all next-token probe charts, returning paths (empty if no data)."""
+    n_layers = probe_n_layers(bundle)
+    if n_layers is None:
+        return []
+    paths: list[Path] = []
+    for fn in (plot_probe_accuracy, plot_probe_diffs, plot_probe_diff_in_diffs):
+        result = fn(bundle, out_dir, n_layers)
+        if result is not None:
+            paths.append(result)
+    return paths
+
+
+def plot_probe_accuracy(bundle: dict, out_dir: Path, n_layers: int) -> Path | None:
+    """Plot per-schedule, per-regime probe accuracy by layer."""
+    ntp = bundle.get("next_token_probes", {})
+    if not ntp:
+        return None
+
+    schedules = [s for s in bundle["config"]["schedules"] if s in ntp]
+    if not schedules:
+        return None
+
+    x, layer_labels = probe_layer_labels(n_layers)
+
+    n_scheds = len(schedules)
+    fig, axes = plt.subplots(n_scheds, 2, figsize=figsize("full", n_scheds), squeeze=False)
+
+    for si, sched in enumerate(schedules):
+        step_data = next(iter(ntp[sched].values()))
+        for ri, regime in enumerate(["Other", "Burst"]):
+            ax = axes[si, ri]
+            for method_name in ("logit_lens", "learned_probe"):
+                md = step_data.get(method_name)
+                if not md:
+                    continue
+                mean = np.array(md[regime]["mean"], dtype=float)
+                ci = np.array(md[regime]["ci"], dtype=float)
+                color = SCHED_COLORS.get(sched, "gray")
+                ls = "-" if method_name == "logit_lens" else "--"
+                ax.plot(x, mean, ls, color=color, marker="o", ms=2, label=method_name)
+                ax.fill_between(x, mean - ci, mean + ci, color=color, alpha=0.12)
+            ax.set_xticks(x)
+            ax.set_xticklabels(layer_labels)
+            ax.set_ylim(-0.05, 1.05)
+            display = SCHED_DISPLAY.get(sched, sched)
+            ax.set_title(f"{display} — {regime}")
+            if si == 0 and ri == 0:
+                ax.legend(loc="upper left")
+            ax.grid(visible=True)
+
+    style_axes(axes[-1, 0], "Layer", "Accuracy")
+    style_axes(axes[-1, 1], "Layer", "Accuracy")
+    return save_chart(fig, out_dir / "probe_accuracy_by_layer.pdf")
+
+
+def plot_probe_diffs(bundle: dict, out_dir: Path, n_layers: int) -> Path | None:
+    """Plot Other-minus-Burst probe accuracy diff per schedule."""
+    ntp = bundle.get("next_token_probes", {})
+    if not ntp:
+        return None
+
+    schedules = [s for s in bundle["config"]["schedules"] if s in ntp]
+    if not schedules:
+        return None
+
+    x, layer_labels = probe_layer_labels(n_layers)
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize("full"), sharey=True)
+    for mi, method_name in enumerate(("logit_lens", "learned_probe")):
+        ax = axes[mi]
+        for sched in schedules:
+            step_data = next(iter(ntp[sched].values()))
+            md = step_data.get(method_name)
+            if not md or "diff" not in md:
+                continue
+            mean = np.array(md["diff"]["mean"], dtype=float)
+            ci = np.array(md["diff"]["ci"], dtype=float)
+            color = SCHED_COLORS.get(sched, "gray")
+            ax.plot(
+                x,
+                mean,
+                "-o",
+                color=color,
+                ms=2,
+                label=SCHED_DISPLAY.get(sched, sched),
+            )
+            ax.fill_between(x, mean - ci, mean + ci, color=color, alpha=0.12)
+        ax.axhline(0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
+        ax.set_xticks(x)
+        ax.set_xticklabels(layer_labels)
+        ax.set_title(method_name)
+        ax.legend(loc="best", ncol=2)
+        ax.grid(visible=True)
+
+    style_axes(axes[0], "Layer", r"$\Delta$ Accuracy (Other $-$ Burst)")
+    style_axes(axes[1], "Layer", "")
+    return save_chart(fig, out_dir / "probe_diff_other_minus_burst.pdf")
+
+
+def plot_probe_diff_in_diffs(bundle: dict, out_dir: Path, n_layers: int) -> Path | None:
+    """Plot pairwise schedule diff-in-diffs for probe accuracy."""
+    ntp = bundle.get("next_token_probes", {})
+    if not ntp:
+        return None
+
+    schedules = [s for s in bundle["config"]["schedules"] if s in ntp]
+    if len(schedules) < 2:  # noqa: PLR2004
+        return None
+
+    x, layer_labels = probe_layer_labels(n_layers)
+
+    step_diffs: dict[str, np.ndarray] = {}
+    for sched in schedules:
+        step_data = next(iter(ntp[sched].values()))
+        md = step_data.get("logit_lens")
+        if md and "diff" in md:
+            step_diffs[sched] = np.array(md["diff"]["mean"], dtype=float)
+
+    from itertools import combinations  # noqa: PLC0415
+
+    pairs = list(combinations([s for s in schedules if s in step_diffs], 2))
+    if not pairs:
+        return None
+
+    cmap_vals = plt.cm.tab10(np.linspace(0, 1, max(len(pairs), 1)))
+    fig, ax = plt.subplots(figsize=figsize("half"))
+    for pi, (s1, s2) in enumerate(pairs):
+        did = step_diffs[s1] - step_diffs[s2]
+        label = f"{SCHED_DISPLAY.get(s1, s1)} vs {SCHED_DISPLAY.get(s2, s2)}"
+        ax.plot(x, did, "-o", color=cmap_vals[pi], ms=2, label=label)
+
+    ax.axhline(0, color=COLOR_ZERO_LINE, ls=":", lw=1.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(layer_labels)
+    ax.legend(loc="best", ncol=1, fontsize=5)
+    style_axes(ax, "Layer", "Diff-in-Diff (logit lens)")
+    return save_chart(fig, out_dir / "probe_diff_in_diff.pdf")
