@@ -1,0 +1,28 @@
+# Burst correlation × concentration sweep.
+# Reproduces the correlation_concentration_sweep notebook.
+
+# Task — n_burst=6 enables 7 correlation levels (0/6, 1/6, ..., 6/6)
+n_a: 6
+n_burst: 6
+depth: 3
+burst_pos: 3
+# n_docs/n_eval auto-scale to keep pool size constant (null = auto)
+n_docs: null
+n_eval: null
+
+# Sweep over correlations × fracs
+fracs: [1.0, 0.95, 0.9, 0.7, 0.5, 0.3]
+correlations: [0.0, 0.16666666666666666, 0.3333333333333333, 0.5,
+               0.6666666666666666, 0.8333333333333334, 1.0]
+ft_lrs: [1.0e-4]
+seeds: [42, 123, 777, 1000, 1001]
+
+# Training
+ft_steps: 1500
+fg_steps: 1200
+fg_lr: 1.0e-4
+batch_size: 512
+eval_every: 100
+
+# Infra
+workers: 6
