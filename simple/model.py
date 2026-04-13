@@ -19,7 +19,7 @@ MODEL_DEFAULTS = dict(
 
 
 def make_model(vocab_size, context_size, *, n_layer=6, n_embd=120, n_head=4,
-               compile_model=True):
+               compile_model=False):
     """Create a fresh nanoGPT."""
     cfg = OmegaConf.create(dict(
         compile=False, vocab_size=vocab_size, context_size=context_size,
@@ -38,7 +38,7 @@ def save_model(net, path):
 
 
 def load_model(path, vocab_size, context_size, *, n_layer=6, n_embd=120,
-               n_head=4, compile_model=True):
+               n_head=4, compile_model=False):
     """Load a model from a checkpoint."""
     net = nanoGPT(OmegaConf.create(dict(
         compile=False, vocab_size=vocab_size, context_size=context_size,
