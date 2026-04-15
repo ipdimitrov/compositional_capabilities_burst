@@ -400,6 +400,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     seed_all(args.seed, deterministic=args.deterministic)
 
     exp = ExperimentConfig(
+        n_a=args.n_a,
         depth=args.depth,
         burst_pos=args.burst_pos,
         burst_mode=args.burst_mode,
@@ -436,15 +437,17 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     if DEVICE == "cuda":
         logger.info("GPU: %s", torch.cuda.get_device_name(0))
 
-    n_a = args.n_a
     logger.info(
-        "\nBuilding data (depth=%d, burst_pos=%d, n_a=%d)...", exp.depth, exp.burst_pos, n_a
+        "\nBuilding data (depth=%d, burst_pos=%d, n_a=%d)...",
+        exp.depth,
+        exp.burst_pos,
+        exp.n_a,
     )
     tp, bp, ed, pl, es, ee, cfg_out, ti = build_data(
         base_cfg,
         exp.depth,
         exp.burst_pos,
-        n_a,
+        exp.n_a,
         data_seed=args.seed,
     )
     logger.info(
@@ -528,7 +531,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         json.dump(
             {
                 "base_cfg": base_cfg,
-                "n_a": n_a,
+                "n_a": exp.n_a,
                 "seed_base": args.seed,
                 "n_seeds": exp.n_seeds,
                 "schedules": exp.schedules,
@@ -569,7 +572,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             "depth": args.depth,
             "burst_pos": args.burst_pos,
             "burst_mode": args.burst_mode,
-            "n_a": args.n_a,
+            "n_a": exp.n_a,
             "schedules": args.schedules,
             "n_seeds": args.n_seeds,
             "n_workers": args.n_workers,

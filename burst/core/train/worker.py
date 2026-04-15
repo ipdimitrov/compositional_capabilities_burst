@@ -25,6 +25,7 @@ from burst.config import (
     CHECKPOINT_EVERY,
     CLASS_BURST,
     CLASS_OTHER,
+    EVAL_BATCH_SIZE,
     EVAL_KEYS,
     GRAD_NORM_EPS,
     LOSS_BURST,
@@ -62,7 +63,7 @@ def eval_free_gen(
         return 0.0
     net.eval()
     loader = torch.utils.data.DataLoader(
-        BurstDataset(docs_BL), batch_size=256, shuffle=False, pin_memory=(DEVICE == "cuda")
+        BurstDataset(docs_BL), batch_size=EVAL_BATCH_SIZE, shuffle=False, pin_memory=(DEVICE == "cuda")
     )
     correct_t = torch.zeros(1, device=DEVICE)
     total = 0
@@ -85,7 +86,7 @@ def eval_loss(net: nanoGPT, docs_BL: np.ndarray) -> float:
         return float("nan")
     net.eval()
     loader = torch.utils.data.DataLoader(
-        BurstDataset(docs_BL), batch_size=256, shuffle=False, pin_memory=(DEVICE == "cuda")
+        BurstDataset(docs_BL), batch_size=EVAL_BATCH_SIZE, shuffle=False, pin_memory=(DEVICE == "cuda")
     )
     total_loss = 0.0
     n_batches = 0

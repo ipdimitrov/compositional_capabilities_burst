@@ -36,8 +36,6 @@ PHASE_BURST = "special (burst)"
 PHASE_REVERSION = "all-but-special (reversion)"
 PHASE_NAMES = [PHASE_PRE_BURST, PHASE_BURST, PHASE_REVERSION]
 
-PHASE_FOUNDATION = PHASE_PRE_BURST
-
 # ---------------------------------------------------------------------------
 # Class names & derived metric keys
 # ---------------------------------------------------------------------------
@@ -52,9 +50,7 @@ LOSS_BURST = f"loss_{CLASS_BURST}"
 # ---------------------------------------------------------------------------
 # Schedules — the ONLY thing you edit to add/remove schedules
 # ---------------------------------------------------------------------------
-BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0] #[100, 90, 70]  # 
-
-UNIFORM_PCT = 25
+BURST_FRACTIONS = [100, 98, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0]
 
 # ---------------------------------------------------------------------------
 # Everything below is derived from BURST_FRACTIONS
@@ -85,12 +81,7 @@ _gradient = build_gradient(len(_sorted_pcts))
 
 SCHEDULE_ORDER: list[str] = [sched_name(p) for p in _sorted_pcts]
 
-UNIFORM_SCHEDULE: str = sched_name(UNIFORM_PCT)
-
-FULL_PCT = 100
-MIXED_FRACTIONS: dict[str, float] = {
-    sched_name(p): p / 100.0 for p in _sorted_pcts if p != FULL_PCT
-}
+MIXED_FRACTIONS: dict[str, float] = {sched_name(p): p / 100.0 for p in _sorted_pcts}
 
 SCHED_COLORS: dict[str, str] = {
     sched_name(p): c for p, c in zip(_sorted_pcts, _gradient, strict=False)
@@ -121,7 +112,6 @@ LAYER_LINE_CMAP = "tab20"
 # Data parameters
 # ---------------------------------------------------------------------------
 N_A = 4
-SEED_BASE = 100
 DATA_SEED = 999
 
 # ---------------------------------------------------------------------------
@@ -151,21 +141,12 @@ MIN_VECTORS_FOR_SIMILARITY = 2
 N_SNR_EXAMPLES = 16
 N_PROBE_DOCS_PER_TASK = 200
 PROBE_SEED = 1337
+EVAL_BATCH_SIZE = 256
 PROBE_COLLECT_BATCH_SIZE = 256
 N_DIGITS = 10
 PROBE_METHODS = ["logit_lens", "learned_probe"]
 ACTIVATION_COLLECT_BATCH_SIZE = 512
 N_REPRESENTATION_DOCS_PER_CLASS = 64
-EVAL_BATCH_SIZE = 256
-N_ALPH = 10
-SEQ_LEN = 6
-DEPTH = 3
-BURST_POS = 3
-N_BURST = 4
-N_DOCS = 100
-N_EVAL = 100
-VOCAB_SLACK = 10
-CONTEXT_SLACK = 5
 
 
 def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) -> int:
@@ -175,16 +156,10 @@ def burst_steps_for_schedule(schedule: str, base_steps: int = BURST_BASE_STEPS) 
         burst_steps * frac = base_steps * 1.0
     So burst_100 -> base_steps, burst_50 -> 2x base_steps, burst_25 -> 4x base_steps.
     """
-    if schedule == "burst_100":
+    frac = MIXED_FRACTIONS.get(schedule, 1.0)
+    if frac <= 0:
         return base_steps
-    if schedule == "burst_0":
-        return base_steps
-    if schedule in MIXED_FRACTIONS:
-        frac = MIXED_FRACTIONS[schedule]
-        if frac <= 0:
-            return base_steps
-        return max(base_steps, round(base_steps / frac))
-    return base_steps
+    return max(base_steps, round(base_steps / frac))
 
 
 def burst_steps_for_mode(
@@ -210,9 +185,6 @@ def batch_size_for_mode(
     if frac <= 0:
         return base_batch_size
     return max(base_batch_size, round(base_batch_size / frac))
-
-
-MIXED_FRACTIONS["burst_100"] = 1.0
 
 
 @dataclass
@@ -267,6 +239,7 @@ class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     n_seeds: int = 10
     n_workers: int = 0
+    n_a: int = N_A
     depth: int = 3
     burst_pos: int = 3
     burst_mode: str = MODE_CURRENT
