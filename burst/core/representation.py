@@ -17,15 +17,14 @@ if TYPE_CHECKING:
     from net.nanogpt import nanoGPT
 
 
-_ResultDict = dict[str, object]
-_TaskPool = dict[tuple[int, ...], np.ndarray]
+ResultDict = dict[str, object]
+TaskPool = dict[tuple[int, ...], np.ndarray]
 
 
 def build_representation_summary(
-    run_dir: str | Path,
-    grouped_results: dict[str, list[_ResultDict]],
-    *,
-    n_docs_per_class: int = 64,
+    run_dir: Path,
+    grouped_results: dict[str, list[ResultDict]],
+    n_docs_per_class: int,
 ) -> dict[str, object]:
     """Build per-schedule representation drift metrics from checkpoints."""
     _cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
@@ -79,7 +78,7 @@ def build_representation_summary(
 
 
 def representation_for_run(
-    run: _ResultDict,
+    run: ResultDict,
     ckpt_dir: Path,
     other_docs_BL: np.ndarray,
     burst_docs_BL: np.ndarray,
@@ -167,7 +166,7 @@ def late_layer_indices(n_layers_total: int) -> list[int]:
     return list(range(start, n_layers_total))
 
 
-def subsample_pool(pool: _TaskPool, n_docs: int, *, seed: int) -> np.ndarray:
+def subsample_pool(pool: TaskPool, n_docs: int, seed: int) -> np.ndarray:
     """Concatenate and subsample documents from a pool to at most n_docs."""
     if not pool:
         return np.zeros((0, 0), dtype=np.int64)

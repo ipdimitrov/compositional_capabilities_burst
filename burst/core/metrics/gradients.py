@@ -39,7 +39,7 @@ from torch.func import functional_call, grad, vmap
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from burst.config import (  # noqa: E402
+from burst.config import (
     CLASS_BURST,
     DEFAULT_DETERMINISTIC,
     DEFAULT_REPRO_SEED,
@@ -50,18 +50,18 @@ from burst.config import (  # noqa: E402
     PHASE_REVERSION,
     parse_run_config,
 )
-from burst.core.gpu import gpu_cfg  # noqa: E402
-from burst.core.parallel import JobResult, run_job_pool  # noqa: E402
-from burst.core.repro import write_repro_manifest  # noqa: E402
-from burst.core.train_utils import (  # noqa: E402
+from burst.core.gpu import gpu_cfg
+from burst.core.parallel import JobPool, JobResult
+from burst.core.repro import write_repro_manifest
+from burst.core.train_utils import (
     DEVICE,
     cross_entropy_logits_BTV_targets_BT,
     load_net,
     resolve_logs_dir,
     resolve_results_dir,
 )
-from burst.rng import get_rng, seed_all  # noqa: E402
-from net.nanogpt import nanoGPT  # noqa: E402
+from burst.rng import get_rng, seed_all
+from net.nanogpt import nanoGPT
 
 logger = logging.getLogger(__name__)
 
@@ -873,7 +873,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         if not jr.success:
             logger.warning("  [%d/%d] %s: FAIL: %s", n_done, n_total, jr.label, jr.error[:80])
 
-    results = run_job_pool(
+    results = JobPool(
         jobs=jobs,
         worker_script=worker_script,
         build_cmd=build_cmd,
@@ -882,7 +882,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         data_payload=(target_pool, bg_pool),
         poll_interval=1.0,
         tmp_prefix="grad_sim_",
-    )
+        max_retries=2,
+    ).run()
 
     _PROJ_KEYS = (
         "interference_magnitude",

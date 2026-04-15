@@ -10,8 +10,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,122 +30,140 @@ class JobResult:
     elapsed: float = 0.0
 
 
-def run_job_pool(  # noqa: C901, PLR0912, PLR0913, PLR0915
-    jobs: list[dict],
-    worker_script: str,
-    build_cmd: Callable,
-    on_done: Callable | None,
-    n_workers: int,
-    data_payload: object,
-    poll_interval: float,
-    tmp_prefix: str,
-    max_retries: int = 2,
-) -> list[JobResult]:
-    """Run jobs in parallel via subprocess pool.
+@dataclass
+class JobPool:
+    """Manage a pool of subprocess jobs with retry and progress reporting.
 
     Failed jobs are retried up to max_retries times (handles transient CUDA OOM).
     """
-    n_workers = min(len(jobs), n_workers)
-    tmp_dir = Path(tempfile.mkdtemp(prefix=tmp_prefix))
 
-    data_path = tmp_dir / "_shared_data.pkl"
-    if data_payload is not None:
-        with data_path.open("wb") as f:
-            pickle.dump(data_payload, f)
+    jobs: list[dict]
+    worker_script: str
+    build_cmd: Callable
+    on_done: Callable | None
+    n_workers: int
+    data_payload: Any
+    poll_interval: float
+    tmp_prefix: str
+    max_retries: int
 
-    t0 = time.time()
-    retry_counts: dict[int, int] = {}
+    tmp_dir: Path = field(init=False, repr=False)
+    data_path: Path = field(init=False, repr=False)
+    retry_counts: dict[int, int] = field(init=False, repr=False, default_factory=dict)
+    retry_queue: deque[int] = field(init=False, repr=False, default_factory=deque)
 
-    def launch(idx: int, max_popen_retries: int = 5) -> tuple[subprocess.Popen, Path]:
-        """Pickle job, spawn subprocess, return (proc, output_path)."""
-        job = jobs[idx]
-        job_path = tmp_dir / f"_job_{idx}.pkl"
-        out_path = tmp_dir / f"_result_{idx}.pkl"
+    def run(self) -> list[JobResult]:
+        """Execute all jobs and return results."""
+        with tempfile.TemporaryDirectory(prefix=self.tmp_prefix) as td:
+            self.tmp_dir = Path(td)
+            self.data_path = self.tmp_dir / "_shared_data.pkl"
+            if self.data_payload is not None:
+                with self.data_path.open("wb") as f:
+                    pickle.dump(self.data_payload, f)
+            return self.poll_loop()
+
+    def spawn(self, idx: int, max_popen_retries: int = 5) -> tuple[subprocess.Popen, Path]:
+        """Pickle job config and spawn a subprocess."""
+        job_path = self.tmp_dir / f"_job_{idx}.pkl"
+        out_path = self.tmp_dir / f"_result_{idx}.pkl"
         with job_path.open("wb") as f:
-            pickle.dump(job, f)
-        cmd = build_cmd(worker_script, str(job_path), str(data_path), str(out_path))
+            pickle.dump(self.jobs[idx], f)
+
+        cmd = self.build_cmd(
+            self.worker_script, str(job_path), str(self.data_path), str(out_path)
+        )
+        last_err: BlockingIOError | None = None
         for attempt in range(max_popen_retries):
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603
-                return proc, out_path  # noqa: TRY300
-            except BlockingIOError:
+                return subprocess.Popen(  # noqa: S603
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                ), out_path
+            except BlockingIOError as e:
+                last_err = e
                 time.sleep(2**attempt)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603
-        return proc, out_path
+        if last_err is not None:
+            raise last_err
+        msg = "unreachable: max_popen_retries must be >= 1"
+        raise RuntimeError(msg)
 
-    active: dict[str, tuple[int, subprocess.Popen, Path]] = {}
-    next_idx = 0
-    for _ in range(min(n_workers, len(jobs))):
-        proc, out_path = launch(next_idx)
-        active[jobs[next_idx]["label"]] = (next_idx, proc, out_path)
-        next_idx += 1
+    def collect_done(self, proc: subprocess.Popen, out_path: Path, label: str, idx: int,
+                     elapsed: float) -> JobResult | None:
+        """Handle a finished process: return JobResult or enqueue retry."""
+        if proc.returncode == 0 and out_path.exists():
+            with out_path.open("rb") as f:
+                data = pickle.load(f)  # noqa: S301
+            return JobResult(label=label, success=True, data=data, elapsed=elapsed)
 
-    results: list[JobResult] = []
-    n_done = 0
-    retry_queue: list[int] = []
+        attempt = self.retry_counts.get(idx, 0)
+        se = proc.stderr.read().decode() if proc.stderr else ""
+        if attempt < self.max_retries:
+            self.retry_counts[idx] = attempt + 1
+            self.retry_queue.append(idx)
+            logger.warning(
+                "  [%s] failed (attempt %d/%d), retrying... stderr: %s",
+                label, attempt + 1, self.max_retries + 1, se[:200],
+            )
+            return None
 
-    n_total = len(jobs)
-    n_fail = 0
+        return JobResult(label=label, success=False, error=se[-1500:], elapsed=elapsed)
 
-    while n_done < n_total:
-        time.sleep(poll_interval)
-        done_labels = [name for name, (_, proc, _) in active.items() if proc.poll() is not None]
-        for label in done_labels:
-            idx, proc, out_path = active.pop(label)
-            elapsed = time.time() - t0
+    def poll_loop(self) -> list[JobResult]:
+        """Poll subprocesses, collect results, and schedule retries."""
+        n_workers = min(len(self.jobs), self.n_workers)
+        n_total = len(self.jobs)
+        t0 = time.time()
 
-            if proc.returncode == 0 and out_path.exists():
-                with out_path.open("rb") as f:
-                    data = pickle.load(f)  # noqa: S301
-                jr = JobResult(label=label, success=True, data=data, elapsed=elapsed)
-                n_done += 1
-                results.append(jr)
-                if on_done:
-                    on_done(jr, n_done, n_total)
-            else:
-                attempt = retry_counts.get(idx, 0)
-                if attempt < max_retries:
-                    retry_counts[idx] = attempt + 1
-                    retry_queue.append(idx)
-                    se = proc.stderr.read().decode() if proc.stderr else ""
-                    logger.warning(
-                        "  [%s] failed (attempt %d/%d), retrying... stderr: %s",
-                        label, attempt + 1, max_retries + 1, se[:200],
-                    )
-                else:
-                    se = proc.stderr.read().decode() if proc.stderr else ""
-                    jr = JobResult(label=label, success=False, error=se[-1500:], elapsed=elapsed)
-                    n_done += 1
-                    n_fail += 1
-                    results.append(jr)
-                    if on_done:
-                        on_done(jr, n_done, n_total)
+        active: dict[str, tuple[int, subprocess.Popen, Path]] = {}
+        results: list[JobResult] = []
+        n_done = 0
+        n_fail = 0
+        next_idx = 0
 
-        while retry_queue and len(active) < n_workers:
-            ridx = retry_queue.pop(0)
-            p, op = launch(ridx)
-            active[jobs[ridx]["label"]] = (ridx, p, op)
-
-        while next_idx < n_total and len(active) < n_workers:
-            p, op = launch(next_idx)
-            active[jobs[next_idx]["label"]] = (next_idx, p, op)
+        for _ in range(min(n_workers, n_total)):
+            proc, out_path = self.spawn(next_idx)
+            active[self.jobs[next_idx]["label"]] = (next_idx, proc, out_path)
             next_idx += 1
 
-        elapsed = time.time() - t0
-        pct = n_done / n_total * 100
-        eta = (elapsed / n_done * (n_total - n_done)) if n_done > 0 else 0
-        fail_str = f"  {n_fail} failed" if n_fail else ""
-        sys.stderr.write(
-            f"\r  [{n_done}/{n_total}] {pct:5.1f}%  "
-            f"elapsed {elapsed:.0f}s  eta {eta:.0f}s{fail_str}   "
-        )
+        while n_done < n_total:
+            time.sleep(self.poll_interval)
+
+            done_labels = [
+                lbl for lbl, (_, proc, _) in active.items() if proc.poll() is not None
+            ]
+            for label in done_labels:
+                idx, proc, out_path = active.pop(label)
+                elapsed = time.time() - t0
+                jr = self.collect_done(proc, out_path, label, idx, elapsed)
+                if jr is None:
+                    continue
+                n_done += 1
+                n_fail += not jr.success
+                results.append(jr)
+                if self.on_done:
+                    self.on_done(jr, n_done, n_total)
+
+            while self.retry_queue and len(active) < n_workers:
+                ridx = self.retry_queue.popleft()
+                p, op = self.spawn(ridx)
+                active[self.jobs[ridx]["label"]] = (ridx, p, op)
+
+            while next_idx < n_total and len(active) < n_workers:
+                p, op = self.spawn(next_idx)
+                active[self.jobs[next_idx]["label"]] = (next_idx, p, op)
+                next_idx += 1
+
+            elapsed = time.time() - t0
+            pct = n_done / n_total * 100
+            eta = (elapsed / n_done * (n_total - n_done)) if n_done > 0 else 0
+            fail_str = f"  {n_fail} failed" if n_fail else ""
+            sys.stderr.write(
+                f"\r  [{n_done}/{n_total}] {pct:5.1f}%  "
+                f"elapsed {elapsed:.0f}s  eta {eta:.0f}s{fail_str}   "
+            )
+            sys.stderr.flush()
+
+        sys.stderr.write("\n")
         sys.stderr.flush()
+        return results
 
-    sys.stderr.write("\n")
-    sys.stderr.flush()
 
-    for f in tmp_dir.glob("*"):
-        f.unlink()
-    tmp_dir.rmdir()
-
-    return results

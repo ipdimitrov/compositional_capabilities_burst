@@ -1,4 +1,4 @@
-"""Dataset helpers: padding, pooling, and PyTorch Dataset wrappers."""
+"""Dataset helpers: padding and PyTorch Dataset wrappers."""
 
 from typing import Any
 
@@ -12,6 +12,7 @@ class BurstDataset(Dataset):
 
     def __init__(self, documents_BL: np.ndarray) -> None:
         """Store documents as a long tensor."""
+        assert documents_BL.ndim == 2  # noqa: S101, PLR2004
         self.data = torch.from_numpy(documents_BL).long()
 
     def __len__(self) -> int:

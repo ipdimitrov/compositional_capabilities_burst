@@ -29,7 +29,7 @@ from burst.core.metrics.probes import (
     retrain_and_probe_at_steps,
     save_probe_record,
 )
-from burst.core.parallel import JobResult, run_job_pool
+from burst.core.parallel import JobPool, JobResult
 from burst.core.train.experiment import DepthNData, build_data
 from burst.core.train_utils import (
     DEVICE,
@@ -247,7 +247,7 @@ def main() -> None:  # noqa: C901, PLR0915
             if jr.error:
                 logger.info("    %s", jr.error)
 
-    run_job_pool(
+    JobPool(
         jobs=jobs,
         worker_script=str(Path(__file__).resolve()),
         build_cmd=build_cmd,
@@ -256,7 +256,8 @@ def main() -> None:  # noqa: C901, PLR0915
         data_payload=(tp, bp, other_docs, burst_docs),
         poll_interval=1.0,
         tmp_prefix="probe_ntp_",
-    )
+        max_retries=2,
+    ).run()
 
     n_saved = sum(1 for _ in json_out_dir.glob("*.json")) if json_out_dir.exists() else 0
     logger.info("\nDone. %s JSON records saved to %s", n_saved, json_out_dir)
