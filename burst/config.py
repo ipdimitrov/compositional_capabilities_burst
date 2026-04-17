@@ -87,7 +87,7 @@ SCHED_COLORS: dict[str, str] = {
     sched_name(p): c for p, c in zip(_sorted_pcts, _gradient, strict=False)
 }
 
-SCHED_DISPLAY: dict[str, str] = {sched_name(p): f"Burst {p}%" for p in _sorted_pcts}
+SCHED_DISPLAY: dict[str, str] = {sched_name(p): f"{p}%" for p in _sorted_pcts}
 
 EVAL_KEYS = [ACC_OTHER, ACC_BURST]
 
@@ -128,8 +128,10 @@ BURST_MODES = (MODE_CURRENT, MODE_CONSTANT_STEPS, MODE_SCALED_BATCH)
 DEFAULT_REPRO_SEED = 42
 DEFAULT_DETERMINISTIC = True
 REPRO_MANIFEST_FILENAME = "repro_manifest.json"
-CORE_CHARTS_DIRNAME = "core_charts"
+CORE_CHARTS_DIRNAME = "core_charts_paper"
 CORE_CLI_MODES = ("train", "gradients", "bundle", "charts", "pipeline")
+
+MIN_CONCENTRATION_PCT = 40
 
 # ---------------------------------------------------------------------------
 # Training / evaluation thresholds

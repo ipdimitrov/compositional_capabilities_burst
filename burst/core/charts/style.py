@@ -31,9 +31,9 @@ def apply_paper_style() -> None:
             "font.size": 8,
             "axes.titlesize": 8,
             "axes.labelsize": 8,
-            "xtick.labelsize": 6,
-            "ytick.labelsize": 6,
-            "legend.fontsize": 6,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "legend.fontsize": 7,
             "legend.frameon": False,
             "axes.linewidth": 0.5,
             "lines.linewidth": 1.0,
@@ -58,7 +58,18 @@ def style_axes(ax: Axes, xlabel: str, ylabel: str) -> None:
 
 
 def figsize(cols: str = "half", nrows: int = 1) -> tuple[float, float]:
-    """Return (width, height) for a figure with golden-ratio rows."""
+    """Return (width, height) for a figure with golden-ratio rows.
+
+    cols="half" / "full": standard golden-ratio height scaled by nrows.
+    cols="flat": half-col width with a short height (width / 3.2), good for
+    bar charts and overlay plots with lots of empty vertical space.
+    cols="half_side": half-col width with a short height suitable for two
+    side-by-side panels inside a single half-column slot.
+    """
+    if cols == "flat":
+        return (HALF_COL_WIDTH, HALF_COL_WIDTH / 3.2)
+    if cols == "half_side":
+        return (HALF_COL_WIDTH, HALF_COL_WIDTH / 2.4)
     w = FULL_COL_WIDTH if cols == "full" else HALF_COL_WIDTH
     return (w, (w / 1.618) * nrows)
 
