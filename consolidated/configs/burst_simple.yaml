@@ -1,0 +1,24 @@
+# Simple burst experiment: single (n_a, correlation), sweep over concentration.
+# Reproduces the burst_simple notebook behavior.
+
+# Task
+n_a: 4
+n_burst: 4
+depth: 3
+burst_pos: 3
+
+# Sweep axes — single value for correlation and ft_lr, sweep over fracs
+fracs: [1.0, 0.95, 0.9, 0.85, 0.7, 0.5, 0.3]
+correlations: [0.0]
+ft_lrs: [1.0e-4]
+seeds: [42, 123, 777]
+
+# Training
+ft_steps: 1500
+fg_steps: 1000
+fg_lr: 1.0e-4
+batch_size: 512
+eval_every: 100
+
+# Infra
+workers: 6

@@ -1,0 +1,278 @@
+"""Phase 3: Forget (reversion) — train on background only, measure forgetting.
+
+Loads a finetuned checkpoint and trains on background data only.  Tracks how
+quickly the model forgets the burst capability.
+"""
+import numpy as np
+import torch
+from pathlib import Path
+from tqdm.auto import tqdm
+
+from simple.model import (
+    load_model, save_model, make_optimizer, reset_optimizer,
+    train_step, eval_accuracy, eval_loss, cosine_lr,
+    MODEL_DEFAULTS,
+)
+from simple.interp import (
+    state_dict_cpu, weight_drift_l2,
+    _get_grad_vector, gradient_cosine_per_layer, grad_norm_entropy,
+    grad_effective_rank,
+)
+
+
+def forget(
+    data: dict,
+    finetune_ckpt: str | Path,
+    out_dir: str | Path,
+    *,
+    pretrain_ckpt: str | Path | None = None,
+    steps: int = 500,
+    lr: float = MODEL_DEFAULTS["lr"],
+    lr_start_frac: float = 0.15,
+    lr_end_frac: float = 0.1,
+    batch_size: int = MODEL_DEFAULTS["batch_size"],
+    eval_every: int = MODEL_DEFAULTS["eval_every"],
+    grad_clip: float = MODEL_DEFAULTS["grad_clip"],
+    weight_decay: float = MODEL_DEFAULTS["weight_decay"],
+    beta1: float = MODEL_DEFAULTS["beta1"],
+    beta2: float = MODEL_DEFAULTS["beta2"],
+    n_layer: int = MODEL_DEFAULTS["n_layer"],
+    n_embd: int = MODEL_DEFAULTS["n_embd"],
+    n_head: int = MODEL_DEFAULTS["n_head"],
+    thresholds: tuple[float, ...] = (0.95, 0.90, 0.85, 0.80, 0.75, 0.70),
+    tag: str | None = None,
+    seed: int = 42,
+    quiet: bool = False,
+    lite: bool = False,
+) -> dict:
+    """Run reversion phase: background-only training, measure forgetting.
+
+    Args:
+        data: dict from make_data()
+        finetune_ckpt: path to finetuned checkpoint
+        out_dir: directory for outputs
+        steps: reversion training steps
+        thresholds: reversion lifetime thresholds (fraction of peak)
+        tag: label for filenames (inherited from finetune tag if None)
+
+    Returns:
+        dict with: log, peak_burst, reversion_auc, life_times, dropoff_abs,
+                   dropoff_pct, tag
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    finetune_ckpt = Path(finetune_ckpt)
+    if tag is None:
+        tag = finetune_ckpt.stem.replace("_ckpt", "")
+
+    vocab_size = data["vocab_size"]
+    context_size = data["context_size"]
+    prompt_len = data["prompt_len"]
+    bg_pool = data["bg_pool"]
+    eval_other = data["eval_other"]
+    eval_burst = data["eval_burst"]
+    eval_burst_novel = data.get("eval_burst_novel")
+    eval_burst_copied = data.get("eval_burst_copied")
+    _has_split = (eval_burst_novel is not None and len(eval_burst_novel) > 0
+                  and eval_burst_copied is not None and len(eval_burst_copied) > 0)
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    net = load_model(finetune_ckpt, vocab_size, context_size,
+                     n_layer=n_layer, n_embd=n_embd, n_head=n_head)
+    optimizer = make_optimizer(net, lr=lr * lr_start_frac,
+                               weight_decay=weight_decay, beta1=beta1, beta2=beta2)
+    reset_optimizer(optimizer)  # fresh momentum for reversion phase
+
+    # reference state dicts for weight drift tracking
+    if not lite:
+        sd_ft = state_dict_cpu(net)
+        sd_pt = None
+        if pretrain_ckpt is not None:
+            from simple.interp import load_sd
+            sd_pt = load_sd(pretrain_ckpt)
+
+    # measure peak burst accuracy at start of reversion
+    peak_burst = eval_accuracy(net, eval_burst, prompt_len)
+
+    bg_ids = list(bg_pool.keys())
+    lr_start = lr * lr_start_frac
+    lr_end = lr * lr_end_frac
+
+    log = {"step": [], "loss": [], "acc_other": [], "acc_burst": [],
+           "loss_other": [], "loss_burst": [], "lr": [],
+           "acc_burst_novel": [], "acc_burst_copied": [],
+           "loss_burst_novel": [], "loss_burst_copied": []}
+    if not lite:
+        log.update({
+           "weight_drift_from_ft": [], "weight_drift_from_pt": [],
+           "grad_norm": [], "grad_norm_burst": [], "grad_cosine_burst_bg": [],
+           "grad_cosine_per_layer": [],
+           "grad_norm_entropy": [], "grad_norm_entropy_burst": [],
+           "grad_align_frac": [], "grad_proj_magnitude": [],
+           "grad_autocorr_bg": [], "grad_autocorr_burst": [],
+           "grad_bg_vs_ref": [], "grad_burst_vs_ref": [],
+           "grad_rank_burst": [], "grad_rank_bg": []})
+
+    _prev_g_bg = None
+    _prev_g_burst = None
+    _ref_g_bg = None
+    _ref_g_burst = None
+
+    net.train()
+    pbar = tqdm(range(steps), desc=f"Forget {tag}", disable=quiet)
+    for s in pbar:
+        per = batch_size // len(bg_ids)
+        rem = batch_size % len(bg_ids)
+        parts = []
+        for i, tid in enumerate(bg_ids):
+            k = per + (1 if i < rem else 0)
+            if k > 0:
+                idx = np.random.randint(len(bg_pool[tid]), size=k)
+                parts.append(bg_pool[tid][idx])
+        batch = np.concatenate(parts)[np.random.permutation(batch_size)]
+
+        cur_lr = cosine_lr(s + 1, steps, lr_start, lr_end)
+        loss_val = train_step(net, optimizer, batch, lr=cur_lr,
+                              grad_clip=grad_clip)
+
+        if s % eval_every == 0 or s == steps - 1:
+            ao = eval_accuracy(net, eval_other, prompt_len)
+            ab = eval_accuracy(net, eval_burst, prompt_len)
+            lo = eval_loss(net, eval_other)
+            lb = eval_loss(net, eval_burst)
+            log["step"].append(s)
+            log["loss"].append(loss_val)
+            log["acc_other"].append(ao)
+            log["acc_burst"].append(ab)
+            log["loss_other"].append(lo)
+            log["loss_burst"].append(lb)
+            log["lr"].append(cur_lr)
+
+            if _has_split:
+                log["acc_burst_novel"].append(eval_accuracy(net, eval_burst_novel, prompt_len))
+                log["acc_burst_copied"].append(eval_accuracy(net, eval_burst_copied, prompt_len))
+                log["loss_burst_novel"].append(eval_loss(net, eval_burst_novel))
+                log["loss_burst_copied"].append(eval_loss(net, eval_burst_copied))
+
+            if lite:
+                pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
+                                 acc_o=f"{ao:.3f}")
+                net.train()
+                continue
+
+            # interp metrics
+            sd_now = state_dict_cpu(net)
+            drift_ft = weight_drift_l2(sd_ft, sd_now)["total"]
+            log["weight_drift_from_ft"].append(drift_ft)
+            if sd_pt is not None:
+                drift_pt = weight_drift_l2(sd_pt, sd_now)["total"]
+                log["weight_drift_from_pt"].append(drift_pt)
+
+            # gradient norm + cosine(burst vs bg)
+            net.train()
+            g_bg = _get_grad_vector(net, batch)
+            log["grad_norm"].append(g_bg.norm().item())
+            idx = np.random.randint(len(eval_burst), size=min(batch_size, len(eval_burst)))
+            burst_batch = eval_burst[idx]
+            g_burst = _get_grad_vector(net, burst_batch)
+            log["grad_norm_burst"].append(g_burst.norm().item())
+            gc = F.cosine_similarity(
+                g_bg.unsqueeze(0), g_burst.unsqueeze(0)).item()
+            log["grad_cosine_burst_bg"].append(gc)
+
+            gn_bg = g_bg.norm().item()
+            gn_burst = g_burst.norm().item()
+            dot = torch.dot(g_bg, g_burst).item()
+            align_frac = (dot ** 2) / (gn_bg ** 2 + 1e-10)
+            proj_mag = abs(dot) / (gn_burst + 1e-10)
+            log["grad_align_frac"].append(align_frac)
+            log["grad_proj_magnitude"].append(proj_mag)
+
+            if _prev_g_bg is not None:
+                ac_bg = F.cosine_similarity(
+                    g_bg.unsqueeze(0), _prev_g_bg.unsqueeze(0)).item()
+                ac_burst = F.cosine_similarity(
+                    g_burst.unsqueeze(0), _prev_g_burst.unsqueeze(0)).item()
+            else:
+                ac_bg = ac_burst = float("nan")
+            log["grad_autocorr_bg"].append(ac_bg)
+            log["grad_autocorr_burst"].append(ac_burst)
+            _prev_g_bg = g_bg.detach().clone()
+            _prev_g_burst = g_burst.detach().clone()
+
+            if _ref_g_bg is None:
+                _ref_g_bg = g_bg.detach().clone()
+                _ref_g_burst = g_burst.detach().clone()
+            log["grad_bg_vs_ref"].append(
+                F.cosine_similarity(g_bg.unsqueeze(0), _ref_g_bg.unsqueeze(0)).item())
+            log["grad_burst_vs_ref"].append(
+                F.cosine_similarity(g_burst.unsqueeze(0), _ref_g_burst.unsqueeze(0)).item())
+
+            gc_layers = gradient_cosine_per_layer(net, burst_batch, batch)
+            log["grad_cosine_per_layer"].append(gc_layers)
+
+            ent, _ = grad_norm_entropy(net, batch)
+            ent_burst, _ = grad_norm_entropy(net, burst_batch)
+            log["grad_norm_entropy"].append(ent)
+            log["grad_norm_entropy_burst"].append(ent_burst)
+
+            rank_bg = grad_effective_rank(net, batch)
+            rank_burst = grad_effective_rank(net, burst_batch)
+            log["grad_rank_bg"].append(rank_bg)
+            log["grad_rank_burst"].append(rank_burst)
+            net.zero_grad()
+
+            pbar.set_postfix(loss=f"{loss_val:.4f}", acc_b=f"{ab:.3f}",
+                             drift=f"{drift_ft:.3f}")
+            net.train()
+
+    # -- metrics --
+    accs = log["acc_burst"]
+    steps_arr = log["step"]
+    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    reversion_auc = float(_trapz(accs, steps_arr)) if len(accs) > 1 else 0.0
+
+    life_times = {}
+    if peak_burst > 1e-6:
+        remaining = {t: True for t in thresholds}
+        for acc_val, step_val in zip(accs, steps_arr):
+            for t in list(remaining):
+                if acc_val <= peak_burst * t:
+                    life_times[f"life_{int(t * 100)}"] = step_val
+                    del remaining[t]
+            if not remaining:
+                break
+    for t in thresholds:
+        k = f"life_{int(t * 100)}"
+        if k not in life_times:
+            life_times[k] = steps  # never dropped below threshold
+
+    end_burst = accs[-1] if accs else peak_burst
+    dropoff_abs = peak_burst - end_burst
+    dropoff_pct = (dropoff_abs / peak_burst * 100) if peak_burst > 1e-6 else 0.0
+
+    # save
+    ckpt_path = out_dir / f"{tag}_reverted_ckpt.pt"
+    save_model(net, ckpt_path)
+    np.savez(out_dir / f"{tag}_forget_log.npz",
+             **{k: np.array(v) for k, v in log.items()})
+
+    return {
+        "log": log,
+        "ckpt_path": str(ckpt_path),
+        "tag": tag,
+        "peak_burst": peak_burst,
+        "reversion_auc": reversion_auc,
+        "life_times": life_times,
+        "dropoff_abs": dropoff_abs,
+        "dropoff_pct": dropoff_pct,
+        "end_burst_acc": end_burst,
+    }
+
+
+def _forget_worker(kwargs):
+    """Pickle-able entry point for multiprocessing."""
+    return forget(**kwargs)

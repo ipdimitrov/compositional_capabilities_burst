@@ -1,0 +1,70 @@
+"""Reproducibility: JSON manifest generation."""
+
+from __future__ import annotations
+
+import json
+import platform
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from burst.config import REPRO_MANIFEST_FILENAME
+from burst.core.train_utils import resolve_run_paths
+
+
+def jsonable(value: object) -> str | dict | list | int | float | bool | None:
+    """Recursively convert values to JSON-serialisable primitives."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [jsonable(v) for v in value]
+    return value
+
+
+def write_repro_manifest(  # noqa: PLR0913
+    run_dir: str | Path,
+    mode: str,
+    seed: int,
+    deterministic: bool,
+    cli_args: dict[str, Any],
+    note: str = "",
+) -> Path:
+    """Write a JSON reproducibility manifest to the run's results directory."""
+    run_dir = Path(run_dir)
+    _, _, results_dir = resolve_run_paths(run_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = results_dir / REPRO_MANIFEST_FILENAME
+
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    try:
+        git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()  # noqa: S607
+    except (OSError, subprocess.CalledProcessError):
+        git_sha = None
+
+    payload = {
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "mode": mode,
+        "seed": seed,
+        "deterministic": deterministic,
+        "note": note,
+        "cli_args": jsonable(cli_args),
+        "runtime": {
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_version": torch.version.cuda,
+            "cudnn_version": torch.backends.cudnn.version(),
+            "gpu_name": gpu_name,
+            "git_sha": git_sha,
+        },
+    }
+    with manifest_path.open("w") as f:
+        json.dump(payload, f, indent=2)
+    return manifest_path

@@ -1,0 +1,24 @@
+# Learning rate × burst concentration sweep.
+# Reproduces the lr_concentration_sweep notebook.
+
+# Task
+n_a: 4
+n_burst: 4
+depth: 3
+burst_pos: 3
+
+# Sweep over ft_lr × fracs
+fracs: [1.0, 0.95, 0.9, 0.7, 0.5, 0.3]
+correlations: [0.0]
+ft_lrs: [5.0e-5, 1.0e-4, 3.0e-4, 1.0e-3]
+seeds: [42, 123, 777]
+
+# Training
+ft_steps: 1500
+fg_steps: 1000
+fg_lr: 1.0e-4   # fixed during the sweep
+batch_size: 512
+eval_every: 100
+
+# Infra
+workers: 8

@@ -1,0 +1,7 @@
+{
+  "finetune_steps": 3000,
+  "recovery_steps": 750,
+  "total_steps": 3750,
+  "final_finetune_val_loss": 1.2087792646884918,
+  "final_pretrain_val_loss": 3.035352472215891
+}

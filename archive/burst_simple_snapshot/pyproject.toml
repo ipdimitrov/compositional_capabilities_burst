@@ -1,0 +1,40 @@
+[project]
+name = "compositional-capabilities"
+version = "0.1.0"
+requires-python = "==3.10.*"
+dependencies = [
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "numba==0.57.0",
+    "omegaconf==2.3.0",
+    "numpy==1.24.4",
+    "tqdm==4.67.3",
+    "matplotlib==3.10.8",
+    "ipykernel==7.2.0",
+    "ipython==8.14.0",
+    "jupyter==1.0.0",
+    "ipywidgets>=8.1.8",
+    "scikit-learn>=1.7.2",
+]
+
+[tool.uv]
+environments = ["sys_platform == 'linux'"]
+index = [
+    { name = "pytorch-nightly-cu128", url = "https://download.pytorch.org/whl/nightly/cu128", explicit = true },
+    { name = "pytorch-nightly", url = "https://download.pytorch.org/whl/nightly", explicit = true },
+]
+override-dependencies = [
+    "triton; sys_platform == 'linux'",   # strip the git hash pin, accept any version
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-nightly-cu128" }
+torchvision = { index = "pytorch-nightly-cu128" }
+torchaudio = { index = "pytorch-nightly-cu128" }
+triton = { index = "pytorch-nightly" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

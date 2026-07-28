@@ -1,0 +1,111 @@
+CFG = {
+    "seed": 42,
+    "device": "auto",
+    "pcfg": {
+        "chunk_size": 250,
+    },
+    "tokenizer": {
+        "max_length": 512,
+        "mask_answer_only_val": True,
+    },
+    "model": {
+        "block_size": 512,
+        "n_layer": 6,
+        "n_head": 6,
+        "n_embd": 192,
+        "embd_pdrop": 0.1,
+        "resid_pdrop": 0.1,
+        "attn_pdrop": 0.1,
+    },
+    "optimizer": {
+        "type": "AdamW",
+        "weight_decay": 0.0,
+        "betas": [0.9, 0.95],
+        "eps": 1e-8,
+    },
+    "metrics": ["loss", "answer_acc"],
+    "task_definitions": [
+        {"name": "count_a", "type": "count_char", "char": "a", "window": 40},
+        {"name": "count_b", "type": "count_char", "char": "b", "window": 40},
+        {"name": "count_c", "type": "count_char", "char": "c", "window": 40},
+        {"name": "count_aa", "type": "count_comp", "substring": "aa", "window": 40},
+        {"name": "count_bb", "type": "count_comp", "substring": "bb", "window": 40},
+        {"name": "count_cc", "type": "count_comp", "substring": "cc", "window": 40},
+        {"name": "index_a", "type": "index_char", "char": "a", "occurrence": 6},
+        {"name": "index_b", "type": "index_char", "char": "b", "occurrence": 6},
+        {"name": "index_c", "type": "index_char", "char": "c", "occurrence": 6},
+        {"name": "index_aa", "type": "index_comp", "substring": "aa", "occurrence": 6},
+        {"name": "index_bb", "type": "index_comp", "substring": "bb", "occurrence": 6},
+        {"name": "index_cc", "type": "index_comp", "substring": "cc", "occurrence": 6},
+        {"name": "token_at_40", "type": "token_at", "index": 40},
+    ],
+    "task_sets": {
+        "all": [
+            "count_a", "count_b", "count_c",
+            "count_aa", "count_bb", "count_cc",
+            "index_a", "index_b", "index_c",
+            "index_aa", "index_bb", "index_cc",
+            "token_at_40",
+        ],
+        "pretrain": [
+            "count_b", "count_c",
+            "count_aa", "count_bb", "count_cc",
+            "index_a", "index_b", "index_c",
+            "index_aa", "index_bb", "index_cc",
+            "token_at_40",
+        ],
+        "finetune": [
+            "count_a", "count_b", "count_c",
+            "count_aa", "count_bb", "count_cc",
+            "index_a", "index_b", "index_c",
+            "index_aa", "index_bb", "index_cc",
+            "token_at_40",
+        ],
+    },
+    "operand_probs": {
+        "a": 0.34,
+        "b": 0.33,
+        "c": 0.33,
+    },
+    "data": {
+        "val_examples": 500,
+        "eval_per_other_task": 500,
+    },
+    "experiment": {
+        "correlation_values": [0.0, 0.25, 0.5, 0.66, 0.75, 0.85, 0.92, 0.95, 1.0],
+        "concentration_values": [0.1, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98, 1.0],
+        "pretrain_steps": 200000,
+        "pretrain_batch_size": 96,
+        "pretrain_lr": 0.001,
+        "pretrain_min_lr": 0.00001,
+        "pretrain_warmup_ratio": 0.2,
+        "pretrain_log_interval": 1000,
+        "finetune_steps": 10000,
+        "finetune_batch_size": 96,
+        "finetune_lr": 0.00005,
+        "finetune_min_lr": 0.000001,
+        "finetune_warmup_ratio": 0.2,
+        "finetune_log_interval": 200,
+        "reverse_steps": 8000,
+        "reverse_batch_size": 96,
+        "reverse_lr": 0.00005,
+        "reverse_min_lr": 0.0000001,
+        "reverse_warmup_ratio": 0.2,
+        "reverse_log_interval": 200,
+        "max_grad_norm": 1.0,
+    },
+    "pool": {
+        # Number of correlated PCFG strings (count_a == count_b + 1) to pre-generate.
+        # Acceptance rate is ~4 % for 250-char chunks, so this many strings will
+        # require roughly 25x as many raw generations.  50 000 takes ~10 min.
+        "n_correlated": 100000,
+        # Number of uncorrelated (natural) strings.  These are filled as a
+        # by-product of the correlated-pool generation pass at no extra cost.
+        "n_uncorrelated": 100000,
+    },
+    "paths": {
+        "results_dir": "results",
+        "models_dir": "results/models",
+        "histories_dir": "results/histories",
+    },
+}

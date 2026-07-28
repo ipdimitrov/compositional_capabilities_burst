@@ -1,0 +1,16 @@
+torch>=2.0.0
+transformers>=4.35.0
+datasets>=2.14.0
+accelerate>=0.24.0
+wandb
+numpy
+tqdm
+zstandard
+pandas
+scikit-learn
+gdown
+matplotlib
+matplotlib
+lm-eval>=0.4.0
+# bigcode-eval-harness: install from git:
+#   pip install git+https://github.com/bigcode-project/bigcode-evaluation-harness.git

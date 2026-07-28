@@ -1,0 +1,24 @@
+{
+  "new_data_ratio": 1.0,
+  "base_model": "google/gemma-3-1b-pt",
+  "stage2": {
+    "max_seq_len": 512,
+    "min_seq_len": 64,
+    "batch_size": 2,
+    "grad_accum_steps": 10,
+    "num_epochs": 2,
+    "lr": 5e-05,
+    "weight_decay": 0.01,
+    "warmup_steps": 100,
+    "clip_norm": 1.0,
+    "measure_every": 20,
+    "measure_batch_size": 2,
+    "measure_max_batches": 8,
+    "do_intra": true,
+    "intra_pairs": 10,
+    "gsm8k_train_samples": 5000,
+    "gsm8k_val_samples": 500,
+    "safety_probe_samples": 512,
+    "safety_val_samples": 500
+  }
+}

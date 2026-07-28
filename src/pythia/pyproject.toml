@@ -1,0 +1,20 @@
+[project]
+name = "pythia-forgetting"
+version = "0.1.0"
+description = "Catastrophic forgetting experiments on Pythia models"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.35",
+    "datasets>=2.14",
+    "matplotlib>=3.7",
+    "tqdm",
+    "zstandard",
+    "pandas",
+]
+
+[project.optional-dependencies]
+notebook = [
+    "jupyter",
+    "ipywidgets",
+]

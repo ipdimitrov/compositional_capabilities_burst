@@ -1,0 +1,184 @@
+"""Late-layer representation shift analysis between pre- and post-burst models."""
+
+from __future__ import annotations
+
+import pickle
+from typing import TYPE_CHECKING
+
+import numpy as np
+from einops import reduce
+
+from burst.core.activations import collect_activations_KPTN
+from burst.core.train_utils import load_net, mean_ci, resolve_run_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from net.nanogpt import nanoGPT
+
+
+ResultDict = dict[str, object]
+TaskPool = dict[tuple[int, ...], np.ndarray]
+
+
+def build_representation_summary(
+    run_dir: Path,
+    grouped_results: dict[str, list[ResultDict]],
+    n_docs_per_class: int,
+) -> dict[str, object]:
+    """Build per-schedule representation drift metrics from checkpoints."""
+    _cfg_path, logs_dir, _ = resolve_run_paths(run_dir)
+    data_path = logs_dir / "_data.pkl"
+    ckpt_root = logs_dir / "checkpoints"
+    if not data_path.exists() or not ckpt_root.exists():
+        return {}
+
+    with data_path.open("rb") as f:
+        target_pool, bg_pool, *_ = pickle.load(f)  # noqa: S301
+
+    other_docs = subsample_pool(bg_pool, n_docs_per_class, seed=0)
+    burst_docs = subsample_pool(target_pool, n_docs_per_class, seed=1)
+    if other_docs.size == 0 or burst_docs.size == 0:
+        return {}
+
+    by_schedule: dict[str, object] = {}
+    for schedule, runs in grouped_results.items():
+        per_seed = []
+        for run in runs:
+            label = run.get("label")
+            if not label:
+                continue
+            ckpt_dir = ckpt_root / label
+            if not ckpt_dir.exists():
+                continue
+            seed_metrics = representation_for_run(run, ckpt_dir, other_docs, burst_docs)
+            if seed_metrics is not None:
+                per_seed.append(seed_metrics)
+
+        if not per_seed:
+            continue
+
+        agg = {
+            key: mean_ci_payload(np.array([seed[key] for seed in per_seed], dtype=float))
+            for key in (
+                "late_centroid_projection",
+                "late_other_shift_norm",
+                "late_drift_cosine",
+                "late_burst_self_projection",
+                "late_burst_shift_norm",
+                "late_burst_post_norm",
+                "late_burst_pre_norm",
+                "late_other_post_norm",
+                "late_other_pre_norm",
+            )
+        }
+        by_schedule[schedule] = {**agg, "per_seed": per_seed}
+
+    return {"by_schedule": by_schedule}
+
+
+def representation_for_run(
+    run: ResultDict,
+    ckpt_dir: Path,
+    other_docs_BL: np.ndarray,
+    burst_docs_BL: np.ndarray,
+) -> dict[str, float] | None:
+    """Compute representation drift metrics for a single seed run."""
+    ckpt_files = sorted(ckpt_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
+    if not ckpt_files:
+        return None
+
+    step_to_path = {int(path.stem.split("_")[1]): path for path in ckpt_files}
+    available_steps = sorted(step_to_path)
+    peak_step = min(
+        available_steps, key=lambda step: abs(step - (run["config"]["total_steps"] - 1))
+    )
+
+    net_pre = load_net(run["config"], str(step_to_path[available_steps[0]]))
+    net_peak = load_net(run["config"], str(step_to_path[peak_step]))
+
+    other_pre = mean_layer_vectors(net_pre, other_docs_BL)
+    other_peak = mean_layer_vectors(net_peak, other_docs_BL)
+    burst_pre = mean_layer_vectors(net_pre, burst_docs_BL)
+    burst_peak = mean_layer_vectors(net_peak, burst_docs_BL)
+
+    late_indices = late_layer_indices(len(other_pre))
+    centroid_projection_vals = []
+    shift_norm_vals = []
+    drift_cos_vals = []
+    burst_self_projection_vals = []
+    burst_shift_norm_vals = []
+    burst_post_norm_vals = []
+    burst_pre_norm_vals = []
+    other_post_norm_vals = []
+    other_pre_norm_vals = []
+
+    for layer_idx in late_indices:
+        other_drift = other_peak[layer_idx] - other_pre[layer_idx]
+        burst_drift = burst_peak[layer_idx] - burst_pre[layer_idx]
+        burst_norm = float(np.linalg.norm(burst_drift))
+        other_norm = float(np.linalg.norm(other_drift))
+        pre_other_norm = float(np.linalg.norm(other_pre[layer_idx]))
+        pre_burst_norm = float(np.linalg.norm(burst_pre[layer_idx]))
+
+        centroid_projection_vals.append(
+            float(np.dot(other_drift, burst_drift) / (burst_norm + 1e-12))
+        )
+        shift_norm_vals.append(other_norm / (pre_other_norm + 1e-12))
+        drift_cos_vals.append(
+            float(np.dot(other_drift, burst_drift) / ((other_norm * burst_norm) + 1e-12))
+        )
+
+        burst_self_projection_vals.append(burst_norm)
+        burst_shift_norm_vals.append(burst_norm / (pre_burst_norm + 1e-12))
+        burst_post_norm_vals.append(float(np.linalg.norm(burst_peak[layer_idx])))
+        burst_pre_norm_vals.append(pre_burst_norm)
+        other_post_norm_vals.append(float(np.linalg.norm(other_peak[layer_idx])))
+        other_pre_norm_vals.append(pre_other_norm)
+
+    del net_pre, net_peak
+
+    return {
+        "seed": float(run["seed"]),
+        "late_centroid_projection": float(np.mean(centroid_projection_vals)),
+        "late_other_shift_norm": float(np.mean(shift_norm_vals)),
+        "late_drift_cosine": float(np.mean(drift_cos_vals)),
+        "late_burst_self_projection": float(np.mean(burst_self_projection_vals)),
+        "late_burst_shift_norm": float(np.mean(burst_shift_norm_vals)),
+        "late_burst_post_norm": float(np.mean(burst_post_norm_vals)),
+        "late_burst_pre_norm": float(np.mean(burst_pre_norm_vals)),
+        "late_other_post_norm": float(np.mean(other_post_norm_vals)),
+        "late_other_pre_norm": float(np.mean(other_pre_norm_vals)),
+    }
+
+
+def mean_layer_vectors(net: nanoGPT, docs_BL: np.ndarray) -> list[np.ndarray]:
+    """Return mean activation vector per layer, averaged over docs and positions."""
+    activations_KPTN = collect_activations_KPTN(net, docs_BL)
+    return [
+        reduce(activation_PTN, "p t n -> n", "mean").numpy() for activation_PTN in activations_KPTN
+    ]
+
+
+def late_layer_indices(n_layers_total: int) -> list[int]:
+    """Return indices of the last two layers (or fewer if model is small)."""
+    start = max(1, n_layers_total - 2)
+    return list(range(start, n_layers_total))
+
+
+def subsample_pool(pool: TaskPool, n_docs: int, seed: int) -> np.ndarray:
+    """Concatenate and subsample documents from a pool to at most n_docs."""
+    if not pool:
+        return np.zeros((0, 0), dtype=np.int64)
+    docs = np.concatenate(list(pool.values()))
+    if docs.shape[0] <= n_docs:
+        return docs
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(docs.shape[0], size=n_docs, replace=False)
+    return docs[idx]
+
+
+def mean_ci_payload(values: np.ndarray) -> dict[str, float]:
+    """Return {mean, ci} dict with 95% confidence interval."""
+    mean, ci = mean_ci(values)
+    return {"mean": mean, "ci": ci}

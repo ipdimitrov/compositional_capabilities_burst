@@ -1,0 +1,8 @@
+{
+  "model_path": "allenai/OLMo-2-0425-1B",
+  "scores": {
+    "hellaswag": NaN,
+    "humaneval_pass@1": NaN,
+    "mbpp_pass@1": NaN
+  }
+}
